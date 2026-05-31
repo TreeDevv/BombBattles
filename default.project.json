@@ -61,6 +61,9 @@
         "PurchaseReceiptService": {
           "$path": "src/game/ServerScriptService/Services/Economy/PurchaseReceiptService.lua"
         },
+        "RoundService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundService.lua"
+        },
         "TestService": {
           "$path": "src/game/ServerScriptService/Services/Core/TestService.lua"
         }
@@ -81,6 +84,9 @@
           },
           "HUDWindowController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/HUDWindowController.lua"
+          },
+          "RoundController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/RoundController.lua"
           },
           "TestController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/TestController.lua"

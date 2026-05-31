@@ -1,0 +1,14 @@
+[package]
+name = "template/game-template"
+version = "0.1.0"
+registry = "https://github.com/UpliftGames/wally-index"
+realm = "shared"
+private = true
+exclude = ["Packages", "ServerPackages"]
+
+[dependencies]
+ReplicaController = "etheroit/replicacontroller@1.0.0"
+
+[server-dependencies]
+ProfileService = "etheroit/profileservice@1.2.0"
+ReplicaService = "etheroit/replicaservice@1.0.2"

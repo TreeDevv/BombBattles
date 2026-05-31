@@ -1,0 +1,102 @@
+{
+  "name": "GameTemplate",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedFirst": {
+      "$className": "ReplicatedFirst",
+      "$ignoreUnknownInstances": true
+    },
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "$ignoreUnknownInstances": true,
+      "Packages": {
+        "$path": "src/Packages"
+      },
+      "Loader": {
+        "$path": "src/game/ReplicatedStorage/Loader.lua"
+      },
+      "Shared": {
+        "$className": "Folder",
+        "Audio": {
+          "$path": "src/game/ReplicatedStorage/Shared/Presentation/Audio"
+        },
+        "Camera": {
+          "$path": "src/game/ReplicatedStorage/Shared/Presentation/Camera"
+        },
+        "Common": {
+          "$path": "src/game/ReplicatedStorage/Shared/Foundation/Common"
+        },
+        "Config": {
+          "$path": "src/game/ReplicatedStorage/Shared/Config"
+        },
+        "Effects": {
+          "$path": "src/game/ReplicatedStorage/Shared/Presentation/Effects"
+        },
+        "Formatting": {
+          "$path": "src/game/ReplicatedStorage/Shared/Presentation/Formatting"
+        },
+        "UI": {
+          "$path": "src/game/ReplicatedStorage/Shared/Presentation/UI"
+        }
+      }
+    },
+    "ServerScriptService": {
+      "Packages": {
+        "$path": "src/ServerPackages"
+      },
+      "Start": {
+        "$path": "src/game/ServerScriptService/Start.server.lua"
+      },
+      "Services": {
+        "$className": "Folder",
+        "ChatTagService": {
+          "$path": "src/game/ServerScriptService/Services/Social/ChatTagService.lua"
+        },
+        "DataService": {
+          "$path": "src/game/ServerScriptService/Services/Core/DataService"
+        },
+        "DiagnosticsService": {
+          "$path": "src/game/ServerScriptService/Services/Core/DiagnosticsService.lua"
+        },
+        "PurchaseReceiptService": {
+          "$path": "src/game/ServerScriptService/Services/Economy/PurchaseReceiptService.lua"
+        },
+        "TestService": {
+          "$path": "src/game/ServerScriptService/Services/Core/TestService.lua"
+        }
+      }
+    },
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Start": {
+          "$path": "src/game/StarterPlayer/StarterPlayerScripts/Start.client.lua"
+        },
+        "Controllers": {
+          "$className": "Folder",
+          "ChatTagController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Social/ChatTagController.lua"
+          },
+          "DataController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/DataController"
+          },
+          "HUDWindowController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/HUDWindowController.lua"
+          },
+          "TestController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/TestController.lua"
+          },
+          "UIController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/UIController.lua"
+          }
+        }
+      }
+    },
+    "StarterGui": {
+      "$className": "StarterGui",
+      "$ignoreUnknownInstances": true,
+      "HoverClient": {
+        "$path": "src/game/StarterGui/HoverClient"
+      }
+    }
+  }
+}

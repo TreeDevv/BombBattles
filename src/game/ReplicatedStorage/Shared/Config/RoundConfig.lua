@@ -6,6 +6,10 @@ return {
 	RoundSeconds = 180,
 	ResetSeconds = 5,
 	VoteChoiceCount = 3,
+	StudioTesting = {
+		MinPlayers = 1,
+		HoldSoloRoundsActive = true,
+	},
 
 	Teams = {
 		Red = {
@@ -21,6 +25,14 @@ return {
 	Tags = {
 		TeamSpawn = "TeamSpawn",
 		LobbySpawn = "LobbySpawn",
+		TeamCore = "TeamCore",
+	},
+
+	Cores = {
+		MinPerTeam = 1,
+		HealthAttribute = "Health",
+		DestroyedAttribute = "Destroyed",
+		DefaultHealth = 100,
 	},
 
 	MapsFolderPath = { "Assets", "Maps" },

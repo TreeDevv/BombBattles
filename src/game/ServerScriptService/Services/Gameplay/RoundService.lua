@@ -1,6 +1,7 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 local Teams = game:GetService("Teams")
 
@@ -14,6 +15,8 @@ local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
+local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
+local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
 
 local GAME_STATE_TOKEN = ReplicaService.NewClassToken(RoundConfig.Scope)
 
@@ -38,6 +41,8 @@ local alivePlayers: { [Player]: boolean } = {}
 local playerTeams: { [Player]: string } = {}
 local characterConnections: { [Player]: { RBXScriptConnection } } = {}
 local lobbyCharacterConnections: { [Player]: RBXScriptConnection } = {}
+local teamCoreInstances: { [string]: { Instance } } = {}
+local coreConnections: { [Instance]: { RBXScriptConnection } } = {}
 local rng = Random.new()
 
 local function deepCopy(value: any): any
@@ -52,6 +57,29 @@ local function deepCopy(value: any): any
 	return copy
 end
 
+local function getRequiredPlayerCount(): number
+	local studioTesting = RoundConfig.StudioTesting
+	if RunService:IsStudio() and studioTesting and typeof(studioTesting.MinPlayers) == "number" then
+		return math.max(1, studioTesting.MinPlayers)
+	end
+
+	return RoundConfig.MinPlayers
+end
+
+local function isSoloStudioRoundHeldActive(counts): boolean
+	local studioTesting = RoundConfig.StudioTesting
+	if not (RunService:IsStudio() and studioTesting and studioTesting.HoldSoloRoundsActive == true) then
+		return false
+	end
+	if getRequiredPlayerCount() > 1 or #Players:GetPlayers() ~= 1 then
+		return false
+	end
+
+	local red = counts[RoundConfig.Teams.Red.name] or 0
+	local blue = counts[RoundConfig.Teams.Blue.name] or 0
+	return red + blue == 1
+end
+
 local function buildInitialState()
 	return {
 		roundId = 0,
@@ -61,10 +89,18 @@ local function buildInitialState()
 		selectedMapId = "",
 		winnerTeam = "",
 		status = "Waiting for players",
-		minPlayers = RoundConfig.MinPlayers,
+		minPlayers = getRequiredPlayerCount(),
 		aliveCounts = {
 			[RoundConfig.Teams.Red.name] = 0,
 			[RoundConfig.Teams.Blue.name] = 0,
+		},
+		coreCounts = {
+			[RoundConfig.Teams.Red.name] = 0,
+			[RoundConfig.Teams.Blue.name] = 0,
+		},
+		respawnsEnabled = {
+			[RoundConfig.Teams.Red.name] = false,
+			[RoundConfig.Teams.Blue.name] = false,
 		},
 		voteChoices = {},
 		voteCounts = {},
@@ -113,6 +149,7 @@ local function setState(state: string, status: string?, duration: number?)
 	setReplicaValue({ "state" }, state)
 	setReplicaValue({ "status" }, status or state)
 	setReplicaValue({ "endsAt" }, if duration and duration > 0 then workspace:GetServerTimeNow() + duration else 0)
+	setReplicaValue({ "minPlayers" }, getRequiredPlayerCount())
 end
 
 local function setVotingOpen(open: boolean)
@@ -233,6 +270,16 @@ local function getTeamSpawns(teamName: string, map: Instance): { BasePart }
 	return spawns
 end
 
+local function getTeamCores(teamName: string, map: Instance): { Instance }
+	local cores = {}
+	for _, instance in ipairs(CollectionService:GetTagged(RoundConfig.Tags.TeamCore)) do
+		if instance:IsDescendantOf(map) and instance:GetAttribute("Team") == teamName then
+			table.insert(cores, instance)
+		end
+	end
+	return cores
+end
+
 local function getLobbySpawns(): { BasePart }
 	return getTaggedSpawnParts(RoundConfig.Tags.LobbySpawn, nil)
 end
@@ -264,6 +311,16 @@ local function clearPlayerRoundState(player: Player)
 	player.Team = nil
 end
 
+local function disconnectCoreConnections()
+	for _, connections in pairs(coreConnections) do
+		for _, connection in ipairs(connections) do
+			connection:Disconnect()
+		end
+	end
+
+	coreConnections = {}
+end
+
 local function clearAllRoundTracking()
 	for player in pairs(characterConnections) do
 		for _, connection in ipairs(characterConnections[player]) do
@@ -272,9 +329,11 @@ local function clearAllRoundTracking()
 	end
 
 	characterConnections = {}
+	disconnectCoreConnections()
 	roundPlayers = {}
 	alivePlayers = {}
 	playerTeams = {}
+	teamCoreInstances = {}
 	playerVotes = {}
 	voteCounts = {}
 	currentChoices = {}
@@ -298,6 +357,78 @@ end
 
 local function syncAliveCounts()
 	setReplicaValue({ "aliveCounts" }, countAlivePlayers())
+end
+
+local function isCoreAlive(core: Instance): boolean
+	if not core.Parent then
+		return false
+	end
+	if core:GetAttribute(CORE_DESTROYED_ATTR) == true then
+		return false
+	end
+
+	local health = core:GetAttribute(CORE_HEALTH_ATTR)
+	if typeof(health) == "number" and health <= 0 then
+		return false
+	end
+
+	local humanoid = core:FindFirstChildOfClass("Humanoid")
+	if humanoid and humanoid.Health <= 0 then
+		return false
+	end
+
+	return true
+end
+
+local function countAliveCores()
+	local counts = {
+		[RoundConfig.Teams.Red.name] = 0,
+		[RoundConfig.Teams.Blue.name] = 0,
+	}
+
+	for teamName, cores in pairs(teamCoreInstances) do
+		counts[teamName] = counts[teamName] or 0
+		for _, core in ipairs(cores) do
+			if isCoreAlive(core) then
+				counts[teamName] += 1
+			end
+		end
+	end
+
+	return counts
+end
+
+local function buildRespawnState(coreCounts: { [string]: number })
+	local respawnsEnabled = {}
+	for _, teamName in ipairs(TEAM_ORDER) do
+		respawnsEnabled[teamName] = (coreCounts[teamName] or 0) > 0
+	end
+	return respawnsEnabled
+end
+
+local function syncCoreState()
+	local coreCounts = countAliveCores()
+	setReplicaValue({ "coreCounts" }, coreCounts)
+	setReplicaValue({ "respawnsEnabled" }, buildRespawnState(coreCounts))
+end
+
+local function teamHasRespawns(teamName: string?): boolean
+	if not teamName then
+		return false
+	end
+
+	local cores = teamCoreInstances[teamName]
+	if not cores then
+		return false
+	end
+
+	for _, core in ipairs(cores) do
+		if isCoreAlive(core) then
+			return true
+		end
+	end
+
+	return false
 end
 
 local function disconnectCharacterConnections(player: Player)
@@ -332,6 +463,54 @@ local function bindLobbyCharacter(player: Player)
 			movePlayerToLobby(player)
 		end)
 	end)
+end
+
+local function bindCore(core: Instance, map: Instance)
+	local connections = {}
+	coreConnections[core] = connections
+
+	local function onCoreStateChanged()
+		if currentState == RoundStates.Active then
+			syncCoreState()
+		end
+	end
+
+	table.insert(connections, core:GetAttributeChangedSignal(CORE_HEALTH_ATTR):Connect(onCoreStateChanged))
+	table.insert(connections, core:GetAttributeChangedSignal(CORE_DESTROYED_ATTR):Connect(onCoreStateChanged))
+	table.insert(connections, core.AncestryChanged:Connect(function()
+		if not core:IsDescendantOf(map) then
+			onCoreStateChanged()
+		end
+	end))
+
+	local humanoid = core:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		table.insert(connections, humanoid.Died:Connect(onCoreStateChanged))
+		table.insert(connections, humanoid.HealthChanged:Connect(onCoreStateChanged))
+	end
+end
+
+local function setupTeamCores(map: Model): boolean
+	disconnectCoreConnections()
+	teamCoreInstances = {}
+
+	for _, teamName in ipairs(TEAM_ORDER) do
+		local cores = getTeamCores(teamName, map)
+		teamCoreInstances[teamName] = cores
+
+		if #cores < RoundConfig.Cores.MinPerTeam then
+			warn("[RoundService] Missing TeamCore tagged instances for team:", teamName)
+			syncCoreState()
+			return false
+		end
+
+		for _, core in ipairs(cores) do
+			bindCore(core, map)
+		end
+	end
+
+	syncCoreState()
+	return true
 end
 
 local function getWinnerFromAliveCounts(counts): string?
@@ -380,6 +559,28 @@ local function eliminatePlayer(player: Player)
 	end)
 end
 
+local function respawnPlayerInRound(player: Player)
+	player:SetAttribute(ROUND_ALIVE_ATTR, true)
+
+	task.defer(function()
+		if player.Parent == Players and currentState == RoundStates.Active and alivePlayers[player] then
+			player:LoadCharacter()
+		end
+	end)
+end
+
+local function handlePlayerDeath(player: Player)
+	if not alivePlayers[player] then
+		return
+	end
+
+	if teamHasRespawns(playerTeams[player]) then
+		respawnPlayerInRound(player)
+	else
+		eliminatePlayer(player)
+	end
+end
+
 local function bindCharacter(player: Player)
 	disconnectCharacterConnections(player)
 	characterConnections[player] = {}
@@ -392,7 +593,7 @@ local function bindCharacter(player: Player)
 
 		table.insert(characterConnections[player], humanoid.Died:Connect(function()
 			if currentState == RoundStates.Active then
-				eliminatePlayer(player)
+				handlePlayerDeath(player)
 			end
 		end))
 	end
@@ -577,12 +778,13 @@ local function createNewRound()
 	setReplicaValue({ "selectedMapId" }, "")
 	setWinner("")
 	syncAliveCounts()
+	syncCoreState()
 end
 
 local function waitForSecondsOrInvalid(seconds: number, requireMinPlayers: boolean): boolean
 	local deadline = os.clock() + seconds
 	while os.clock() < deadline do
-		if requireMinPlayers and #Players:GetPlayers() < RoundConfig.MinPlayers then
+		if requireMinPlayers and #Players:GetPlayers() < getRequiredPlayerCount() then
 			return false
 		end
 		task.wait(0.2)
@@ -601,8 +803,13 @@ local function runActiveRound()
 	local deadline = os.clock() + RoundConfig.RoundSeconds
 
 	while os.clock() < deadline do
-		local winner = getWinnerFromAliveCounts(countAlivePlayers())
+		local aliveCounts = countAlivePlayers()
+		local winner = getWinnerFromAliveCounts(aliveCounts)
 		if winner then
+			if isSoloStudioRoundHeldActive(aliveCounts) then
+				task.wait(0.2)
+				continue
+			end
 			endRound(winner)
 			return
 		end
@@ -621,6 +828,7 @@ local function resetRound()
 	setVotingOpen(false)
 	syncVoteChoices()
 	syncAliveCounts()
+	syncCoreState()
 end
 
 local function cancelToWaiting(reason: string)
@@ -631,7 +839,8 @@ end
 
 local function runRoundLoop()
 	while running do
-		if #Players:GetPlayers() < RoundConfig.MinPlayers then
+		local requiredPlayerCount = getRequiredPlayerCount()
+		if #Players:GetPlayers() < requiredPlayerCount then
 			setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
 			setVotingOpen(false)
 			task.wait(1)
@@ -674,7 +883,7 @@ local function runRoundLoop()
 		setState(RoundStates.AssigningTeams, "Assigning teams", 0)
 
 		local roster = getEligiblePlayers()
-		if #roster < RoundConfig.MinPlayers then
+		if #roster < getRequiredPlayerCount() then
 			cancelToWaiting("Round cancelled because roster is below minimum")
 			continue
 		end
@@ -686,7 +895,7 @@ local function runRoundLoop()
 
 		setState(RoundStates.RoundStarting, "Round starting", 0)
 		local map = spawnActiveMap(selectedMapId)
-		if not map or not teleportTeamsToMap(map) then
+		if not map or not setupTeamCores(map) or not teleportTeamsToMap(map) then
 			cancelToWaiting("Round cancelled because map setup is incomplete")
 			continue
 		end
@@ -766,6 +975,74 @@ end
 
 function RoundService:IsPlayerActive(player: Player): boolean
 	return currentState == RoundStates.Active and alivePlayers[player] == true
+end
+
+function RoundService:GetCoreCounts()
+	return countAliveCores()
+end
+
+function RoundService:MarkCoreDestroyed(core: Instance): boolean
+	local trackedCore = self:GetTrackedCore(core)
+	if not trackedCore then
+		return false
+	end
+
+	trackedCore:SetAttribute(CORE_HEALTH_ATTR, 0)
+	trackedCore:SetAttribute(CORE_DESTROYED_ATTR, true)
+	syncCoreState()
+	return true
+end
+
+function RoundService:DamageCore(core: Instance, damage: number): boolean
+	if currentState ~= RoundStates.Active then
+		return false
+	end
+	if typeof(damage) ~= "number" or damage <= 0 then
+		return false
+	end
+
+	local trackedCore = self:GetTrackedCore(core)
+	if not trackedCore or not isCoreAlive(trackedCore) then
+		return false
+	end
+
+	local humanoid = trackedCore:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid:TakeDamage(damage)
+		syncCoreState()
+		return true
+	end
+
+	local health = trackedCore:GetAttribute(CORE_HEALTH_ATTR)
+	if typeof(health) ~= "number" then
+		health = RoundConfig.Cores.DefaultHealth
+	end
+
+	health -= damage
+	trackedCore:SetAttribute(CORE_HEALTH_ATTR, math.max(health, 0))
+	if health <= 0 then
+		trackedCore:SetAttribute(CORE_DESTROYED_ATTR, true)
+	end
+
+	syncCoreState()
+	return true
+end
+
+function RoundService:GetTrackedCore(instance: Instance): Instance?
+	local current: Instance? = instance
+	while current do
+		if CollectionService:HasTag(current, RoundConfig.Tags.TeamCore) then
+			for _, cores in pairs(teamCoreInstances) do
+				if table.find(cores, current) then
+					return current
+				end
+			end
+		end
+
+		current = current.Parent
+	end
+
+	return nil
 end
 
 return RoundService

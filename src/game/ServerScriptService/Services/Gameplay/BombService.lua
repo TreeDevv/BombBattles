@@ -5,6 +5,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local DestructionService = require(ServerScriptService.Services.DestructionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
 local REMOTES_FOLDER_NAME = "Remotes"
@@ -338,6 +339,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		return
 	end
 
+	DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius)
 	damageEnemyPlayers(owner, position)
 	damageEnemyAnchors(owner, position)
 end

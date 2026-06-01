@@ -7,6 +7,7 @@ local Teams = game:GetService("Teams")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local DestructionService = require(ServerScriptService.Services.DestructionService)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 
 local TEAM_ORDER = { RoundConfig.Teams.Red.name, RoundConfig.Teams.Blue.name }
@@ -822,6 +823,7 @@ end
 local function resetRound()
 	setState(RoundStates.Resetting, "Resetting", 0)
 	resetPlayersToLobby()
+	DestructionService:Cleanup()
 	clearActiveMap()
 	clearAllRoundTracking()
 	setReplicaValue({ "selectedMapId" }, "")

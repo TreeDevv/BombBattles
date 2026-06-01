@@ -10,7 +10,11 @@
       "$className": "ReplicatedStorage",
       "$ignoreUnknownInstances": true,
       "Packages": {
-        "$path": "src/Packages"
+        "$className": "Folder",
+        "$path": "src/Packages",
+        "VoxManager": {
+          "$path": "src/game/ReplicatedStorage/Packages/VoxManager"
+        }
       },
       "Loader": {
         "$path": "src/game/ReplicatedStorage/Loader.lua"
@@ -51,6 +55,9 @@
         "$className": "Folder",
         "BombService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombService.lua"
+        },
+        "DestructionService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/DestructionService.lua"
         },
         "ChatTagService": {
           "$path": "src/game/ServerScriptService/Services/Social/ChatTagService.lua"

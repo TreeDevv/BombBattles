@@ -56,6 +56,9 @@
         "BombService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombService.lua"
         },
+        "CharacterAbilityService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/CharacterAbilityService.lua"
+        },
         "DestructionService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/DestructionService.lua"
         },

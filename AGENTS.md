@@ -57,9 +57,10 @@ This project is intentionally code-first for Rojo ownership. `GameAssets` and wo
 ## Default Workflow
 
 1. Inspect the relevant local code and Studio state.
-2. Make script and code changes locally in the Rojo project.
-3. Use Studio MCP for assets, hierarchy changes, property changes, and playtesting.
-4. Keep ownership clean so the same content is not being managed from both places.
+2. For requested systems, behavior changes, Roblox engine issues, or unfamiliar implementation details, search online for related Roblox DevForum and Reddit threads before committing to an approach.
+3. Make script and code changes locally in the Rojo project.
+4. Use Studio MCP for assets, hierarchy changes, property changes, and playtesting.
+5. Keep ownership clean so the same content is not being managed from both places.
 
 ## Current Source Layout
 

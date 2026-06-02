@@ -56,7 +56,8 @@ function Cache:_GetNew(Amount: number, Warn: boolean)
 	workspace:BulkMoveTo(TargetParts, TargetCFrames, Enum.BulkMoveMode.FireCFrameChanged)
 
 	for _, Object in AddedObjects do
-		(Object :: Instance).Parent = CacheHolder
+		local ObjectInstance = Object :: Instance
+		ObjectInstance.Parent = CacheHolder
 	end
 
 	return table.remove(FreeObjectsContainer)
@@ -167,7 +168,8 @@ function Constructor.new(Template: BasePart | Model, CacheSize: number?, CachesC
 		TargetParts[Index] = ObjectRoot
 
 		ObjectRoot.CFrame = FAR_AWAY_CFRAME
-		(Object :: Instance).Parent = CacheParent
+		local ObjectInstance = Object :: Instance
+		ObjectInstance.Parent = CacheParent
 	end
 
 	CacheParent.Parent = CachesContainer or workspace

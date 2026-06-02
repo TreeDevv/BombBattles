@@ -8,17 +8,23 @@ local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesCharacterAnimationController"
 local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 3
 local CHARACTER_LOOKUP_TIMEOUT = 5
+local NEVER = -math.huge
+local RISKY_TRACKS = { "Land", "Slide", "Jump", "DoubleJump" }
 
 type TrackName =
 	"Idle"
-	| "IdleFlourish"
 	| "WalkBack"
 	| "WalkForward"
 	| "RunForward"
-	| "WalkStopForward"
+	| "WalkLeft"
+	| "WalkRight"
 	| "Jump"
 	| "DoubleJump"
 	| "Fall"
+	| "Land"
+	| "CrouchIdle"
+	| "CrouchWalk"
+	| "Slide"
 type TrackMap = { [TrackName]: AnimationTrack }
 
 local LOOPED_TRACKS = {
@@ -26,7 +32,11 @@ local LOOPED_TRACKS = {
 	WalkBack = true,
 	WalkForward = true,
 	RunForward = true,
+	WalkLeft = true,
+	WalkRight = true,
 	Fall = true,
+	CrouchIdle = true,
+	CrouchWalk = true,
 }
 
 local CharacterAnimationController = {}
@@ -43,9 +53,9 @@ CharacterAnimationController._animations = {} :: { Animation }
 CharacterAnimationController._lastJumpSerial = 0
 CharacterAnimationController._wasGrounded = true
 CharacterAnimationController._airborneStartTime = nil :: number?
-CharacterAnimationController._wasUsingForwardLocomotion = false
-CharacterAnimationController._forwardLocomotionStartTime = nil :: number?
-CharacterAnimationController._nextIdleFlourishTime = nil :: number?
+CharacterAnimationController._wasSliding = false
+CharacterAnimationController._rootGuardUntil = NEVER
+CharacterAnimationController._lastDebugLogTimes = {} :: { [string]: number }
 
 local function waitForBasePart(parent: Instance, name: string, timeoutSeconds: number): BasePart?
 	local child = parent:WaitForChild(name, timeoutSeconds)
@@ -159,8 +169,85 @@ local function getTrackSpeedMultiplier(trackName: TrackName): number
 	return 1
 end
 
-local function getIdleFlourishDelay(): number
-	return Random.new():NextNumber(AnimationConfig.IdleFlourishMinDelay, AnimationConfig.IdleFlourishMaxDelay)
+local function getTrackWeight(trackName: TrackName): number
+	local config = AnimationConfig.Animations[trackName]
+	if config and typeof(config.Weight) == "number" then
+		return math.clamp(config.Weight, 0, 1)
+	end
+
+	return 1
+end
+
+local function isRiskyTrackEnabled(trackName: string): boolean
+	local toggles = AnimationConfig.DebugRiskyTrackEnabled
+	return not (typeof(toggles) == "table" and toggles[trackName] == false)
+end
+
+local function readTrackNumber(track: AnimationTrack, propertyName: string): number?
+	local ok, value = pcall(function()
+		return track[propertyName]
+	end)
+
+	return if ok and typeof(value) == "number" then value else nil
+end
+
+local function getRootAngles(rootPart: BasePart?): (number, number, number)
+	if not rootPart then
+		return 0, 0, 0
+	end
+
+	local pitch, yaw, roll = rootPart.CFrame:ToOrientation()
+	return math.deg(pitch), math.deg(roll), math.deg(yaw)
+end
+
+local function formatNumber(value: number?): string
+	if typeof(value) ~= "number" then
+		return "?"
+	end
+
+	return string.format("%.2f", value)
+end
+
+local function getTrackSummary(track: AnimationTrack?): string
+	if not track then
+		return "track=nil"
+	end
+
+	local weight = readTrackNumber(track, "WeightCurrent")
+	local targetWeight = readTrackNumber(track, "WeightTarget")
+	local speed = readTrackNumber(track, "Speed")
+	return string.format(
+		"playing=%s weight=%s target=%s speed=%s priority=%s",
+		tostring(track.IsPlaying),
+		formatNumber(weight),
+		formatNumber(targetWeight),
+		formatNumber(speed),
+		track.Priority.Name
+	)
+end
+
+local function getHumanoidStateName(humanoid: Humanoid?): string
+	if not humanoid then
+		return "?"
+	end
+
+	local ok, state = pcall(function()
+		return humanoid:GetState()
+	end)
+
+	return if ok then state.Name else "?"
+end
+
+local function getActiveRiskyTrackSummary(tracks: TrackMap): string
+	local summaries = {}
+	for _, name in ipairs(RISKY_TRACKS) do
+		local track = tracks[name]
+		if track and track.IsPlaying then
+			table.insert(summaries, name .. "{" .. getTrackSummary(track) .. "}")
+		end
+	end
+
+	return if #summaries > 0 then table.concat(summaries, "; ") else "none"
 end
 
 local function ensureLoopPlaying(track: AnimationTrack)
@@ -211,18 +298,114 @@ function CharacterAnimationController:_getLocalMoveDirection(): Vector3
 	return rootPart.CFrame:VectorToObjectSpace(self:_getWorldMoveDirection())
 end
 
+function CharacterAnimationController:_setDebugAttributes(eventName: string, trackName: string?, pitch: number, roll: number)
+	local character = self._character
+	if not character then
+		return
+	end
+
+	character:SetAttribute("Animation_DebugLastEvent", eventName)
+	character:SetAttribute("Animation_DebugLastRootPitch", pitch)
+	character:SetAttribute("Animation_DebugLastRootRoll", roll)
+	character:SetAttribute("Animation_DebugLastTrack", trackName or "")
+end
+
+function CharacterAnimationController:_logDebug(eventName: string, trackName: string?, force: boolean?)
+	if not AnimationConfig.DebugTransitionsEnabled then
+		return
+	end
+
+	local now = os.clock()
+	local key = eventName .. ":" .. (trackName or "")
+	local cooldown = AnimationConfig.DebugLogCooldownSeconds or 0
+	if not force and now - (self._lastDebugLogTimes[key] or NEVER) < cooldown then
+		return
+	end
+	self._lastDebugLogTimes[key] = now
+
+	local character = self._character
+	local rootPart = self._rootPart
+	local pitch, roll, yaw = getRootAngles(rootPart)
+	local velocityY = if rootPart then rootPart.AssemblyLinearVelocity.Y else 0
+	local angularVelocity = if rootPart then rootPart.AssemblyAngularVelocity.Magnitude else 0
+	self:_setDebugAttributes(eventName, trackName, pitch, roll)
+
+	warn(string.format(
+		"[AnimationDebug] event=%s track=%s grounded=%s sliding=%s crouching=%s sprinting=%s pitch=%.1f roll=%.1f yaw=%.1f velY=%.1f angVel=%.2f humanoid=%s active=%s focus={%s}",
+		eventName,
+		trackName or "",
+		tostring(character and character:GetAttribute("Movement_Grounded") == true),
+		tostring(character and character:GetAttribute("Movement_Sliding") == true),
+		tostring(character and character:GetAttribute("Movement_Crouching") == true),
+		tostring(character and character:GetAttribute("Movement_Sprinting") == true),
+		pitch,
+		roll,
+		yaw,
+		velocityY,
+		angularVelocity,
+		getHumanoidStateName(self._humanoid),
+		getActiveRiskyTrackSummary(self._tracks),
+		getTrackSummary(if trackName then self._tracks[trackName] else nil)
+	))
+end
+
+function CharacterAnimationController:_markRiskyTransition(eventName: string, trackName: TrackName?)
+	if trackName then
+		self._rootGuardUntil = math.max(self._rootGuardUntil, os.clock() + AnimationConfig.RootUprightGuardWindowSeconds)
+	end
+
+	self:_logDebug(eventName, trackName, true)
+end
+
+function CharacterAnimationController:_updateRootGuard(now: number)
+	if not AnimationConfig.RootUprightGuardEnabled or now > self._rootGuardUntil then
+		return
+	end
+
+	local rootPart = self._rootPart
+	if not rootPart then
+		return
+	end
+
+	local pitch, roll, yaw = getRootAngles(rootPart)
+	local threshold = AnimationConfig.DebugRootTiltThresholdDegrees or 12
+	if math.max(math.abs(pitch), math.abs(roll)) < threshold then
+		return
+	end
+
+	self:_setDebugAttributes("root-guard-corrected", nil, pitch, roll)
+	warn(string.format(
+		"[AnimationDebug] event=root-guard-corrected pitch=%.1f roll=%.1f yaw=%.1f threshold=%.1f active=%s",
+		pitch,
+		roll,
+		yaw,
+		threshold,
+		getActiveRiskyTrackSummary(self._tracks)
+	))
+	rootPart.CFrame = CFrame.new(rootPart.Position) * CFrame.Angles(0, math.rad(yaw), 0)
+	rootPart.AssemblyAngularVelocity = Vector3.zero
+end
+
 function CharacterAnimationController:_playOneShot(name: TrackName, fadeTime: number?, weight: number?)
 	local track = self._tracks[name]
 	if not track then
 		return
 	end
 
+	if not isRiskyTrackEnabled(name) then
+		self:_markRiskyTransition("skip-disabled", name)
+		return
+	end
+
+	self:_markRiskyTransition("play-before", name)
+
 	if track.IsPlaying then
 		track:Stop(0)
 	end
 
-	track:Play(fadeTime or AnimationConfig.OneShotFadeTime, weight or 1, 1)
+	track:Play(fadeTime or AnimationConfig.OneShotFadeTime, weight or getTrackWeight(name), 1)
 	track:AdjustSpeed(getTrackSpeedMultiplier(name))
+	self:_markRiskyTransition("play-after", name)
 end
 
 function CharacterAnimationController:_updateJumpOneShots(character: Model)
@@ -232,7 +415,6 @@ function CharacterAnimationController:_updateJumpOneShots(character: Model)
 	end
 
 	self._lastJumpSerial = jumpSerial
-	self:_stopIdleFlourish()
 
 	local jumpKind = readStringAttribute(character, "Movement_LastJumpKind")
 	if jumpKind == "DoubleJump" then
@@ -242,41 +424,16 @@ function CharacterAnimationController:_updateJumpOneShots(character: Model)
 	end
 end
 
-function CharacterAnimationController:_stopIdleFlourish()
-	local track = self._tracks.IdleFlourish
-	if track and track.IsPlaying then
-		track:Stop(AnimationConfig.IdleFlourishFadeTime)
-	end
-end
-
-function CharacterAnimationController:_scheduleIdleFlourish(now: number)
-	self._nextIdleFlourishTime = now + getIdleFlourishDelay()
-end
-
-function CharacterAnimationController:_updateIdle(now: number, isIdle: boolean)
+function CharacterAnimationController:_updateIdle(isIdle: boolean)
 	setTrackWeight(self._tracks.Idle, if isIdle then 1 else 0, AnimationConfig.IdleFadeTime)
-
-	if not isIdle then
-		self._nextIdleFlourishTime = nil
-		self:_stopIdleFlourish()
-		return
-	end
-
-	if not self._nextIdleFlourishTime then
-		self:_scheduleIdleFlourish(now)
-		return
-	end
-
-	local flourishTrack = self._tracks.IdleFlourish
-	if now >= self._nextIdleFlourishTime and not (flourishTrack and flourishTrack.IsPlaying) then
-		self:_playOneShot("IdleFlourish", AnimationConfig.IdleFlourishFadeTime)
-		self:_scheduleIdleFlourish(now)
-	end
 end
 
 function CharacterAnimationController:_updateAirState(now: number, isGrounded: boolean, velocityY: number)
 	if isGrounded then
 		self._airborneStartTime = nil
+		if not self._wasGrounded then
+			self:_playOneShot("Land", AnimationConfig.LandingFadeTime)
+		end
 		setTrackWeight(self._tracks.Fall, 0, AnimationConfig.LandingFadeTime)
 		return
 	end
@@ -291,23 +448,52 @@ function CharacterAnimationController:_updateAirState(now: number, isGrounded: b
 end
 
 function CharacterAnimationController:_updateGroundLocomotion(character: Model, isGrounded: boolean)
-	local now = os.clock()
 	local effectiveSpeed = readNumberAttribute(character, "Movement_EffectiveSpeed")
 	local moveMagnitude = readNumberAttribute(character, "Movement_MoveMagnitude")
 	local isSprinting = character:GetAttribute("Movement_Sprinting") == true
+	local isCrouching = character:GetAttribute("Movement_Crouching") == true
+	local isSliding = character:GetAttribute("Movement_Sliding") == true
 	local hasMoveInput = isGrounded and moveMagnitude >= AnimationConfig.MinMoveMagnitude
 	local localMoveDirection = self:_getLocalMoveDirection()
-	local isBackward = localMoveDirection.Z > AnimationConfig.BackwardThreshold
-	local usesForwardStop = hasMoveInput and not isBackward and localMoveDirection.Z < AnimationConfig.ForwardStopThreshold
 
 	local walkBackWeight = 0
 	local walkForwardWeight = 0
 	local runForwardWeight = 0
+	local walkLeftWeight = 0
+	local walkRightWeight = 0
+	local crouchIdleWeight = 0
+	local crouchWalkWeight = 0
 
-	if hasMoveInput then
-		if isBackward then
-			walkBackWeight = 1
+	if isGrounded and isSliding then
+		crouchWalkWeight = AnimationConfig.SlideBaseCrouchWalkWeight
+		if not self._wasSliding then
+			self:_playOneShot("Slide", AnimationConfig.SlideFadeTime)
+		end
+	elseif self._wasSliding then
+		local slideTrack = self._tracks.Slide
+		if slideTrack and slideTrack.IsPlaying then
+			slideTrack:Stop(AnimationConfig.SlideFadeTime)
+		end
+	elseif isGrounded and isCrouching then
+		if hasMoveInput then
+			crouchWalkWeight = 1
 		else
+			crouchIdleWeight = 1
+		end
+	elseif hasMoveInput then
+		local forwardAmount = math.max(-localMoveDirection.Z, 0)
+		local backAmount = math.max(localMoveDirection.Z, 0)
+		local leftAmount = math.max(-localMoveDirection.X, 0)
+		local rightAmount = math.max(localMoveDirection.X, 0)
+		local totalAmount = math.max(forwardAmount + backAmount + leftAmount + rightAmount, 1)
+
+		walkBackWeight = backAmount / totalAmount
+		walkForwardWeight = forwardAmount / totalAmount
+		walkLeftWeight = leftAmount / totalAmount
+		walkRightWeight = rightAmount / totalAmount
+
+		local forwardDominant = forwardAmount >= math.max(backAmount, leftAmount, rightAmount)
+		if forwardDominant and walkForwardWeight > 0 then
 			local runAlpha = 0
 			if isSprinting then
 				runAlpha = 1
@@ -319,19 +505,18 @@ function CharacterAnimationController:_updateGroundLocomotion(character: Model, 
 				)
 			end
 
-			walkForwardWeight = 1 - runAlpha
-			runForwardWeight = runAlpha
-		end
-	elseif isGrounded and self._wasUsingForwardLocomotion then
-		local forwardMoveTime = if self._forwardLocomotionStartTime then now - self._forwardLocomotionStartTime else 0
-		if forwardMoveTime >= AnimationConfig.MinForwardStopMoveTime then
-			self:_playOneShot("WalkStopForward", AnimationConfig.StopFadeTime, AnimationConfig.StopWeight)
+			runForwardWeight = walkForwardWeight * runAlpha
+			walkForwardWeight *= 1 - runAlpha
 		end
 	end
 
 	setTrackWeight(self._tracks.WalkBack, walkBackWeight, AnimationConfig.LocomotionFadeTime)
 	setTrackWeight(self._tracks.WalkForward, walkForwardWeight, AnimationConfig.LocomotionFadeTime)
 	setTrackWeight(self._tracks.RunForward, runForwardWeight, AnimationConfig.LocomotionFadeTime)
+	setTrackWeight(self._tracks.WalkLeft, walkLeftWeight, AnimationConfig.LocomotionFadeTime)
+	setTrackWeight(self._tracks.WalkRight, walkRightWeight, AnimationConfig.LocomotionFadeTime)
+	setTrackWeight(self._tracks.CrouchIdle, crouchIdleWeight, AnimationConfig.CrouchFadeTime)
+	setTrackWeight(self._tracks.CrouchWalk, crouchWalkWeight, AnimationConfig.CrouchFadeTime)
 
 	if self._tracks.WalkBack then
 		self._tracks.WalkBack:AdjustSpeed(
@@ -348,17 +533,24 @@ function CharacterAnimationController:_updateGroundLocomotion(character: Model, 
 			getPlaybackSpeed(effectiveSpeed, AnimationConfig.RunSpeedReference, getTrackSpeedMultiplier("RunForward"))
 		)
 	end
-
-	if usesForwardStop then
-		if not self._wasUsingForwardLocomotion then
-			self._forwardLocomotionStartTime = now
-		end
-	else
-		self._forwardLocomotionStartTime = nil
+	if self._tracks.WalkLeft then
+		self._tracks.WalkLeft:AdjustSpeed(
+			getPlaybackSpeed(effectiveSpeed, AnimationConfig.WalkSpeedReference, getTrackSpeedMultiplier("WalkLeft"))
+		)
+	end
+	if self._tracks.WalkRight then
+		self._tracks.WalkRight:AdjustSpeed(
+			getPlaybackSpeed(effectiveSpeed, AnimationConfig.WalkSpeedReference, getTrackSpeedMultiplier("WalkRight"))
+		)
+	end
+	if self._tracks.CrouchWalk then
+		self._tracks.CrouchWalk:AdjustSpeed(
+			getPlaybackSpeed(effectiveSpeed, AnimationConfig.CrouchSpeedReference, getTrackSpeedMultiplier("CrouchWalk"))
+		)
 	end
 
-	self._wasUsingForwardLocomotion = usesForwardStop
-	return isGrounded and not hasMoveInput
+	self._wasSliding = isGrounded and isSliding
+	return isGrounded and not hasMoveInput and not isCrouching and not isSliding
 end
 
 function CharacterAnimationController:_step()
@@ -375,8 +567,9 @@ function CharacterAnimationController:_step()
 
 	self:_updateJumpOneShots(character)
 	local isIdle = self:_updateGroundLocomotion(character, isGrounded)
-	self:_updateIdle(now, isIdle)
+	self:_updateIdle(isIdle)
 	self:_updateAirState(now, isGrounded, velocityY)
+	self:_updateRootGuard(now)
 	self._wasGrounded = isGrounded
 end
 
@@ -398,9 +591,9 @@ function CharacterAnimationController:_unbindCharacter()
 	self._lastJumpSerial = 0
 	self._wasGrounded = true
 	self._airborneStartTime = nil
-	self._wasUsingForwardLocomotion = false
-	self._forwardLocomotionStartTime = nil
-	self._nextIdleFlourishTime = nil
+	self._wasSliding = false
+	self._rootGuardUntil = NEVER
+	self._lastDebugLogTimes = {}
 end
 
 function CharacterAnimationController:_loadTracks(animator: Animator): TrackMap
@@ -449,9 +642,9 @@ function CharacterAnimationController:_bindCharacter(character: Model)
 	self._lastJumpSerial = readNumberAttribute(character, "Movement_JumpSerial")
 	self._wasGrounded = true
 	self._airborneStartTime = nil
-	self._wasUsingForwardLocomotion = false
-	self._forwardLocomotionStartTime = nil
-	self._nextIdleFlourishTime = nil
+	self._wasSliding = false
+	self._rootGuardUntil = NEVER
+	self._lastDebugLogTimes = {}
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function()
 		self:_step()

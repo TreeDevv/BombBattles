@@ -38,7 +38,7 @@ BombController._holding = false
 BombController._previewing = false
 BombController._releasePending = false
 BombController._releaseFallbackSerial = 0
-BombController._chargeSerial = 0
+BombController._lastDebugLogTimes = {} :: { [string]: number }
 
 local function getRemote(name: string): RemoteEvent?
 	local remotes = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, 10)
@@ -98,6 +98,60 @@ local function getAnimator(character: Model): Animator?
 	animator = Instance.new("Animator")
 	animator.Parent = humanoid
 	return animator
+end
+
+local function getBombTrackWeight(name: string): number
+	local config = AnimationConfig.BombAnimations[name]
+	if config and typeof(config.Weight) == "number" then
+		return math.clamp(config.Weight, 0, 1)
+	end
+
+	return 1
+end
+
+local function isBombTrackEnabled(name: string): boolean
+	local toggles = AnimationConfig.DebugRiskyTrackEnabled
+	return not (typeof(toggles) == "table" and toggles[name] == false)
+end
+
+local function readTrackNumber(track: AnimationTrack, propertyName: string): number?
+	local ok, value = pcall(function()
+		return track[propertyName]
+	end)
+
+	return if ok and typeof(value) == "number" then value else nil
+end
+
+local function getRootAngles(rootPart: BasePart?): (number, number, number)
+	if not rootPart then
+		return 0, 0, 0
+	end
+
+	local pitch, yaw, roll = rootPart.CFrame:ToOrientation()
+	return math.deg(pitch), math.deg(roll), math.deg(yaw)
+end
+
+local function formatNumber(value: number?): string
+	if typeof(value) ~= "number" then
+		return "?"
+	end
+
+	return string.format("%.2f", value)
+end
+
+local function getTrackSummary(track: AnimationTrack?): string
+	if not track then
+		return "track=nil"
+	end
+
+	return string.format(
+		"playing=%s weight=%s target=%s speed=%s priority=%s",
+		tostring(track.IsPlaying),
+		formatNumber(readTrackNumber(track, "WeightCurrent")),
+		formatNumber(readTrackNumber(track, "WeightTarget")),
+		formatNumber(readTrackNumber(track, "Speed")),
+		track.Priority.Name
+	)
 end
 
 local function createPreviewPoint(index: number): BasePart
@@ -196,7 +250,6 @@ function BombController:_clearBombAnimationState()
 	self._holding = false
 	self._releasePending = false
 	self._releaseFallbackSerial += 1
-	self._chargeSerial += 1
 	self:_disconnectReleaseMarker()
 	self:_disconnectAnimationConnections()
 	self:_stopBombTracks()
@@ -212,6 +265,7 @@ function BombController:_destroyBombAnimations()
 	self._animationObjects = {}
 	self._bombTracks = {}
 	self._animator = nil
+	self._lastDebugLogTimes = {}
 end
 
 function BombController:_loadBombAnimations(character: Model)
@@ -239,9 +293,62 @@ function BombController:_loadBombAnimations(character: Model)
 	end
 end
 
+function BombController:_setDebugAttributes(eventName: string, trackName: string?, pitch: number, roll: number)
+	local character = LocalPlayer.Character
+	if not character then
+		return
+	end
+
+	character:SetAttribute("Animation_DebugLastEvent", eventName)
+	character:SetAttribute("Animation_DebugLastRootPitch", pitch)
+	character:SetAttribute("Animation_DebugLastRootRoll", roll)
+	character:SetAttribute("Animation_DebugLastTrack", trackName or "")
+end
+
+function BombController:_logDebug(eventName: string, trackName: string?, force: boolean?)
+	if not AnimationConfig.DebugTransitionsEnabled then
+		return
+	end
+
+	local now = os.clock()
+	local key = eventName .. ":" .. (trackName or "")
+	local cooldown = AnimationConfig.DebugLogCooldownSeconds or 0
+	if not force and now - (self._lastDebugLogTimes[key] or -math.huge) < cooldown then
+		return
+	end
+	self._lastDebugLogTimes[key] = now
+
+	local rootPart = getRootPart()
+	local pitch, roll, yaw = getRootAngles(rootPart)
+	local velocityY = if rootPart then rootPart.AssemblyLinearVelocity.Y else 0
+	local angularVelocity = if rootPart then rootPart.AssemblyAngularVelocity.Magnitude else 0
+	local track = if trackName then self._bombTracks[trackName] else nil
+	self:_setDebugAttributes(eventName, trackName, pitch, roll)
+
+	warn(string.format(
+		"[AnimationDebug] event=%s track=%s holding=%s cooking=%s releasePending=%s pitch=%.1f roll=%.1f yaw=%.1f velY=%.1f angVel=%.2f focus={%s}",
+		eventName,
+		trackName or "",
+		tostring(self._holding),
+		tostring(isCooking()),
+		tostring(self._releasePending),
+		pitch,
+		roll,
+		yaw,
+		velocityY,
+		angularVelocity,
+		getTrackSummary(track)
+	))
+end
+
 function BombController:_playTrack(name: string): AnimationTrack?
 	local track = self._bombTracks[name]
 	if not track then
+		return nil
+	end
+
+	if not isBombTrackEnabled(name) then
+		self:_logDebug("bomb-skip-disabled", name, true)
 		return nil
 	end
 
@@ -249,41 +356,41 @@ function BombController:_playTrack(name: string): AnimationTrack?
 		track:Stop(0)
 	end
 
-	track:Play(AnimationConfig.BombAnimationFadeTime, 1, 1)
+	self:_logDebug("bomb-play-before", name, true)
+	track:Play(AnimationConfig.BombAnimationFadeTime, getBombTrackWeight(name), 1)
+	track:AdjustSpeed(1)
+	self:_logDebug("bomb-play-after", name, true)
 	return track
 end
 
-function BombController:_playHold()
-	local holdTrack = self._bombTracks.Hold
-	if not holdTrack then
-		return
-	end
-
-	if not holdTrack.IsPlaying then
-		holdTrack:Play(AnimationConfig.BombAnimationFadeTime, 1, 1)
-	end
-	holdTrack:AdjustWeight(1, AnimationConfig.BombAnimationFadeTime)
+function BombController:_connectThrowMarker(track: AnimationTrack)
+	self:_disconnectReleaseMarker()
+	self._releaseMarkerConnection = track:GetMarkerReachedSignal(AnimationConfig.BombThrowMarkerName):Connect(function()
+		self:_logDebug("bomb-throw-marker", "Throw", true)
+		self:_fireReleaseFromAnimation()
+	end)
 end
 
-function BombController:_playCharge()
-	self._chargeSerial += 1
-	local serial = self._chargeSerial
-	local chargeTrack = self:_playTrack("Charge")
-	if not chargeTrack then
-		self:_playHold()
+function BombController:_playThrow()
+	self._releasePending = false
+	self._releaseFallbackSerial += 1
+	self:_disconnectReleaseMarker()
+	self:_disconnectAnimationConnections()
+
+	local throwTrack = self:_playTrack("Throw")
+	if not throwTrack then
 		return
 	end
 
-	local connection: RBXScriptConnection?
-	connection = chargeTrack.Ended:Connect(function()
-		if connection then
-			connection:Disconnect()
-		end
-		if serial == self._chargeSerial and self._holding and isCooking() and not self._releasePending then
-			self:_playHold()
+	self:_connectThrowMarker(throwTrack)
+
+	local holdConnection = throwTrack.KeyframeReached:Connect(function(keyframeName: string)
+		if keyframeName == AnimationConfig.BombHoldKeyframeName and self._holding and not self._releasePending then
+			self:_logDebug("bomb-hold-pause", "Throw", true)
+			throwTrack:AdjustSpeed(0)
 		end
 	end)
-	table.insert(self._animationConnections, connection)
+	table.insert(self._animationConnections, holdConnection)
 end
 
 function BombController:_fireReleaseFromAnimation()
@@ -307,29 +414,24 @@ function BombController:_fireReleaseFromAnimation()
 end
 
 function BombController:_playRelease()
+	local throwTrack = self._bombTracks.Throw
+	if throwTrack and not throwTrack.IsPlaying then
+		self:_playThrow()
+		throwTrack = self._bombTracks.Throw
+	end
+
 	self._releasePending = true
 	self._releaseFallbackSerial += 1
 	local serial = self._releaseFallbackSerial
-	self:_disconnectReleaseMarker()
 
-	local chargeTrack = self._bombTracks.Charge
-	if chargeTrack and chargeTrack.IsPlaying then
-		chargeTrack:Stop(AnimationConfig.BombAnimationFadeTime)
-	end
-	local holdTrack = self._bombTracks.Hold
-	if holdTrack and holdTrack.IsPlaying then
-		holdTrack:Stop(AnimationConfig.BombAnimationFadeTime)
-	end
-
-	local releaseTrack = self:_playTrack("Release")
-	if releaseTrack then
-		self._releaseMarkerConnection = releaseTrack:GetMarkerReachedSignal(AnimationConfig.BombThrowMarkerName):Connect(function()
-			self:_fireReleaseFromAnimation()
-		end)
+	if throwTrack then
+		self:_logDebug("bomb-release-resume", "Throw", true)
+		throwTrack:AdjustSpeed(1)
 	end
 
 	task.delay(AnimationConfig.BombReleaseFallbackSeconds, function()
 		if serial == self._releaseFallbackSerial and self._releasePending then
+			self:_logDebug("bomb-release-fallback", "Throw", true)
 			self:_fireReleaseFromAnimation()
 		end
 	end)
@@ -382,7 +484,7 @@ function BombController:_requestBegin()
 
 	self._holding = true
 	self:_startPreview()
-	self:_playCharge()
+	self:_playThrow()
 
 	if self._beginRemote then
 		self._beginRemote:FireServer()

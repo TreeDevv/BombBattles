@@ -1,6 +1,15 @@
 return table.freeze({
 	WalkMoveSpeed = 18,
 	SprintMoveSpeed = 24,
+	CrouchMoveSpeed = 10,
+	SlideSpeed = 30,
+	SlideDuration = 0.42,
+	SlideCooldown = 0.45,
+	SlideJumpMinHorizontalSpeed = 28,
+	SlideJumpGraceTime = 0.18,
+	SlideJumpCarryDuration = 0.75,
+	SlideJumpCarryEndSpeedScale = 0.35,
+	SlideJumpMomentumMultiplier = 3,
 	BaseTurnSpeed = 14,
 
 	GroundAccelerationTime = 0.12,

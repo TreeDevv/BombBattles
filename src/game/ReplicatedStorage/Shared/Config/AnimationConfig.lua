@@ -4,39 +4,37 @@ end
 
 return table.freeze({
 	Enabled = true,
+	DebugTransitionsEnabled = true,
+	DebugRootTiltThresholdDegrees = 12,
+	DebugLogCooldownSeconds = 0.15,
+	RootUprightGuardEnabled = false,
+	RootUprightGuardWindowSeconds = 0.35,
+	DebugRiskyTrackEnabled = {
+		Land = true,
+		Slide = true,
+		Jump = true,
+		DoubleJump = true,
+		Throw = true,
+	},
 
 	BombAnimations = {
-		Charge = {
-			AnimationId = assetId("82827773383624"),
+		Throw = {
+			AnimationId = assetId("115997415565360"),
 			Looped = false,
-			Priority = Enum.AnimationPriority.Action,
-		},
-		Hold = {
-			AnimationId = assetId("105822161782761"),
-			Looped = true,
-			Priority = Enum.AnimationPriority.Action,
-		},
-		Release = {
-			AnimationId = assetId("76193431030955"),
-			Looped = false,
-			Priority = Enum.AnimationPriority.Action,
+			Priority = Enum.AnimationPriority.Movement,
+			Weight = 0.65,
 		},
 	},
+	BombHoldKeyframeName = "Hold",
 	BombThrowMarkerName = "Throw",
 	BombReleaseFallbackSeconds = 0.45,
 	BombAnimationFadeTime = 0.06,
 
 	Animations = {
 		Idle = {
-			AnimationId = assetId("73608429239863"),
+			AnimationId = assetId("113541114672918"),
 			Looped = true,
 			Priority = Enum.AnimationPriority.Idle,
-			SpeedMultiplier = 1,
-		},
-		IdleFlourish = {
-			AnimationId = assetId("135150821008547"),
-			Looped = false,
-			Priority = Enum.AnimationPriority.Action,
 			SpeedMultiplier = 1,
 		},
 		WalkBack = {
@@ -46,40 +44,72 @@ return table.freeze({
 			SpeedMultiplier = 1,
 		},
 		WalkForward = {
-			AnimationId = assetId("122191856900103"),
+			AnimationId = assetId("121231707745691"),
 			Looped = true,
 			Priority = Enum.AnimationPriority.Movement,
 			SpeedMultiplier = 1,
 		},
 		RunForward = {
-			AnimationId = assetId("122226350928552"),
+			AnimationId = assetId("119471521802007"),
 			Looped = true,
 			Priority = Enum.AnimationPriority.Movement,
-			SpeedMultiplier = 1.5,
+			SpeedMultiplier = 1,
 		},
-		WalkStopForward = {
-			AnimationId = assetId("94971797693984"),
-			Looped = false,
+		WalkLeft = {
+			AnimationId = assetId("76093944492388"),
+			Looped = true,
+			Priority = Enum.AnimationPriority.Movement,
+			SpeedMultiplier = 1,
+		},
+		WalkRight = {
+			AnimationId = assetId("125886726687274"),
+			Looped = true,
 			Priority = Enum.AnimationPriority.Movement,
 			SpeedMultiplier = 1,
 		},
 		Jump = {
-			AnimationId = assetId("93060497012221"),
+			AnimationId = assetId("137023970046935"),
 			Looped = false,
 			Priority = Enum.AnimationPriority.Action,
 			SpeedMultiplier = 1,
 		},
 		DoubleJump = {
-			AnimationId = assetId("130534270338425"),
+			AnimationId = assetId("72137905343835"),
 			Looped = false,
 			Priority = Enum.AnimationPriority.Action,
 			SpeedMultiplier = 1,
 		},
 		Fall = {
-			AnimationId = assetId("132969408252045"),
+			AnimationId = assetId("93502229849069"),
 			Looped = true,
 			Priority = Enum.AnimationPriority.Movement,
 			SpeedMultiplier = 1,
+		},
+		Land = {
+			AnimationId = assetId("97343882521319"),
+			Looped = false,
+			Priority = Enum.AnimationPriority.Movement,
+			SpeedMultiplier = 1,
+			Weight = 0.55,
+		},
+		CrouchIdle = {
+			AnimationId = assetId("140078846779926"),
+			Looped = true,
+			Priority = Enum.AnimationPriority.Movement,
+			SpeedMultiplier = 1,
+		},
+		CrouchWalk = {
+			AnimationId = assetId("125375083818610"),
+			Looped = true,
+			Priority = Enum.AnimationPriority.Movement,
+			SpeedMultiplier = 1,
+		},
+		Slide = {
+			AnimationId = assetId("128718352020244"),
+			Looped = false,
+			Priority = Enum.AnimationPriority.Movement,
+			SpeedMultiplier = 1,
+			Weight = 0.75,
 		},
 	},
 
@@ -87,22 +117,19 @@ return table.freeze({
 	AirFadeTime = 0.06,
 	LandingFadeTime = 0.02,
 	OneShotFadeTime = 0.05,
-	StopFadeTime = 0.06,
-	StopWeight = 0.9,
-	MinForwardStopMoveTime = 0.12,
 	IdleFadeTime = 0.08,
-	IdleFlourishFadeTime = 0.08,
-	IdleFlourishMinDelay = 3,
-	IdleFlourishMaxDelay = 5,
+	CrouchFadeTime = 0.08,
+	SlideFadeTime = 0.04,
+	SlideBaseCrouchWalkWeight = 0.35,
 
 	MinMoveMagnitude = 0.04,
 	BackwardThreshold = 0.2,
-	ForwardStopThreshold = -0.2,
 	RunSpeedThreshold = 21,
 	RunBlendRange = 3,
 
 	WalkSpeedReference = 18,
 	RunSpeedReference = 24,
+	CrouchSpeedReference = 10,
 	MinPlaybackSpeed = 0.75,
 	MaxPlaybackSpeed = 1.8,
 

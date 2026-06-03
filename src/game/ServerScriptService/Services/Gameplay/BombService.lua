@@ -28,6 +28,7 @@ type ProjectileState = {
 	owner: Player,
 	path: any,
 	launchedAt: number,
+	explodeAt: number,
 	position: Vector3,
 	lastPosition: Vector3,
 	landed: boolean,
@@ -674,11 +675,13 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 	local trajectory = calculateTrajectory(origin, resolvedTargetPosition)
 	local projectileId = createProjectileId(player)
 	local launchTime = now()
+	local explodeAt = launchTime + remainingFuse
 	local state: ProjectileState = {
 		id = projectileId,
 		owner = player,
 		path = trajectory,
 		launchedAt = launchTime,
+		explodeAt = explodeAt,
 		position = origin,
 		lastPosition = origin,
 		landed = false,
@@ -699,12 +702,6 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		remainingFuse = remainingFuse,
 	})
 
-	task.delay(remainingFuse, function()
-		local currentState = activeProjectiles[projectileId]
-		if currentState then
-			explode(player, currentState.position, "Projectile", projectileId)
-		end
-	end)
 	task.delay(remainingFuse + BombConfig.ProjectileLifetimePadding, function()
 		local currentState = activeProjectiles[projectileId]
 		if currentState then
@@ -719,6 +716,19 @@ local function updateProjectileStates(currentTime: number)
 		if not state.owner.Parent then
 			destroyPhysicalProjectile(state)
 			activeProjectiles[projectileId] = nil
+			continue
+		end
+		if currentTime >= state.explodeAt then
+			if state.landed then
+				state.position = getProjectilePhysicsPosition(state)
+				state.lastPosition = state.position
+			else
+				local fuseAlpha = math.clamp((state.explodeAt - state.launchedAt) / state.path.duration, 0, 1)
+				state.position = BombTrajectory.Evaluate(state.path, fuseAlpha)
+				state.lastPosition = state.position
+			end
+
+			explode(state.owner, state.position, "Projectile", projectileId)
 			continue
 		end
 		if state.landed then

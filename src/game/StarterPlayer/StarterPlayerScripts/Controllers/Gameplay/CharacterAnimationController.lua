@@ -106,6 +106,10 @@ local function readOptionalBoolAttribute(instance: Instance, name: string): bool
 	return if typeof(value) == "boolean" then value else nil
 end
 
+local function readCameraShiftLocked(character: Model): boolean
+	return character:GetAttribute("Camera_ShiftLocked") == true
+end
+
 local function getAnimator(humanoid: Humanoid): Animator
 	local animator = humanoid:FindFirstChildOfClass("Animator")
 	if animator then
@@ -453,6 +457,7 @@ function CharacterAnimationController:_updateGroundLocomotion(character: Model, 
 	local isSprinting = character:GetAttribute("Movement_Sprinting") == true
 	local isCrouching = character:GetAttribute("Movement_Crouching") == true
 	local isSliding = character:GetAttribute("Movement_Sliding") == true
+	local shiftLocked = readCameraShiftLocked(character)
 	local hasMoveInput = isGrounded and moveMagnitude >= AnimationConfig.MinMoveMagnitude
 	local localMoveDirection = self:_getLocalMoveDirection()
 
@@ -481,19 +486,28 @@ function CharacterAnimationController:_updateGroundLocomotion(character: Model, 
 			crouchIdleWeight = 1
 		end
 	elseif hasMoveInput then
-		local forwardAmount = math.max(-localMoveDirection.Z, 0)
-		local backAmount = math.max(localMoveDirection.Z, 0)
-		local leftAmount = math.max(-localMoveDirection.X, 0)
-		local rightAmount = math.max(localMoveDirection.X, 0)
-		local totalAmount = math.max(forwardAmount + backAmount + leftAmount + rightAmount, 1)
+		if not shiftLocked then
+			walkForwardWeight = 1
+		else
+			local forwardAmount = math.max(-localMoveDirection.Z, 0)
+			local backAmount = math.max(localMoveDirection.Z, 0)
+			local hasForwardBack = forwardAmount >= AnimationConfig.MinMoveMagnitude
+				or backAmount >= AnimationConfig.MinMoveMagnitude
 
-		walkBackWeight = backAmount / totalAmount
-		walkForwardWeight = forwardAmount / totalAmount
-		walkLeftWeight = leftAmount / totalAmount
-		walkRightWeight = rightAmount / totalAmount
+			if hasForwardBack then
+				local totalForwardBackAmount = forwardAmount + backAmount
+				walkBackWeight = backAmount / totalForwardBackAmount
+				walkForwardWeight = forwardAmount / totalForwardBackAmount
+			else
+				local leftAmount = math.max(-localMoveDirection.X, 0)
+				local rightAmount = math.max(localMoveDirection.X, 0)
+				local totalStrafeAmount = math.max(leftAmount + rightAmount, 1)
+				walkLeftWeight = leftAmount / totalStrafeAmount
+				walkRightWeight = rightAmount / totalStrafeAmount
+			end
+		end
 
-		local forwardDominant = forwardAmount >= math.max(backAmount, leftAmount, rightAmount)
-		if forwardDominant and walkForwardWeight > 0 then
+		if walkForwardWeight > 0 then
 			local runAlpha = 0
 			if isSprinting then
 				runAlpha = 1

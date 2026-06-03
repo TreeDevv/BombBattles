@@ -12,6 +12,39 @@ local VoxManager = {
 	VoxelCache = nil,
 	VoxelFolder = nil,
 	DebrisSizeMultiplier = 0.3,
+	GeneratedVoxelTag = nil,
+	TerrainConfig = {
+		CellSize = 8,
+		CellHealth = 80,
+		HealthAttribute = "DestructionHealth",
+		DamageMultiplierAttribute = "DestructionDamageMultiplier",
+		InnerRadius = 4,
+		NearRadius = 10,
+		InnerDamage = 100,
+		NearDamageMax = 70,
+		NearDamageMin = 35,
+		OuterDamageMax = 25,
+		OuterDamageMin = 8,
+	},
+	DebrisConfig = {
+		SpeedMin = 22,
+		SpeedMax = 42,
+		Lifetime = 2,
+		ClientSimulated = false,
+		UseGraphicsQualitySampling = true,
+		AutomaticQualityLevel = 5,
+		MaxSamplingDivisor = 10,
+	},
+	TerrainDebugConfig = {
+		Visualize = false,
+		StudioOnly = true,
+		FolderName = "DamageGridDebug",
+		Transparency = 0.65,
+		Inset = 0.08,
+		HealthyColor = Color3.fromRGB(70, 230, 90),
+		DamagedColor = Color3.fromRGB(255, 210, 60),
+		CriticalColor = Color3.fromRGB(255, 80, 70),
+	},
 }
 
 function VoxManager:_createVoxelCache()
@@ -59,7 +92,7 @@ function VoxManager:voxelize(
 		debris = true
 	end
 
-	Voxelizer.subtractHitbox(
+	return Voxelizer.subtractHitbox(
 		sphereHitbox,
 		minimumVoxelSize,
 		finalVoxelSize,
@@ -69,6 +102,9 @@ function VoxManager:voxelize(
 		ignore,
 		VoxManager.VoxelCache,
 		VoxManager.DebrisSizeMultiplier,
+		VoxManager.DebrisConfig,
+		VoxManager.GeneratedVoxelTag,
+		VoxManager.TerrainConfig,
 		include
 	)
 end
@@ -116,7 +152,7 @@ function VoxManager:voxelizePosition(
 	hitbox.Transparency = 1
 	hitbox.Parent = workspace
 
-	Voxelizer.subtractHitbox(
+	return Voxelizer.subtractHitbox(
 		hitbox,
 		minimumVoxelSize,
 		finalVoxelSize,
@@ -126,6 +162,9 @@ function VoxManager:voxelizePosition(
 		ignore,
 		VoxManager.VoxelCache,
 		VoxManager.DebrisSizeMultiplier,
+		VoxManager.DebrisConfig,
+		VoxManager.GeneratedVoxelTag,
+		VoxManager.TerrainConfig,
 		include
 	)
 end
@@ -139,7 +178,123 @@ function VoxManager:setDebrisSize(multiplier: number)
 	VoxManager.DebrisSizeMultiplier = multiplier
 end
 
+function VoxManager:setDebrisConfig(config)
+	if typeof(config) ~= "table" then
+		return
+	end
+
+	local fields = {
+		SpeedMin = "DebrisSpeedMin",
+		SpeedMax = "DebrisSpeedMax",
+		Lifetime = "DebrisLifetime",
+		AutomaticQualityLevel = "DebrisAutomaticQualityLevel",
+		MaxSamplingDivisor = "DebrisMaxSamplingDivisor",
+	}
+
+	for targetName, sourceName in pairs(fields) do
+		local value = config[sourceName] or config[targetName]
+		if typeof(value) == "number" then
+			VoxManager.DebrisConfig[targetName] = value
+		end
+	end
+
+	if typeof(config.ClientSimulatedDebris) == "boolean" then
+		VoxManager.DebrisConfig.ClientSimulated = config.ClientSimulatedDebris
+	elseif typeof(config.ClientSimulated) == "boolean" then
+		VoxManager.DebrisConfig.ClientSimulated = config.ClientSimulated
+	end
+
+	if typeof(config.DebrisUseGraphicsQualitySampling) == "boolean" then
+		VoxManager.DebrisConfig.UseGraphicsQualitySampling = config.DebrisUseGraphicsQualitySampling
+	elseif typeof(config.UseGraphicsQualitySampling) == "boolean" then
+		VoxManager.DebrisConfig.UseGraphicsQualitySampling = config.UseGraphicsQualitySampling
+	end
+end
+
+function VoxManager:setGeneratedVoxelTag(tagName: string?)
+	if typeof(tagName) == "string" and tagName ~= "" then
+		VoxManager.GeneratedVoxelTag = tagName
+	else
+		VoxManager.GeneratedVoxelTag = nil
+	end
+end
+
+function VoxManager:setTerrainConfig(config)
+	if typeof(config) ~= "table" then
+		return
+	end
+
+	local fields = {
+		CellSize = "TerrainCellSize",
+		CellHealth = "TerrainCellHealth",
+		InnerRadius = "TerrainInnerRadius",
+		NearRadius = "TerrainNearRadius",
+		InnerDamage = "TerrainInnerDamage",
+		NearDamageMax = "TerrainNearDamageMax",
+		NearDamageMin = "TerrainNearDamageMin",
+		OuterDamageMax = "TerrainOuterDamageMax",
+		OuterDamageMin = "TerrainOuterDamageMin",
+	}
+
+	for targetName, sourceName in pairs(fields) do
+		local value = config[sourceName] or config[targetName]
+		if typeof(value) == "number" then
+			VoxManager.TerrainConfig[targetName] = value
+		end
+	end
+
+	local healthAttribute = config.TerrainHealthAttribute or config.HealthAttribute
+	if typeof(healthAttribute) == "string" and healthAttribute ~= "" then
+		VoxManager.TerrainConfig.HealthAttribute = healthAttribute
+	end
+
+	local damageMultiplierAttribute = config.TerrainDamageMultiplierAttribute or config.DamageMultiplierAttribute
+	if typeof(damageMultiplierAttribute) == "string" and damageMultiplierAttribute ~= "" then
+		VoxManager.TerrainConfig.DamageMultiplierAttribute = damageMultiplierAttribute
+	end
+end
+
+function VoxManager:setTerrainDebugConfig(config)
+	if typeof(config) ~= "table" then
+		return
+	end
+
+	if typeof(config.DebugVisualizeDamageGrid) == "boolean" then
+		VoxManager.TerrainDebugConfig.Visualize = config.DebugVisualizeDamageGrid
+	end
+	if typeof(config.DebugDamageGridStudioOnly) == "boolean" then
+		VoxManager.TerrainDebugConfig.StudioOnly = config.DebugDamageGridStudioOnly
+	end
+	if typeof(config.DebugDamageGridFolderName) == "string" and config.DebugDamageGridFolderName ~= "" then
+		VoxManager.TerrainDebugConfig.FolderName = config.DebugDamageGridFolderName
+	end
+	if typeof(config.DebugDamageGridTransparency) == "number" then
+		VoxManager.TerrainDebugConfig.Transparency = math.clamp(config.DebugDamageGridTransparency, 0, 1)
+	end
+	if typeof(config.DebugDamageGridInset) == "number" then
+		VoxManager.TerrainDebugConfig.Inset = math.max(config.DebugDamageGridInset, 0)
+	end
+	if typeof(config.DebugDamageGridHealthyColor) == "Color3" then
+		VoxManager.TerrainDebugConfig.HealthyColor = config.DebugDamageGridHealthyColor
+	end
+	if typeof(config.DebugDamageGridDamagedColor) == "Color3" then
+		VoxManager.TerrainDebugConfig.DamagedColor = config.DebugDamageGridDamagedColor
+	end
+	if typeof(config.DebugDamageGridCriticalColor) == "Color3" then
+		VoxManager.TerrainDebugConfig.CriticalColor = config.DebugDamageGridCriticalColor
+	end
+
+	Voxelizer.setTerrainDebugConfig(VoxManager.TerrainDebugConfig)
+end
+
 function VoxManager:cleanup()
+	Voxelizer.clearTerrainDebugVisuals()
+
+	local voxelizerTerrainCells = Voxelizer.TerrainCells
+	if voxelizerTerrainCells then
+		table.clear(voxelizerTerrainCells)
+	end
+
 	if VoxManager.VoxelCache then
 		VoxManager.VoxelCache:Destroy()
 		VoxManager.VoxelCache = nil

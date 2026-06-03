@@ -9,6 +9,7 @@ return {
 	StudioTesting = {
 		MinPlayers = 1,
 		HoldSoloRoundsActive = true,
+		AllowBombTeamProtectionBypass = true,
 	},
 
 	Teams = {

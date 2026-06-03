@@ -1,3 +1,4 @@
+local ContextActionService = game:GetService("ContextActionService")
 local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -9,6 +10,7 @@ local CameraShaker = require(ReplicatedStorage.Shared.Camera.CameraShaker)
 
 local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesCameraController"
+local SHIFT_LOCK_ACTION_NAME = "BombBattlesShiftLockToggle"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 1
 local HUD_FOV_BLUR_NAMES = {
 	HUDWindowBlur = true,
@@ -37,6 +39,7 @@ CameraController._skipNextLandingShake = false
 CameraController._mouseLocked = false
 CameraController._previousMouseBehavior = nil :: Enum.MouseBehavior?
 CameraController._previousMouseIconEnabled = nil :: boolean?
+CameraController._shiftLocked = CameraConfig.DefaultShiftLocked == true
 
 local function getControls(): Controls?
 	local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -88,6 +91,11 @@ local function getRootPart(character: Model): BasePart?
 	return if rootPart and rootPart:IsA("BasePart") then rootPart else nil
 end
 
+local function isFirstPerson(camera: Camera): boolean
+	local distance = (camera.CFrame.Position - camera.Focus.Position).Magnitude
+	return distance <= CameraConfig.FirstPersonDistanceThreshold
+end
+
 local function isHudFOVActive(camera: Camera): boolean
 	for _, child in Lighting:GetChildren() do
 		if child:IsA("BlurEffect") and HUD_FOV_BLUR_NAMES[child.Name] and child.Size > 0.1 then
@@ -95,7 +103,10 @@ local function isHudFOVActive(camera: Camera): boolean
 		end
 	end
 
-	local maxMovementFOV = CameraConfig.BaseFOV + CameraConfig.SprintFOVBonus + CameraConfig.AirFOVBonus
+	local maxMovementFOV = CameraConfig.BaseFOV
+		+ CameraConfig.SprintFOVBonus
+		+ CameraConfig.AirFOVBonus
+		+ CameraConfig.SlideJumpFOVBonus
 	return camera.FieldOfView > maxMovementFOV + 0.5
 end
 
@@ -108,6 +119,22 @@ function CameraController:_lockMouse()
 
 	UserInputService.MouseBehavior = CameraConfig.MouseBehavior
 	UserInputService.MouseIconEnabled = CameraConfig.LockMouseIconEnabled
+end
+
+function CameraController:_setShiftLocked(shiftLocked: boolean)
+	if self._shiftLocked == shiftLocked then
+		return
+	end
+
+	self._shiftLocked = shiftLocked
+	if not shiftLocked then
+		self:_restoreMouse()
+	end
+
+	local character = self._character
+	if character then
+		character:SetAttribute("Camera_ShiftLocked", shiftLocked)
+	end
 end
 
 function CameraController:_restoreMouse()
@@ -126,6 +153,11 @@ function CameraController:_restoreMouse()
 	self._mouseLocked = false
 	self._previousMouseBehavior = nil
 	self._previousMouseIconEnabled = nil
+end
+
+function CameraController:_publishCameraState(character: Model, firstPerson: boolean)
+	character:SetAttribute("Camera_ShiftLocked", self._shiftLocked)
+	character:SetAttribute("Camera_FirstPerson", firstPerson)
 end
 
 function CameraController:_resetCameraState(camera: Camera?)
@@ -231,6 +263,8 @@ end
 
 function CameraController:_bindCharacter(character: Model)
 	self._character = character
+	character:SetAttribute("Camera_ShiftLocked", self._shiftLocked)
+	character:SetAttribute("Camera_FirstPerson", false)
 	self:_resetCameraState(workspace.CurrentCamera)
 end
 
@@ -256,7 +290,14 @@ function CameraController:_step(dt: number)
 		return
 	end
 
-	self:_lockMouse()
+	local firstPerson = isFirstPerson(camera)
+	self:_publishCameraState(character, firstPerson)
+
+	if self._shiftLocked then
+		self:_lockMouse()
+	else
+		self:_restoreMouse()
+	end
 
 	local controls = self._controls or getControls()
 	self._controls = controls
@@ -271,6 +312,10 @@ function CameraController:_step(dt: number)
 	local isSprinting = readBoolAttribute(character, "Movement_Sprinting")
 	local effectiveSpeed = readNumberAttribute(character, "Movement_EffectiveSpeed")
 	local moveMagnitude = readNumberAttribute(character, "Movement_MoveMagnitude")
+	local slidePhase = character:GetAttribute("Movement_SlidePhase")
+	local slideSpeed = readNumberAttribute(character, "Movement_SlideSpeed")
+	local horizontalSpeed = readNumberAttribute(character, "Movement_HorizontalSpeed")
+	local slideJumpBurstActive = readBoolAttribute(character, "Movement_SlideJumpBurstActive")
 	local isAirborne = not isGrounded
 	local rootPart = getRootPart(character)
 	local velocityY = if rootPart then rootPart.AssemblyLinearVelocity.Y else 0
@@ -288,6 +333,18 @@ function CameraController:_step(dt: number)
 		targetFOV += CameraConfig.SprintFOVBonus * speedAlpha
 	end
 
+	local slideMomentumActive = slideJumpBurstActive
+		or slidePhase == "AirCarry"
+		or slidePhase == "GroundRunout"
+	if slideMomentumActive then
+		local boostedSpeed = math.max(effectiveSpeed, slideSpeed, horizontalSpeed)
+		local speedRange = math.max(CameraConfig.SlideJumpFOVSpeedForMax - 24, 1)
+		local slideJumpAlpha = if slideJumpBurstActive
+			then 1
+			else math.clamp((boostedSpeed - 24) / speedRange, 0, 1)
+		targetFOV += CameraConfig.SlideJumpFOVBonus * slideJumpAlpha
+	end
+
 	if CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera) then
 		self._currentFOV = camera.FieldOfView
 	else
@@ -295,15 +352,18 @@ function CameraController:_step(dt: number)
 		camera.FieldOfView = self._currentFOV
 	end
 
+	local targetShoulderOffset = if self._shiftLocked and not firstPerson
+		then CameraConfig.ShoulderOffset
+		else Vector3.zero
 	self._currentShoulderOffset = smoothVector(
 		self._currentShoulderOffset,
-		CameraConfig.ShoulderOffset,
+		targetShoulderOffset,
 		CameraConfig.ShoulderResponsiveness,
 		dt
 	)
 
 	local targetRoll = 0
-	if controls and moveMagnitude > 0.05 then
+	if self._shiftLocked and controls and moveMagnitude > 0.05 then
 		local moveVector = controls:GetMoveVector()
 		targetRoll = math.rad(-CameraConfig.MaxStrafeRollDegrees * math.clamp(moveVector.X, -1, 1))
 	end
@@ -318,8 +378,26 @@ function CameraController:_step(dt: number)
 		* shakeCFrame
 end
 
+function CameraController:_handleShiftLockAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
+	if inputState == Enum.UserInputState.Begin then
+		self:_setShiftLocked(not self._shiftLocked)
+	end
+
+	return Enum.ContextActionResult.Sink
+end
+
 function CameraController:OnStart()
 	self._controls = getControls()
+
+	ContextActionService:UnbindAction(SHIFT_LOCK_ACTION_NAME)
+	ContextActionService:BindAction(
+		SHIFT_LOCK_ACTION_NAME,
+		function(...)
+			return self:_handleShiftLockAction(...)
+		end,
+		false,
+		CameraConfig.ShiftLockToggleKey
+	)
 
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function(dt)

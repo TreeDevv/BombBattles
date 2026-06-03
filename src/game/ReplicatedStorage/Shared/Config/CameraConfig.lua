@@ -2,10 +2,26 @@ return table.freeze({
 	BaseFOV = 70,
 	SprintFOVBonus = 6,
 	AirFOVBonus = 2,
+	SlideJumpFOVBonus = 8,
+	SlideJumpFOVSpeedForMax = 84,
 	FOVResponsiveness = 10,
 
 	ShoulderOffset = Vector3.new(2.25, 0.45, 0),
 	ShoulderResponsiveness = 14,
+	DefaultShiftLocked = false,
+	ShiftLockToggleKey = Enum.KeyCode.LeftControl,
+	FirstPersonDistanceThreshold = 1,
+	FirstPersonBodyVisible = true,
+	FirstPersonHiddenPartNames = {
+		Head = true,
+		HumanoidRootPart = true,
+	},
+	FirstPersonTransparentPartNames = {
+		Torso = true,
+		UpperTorso = true,
+		LowerTorso = true,
+	},
+	FirstPersonHideAccessories = true,
 	MouseBehavior = Enum.MouseBehavior.LockCenter,
 	LockMouseIconEnabled = false,
 

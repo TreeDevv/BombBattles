@@ -101,6 +101,9 @@
           "CharacterPoseController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/CharacterPoseController.lua"
           },
+          "FirstPersonBodyVisibilityController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/FirstPersonBodyVisibilityController.lua"
+          },
           "ChatTagController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Social/ChatTagController.lua"
           },

@@ -1,9 +1,11 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
@@ -17,7 +19,20 @@ local ROUND_TEAM_ATTR = "RoundTeam"
 local ATTR = BombConfig.Attributes
 
 type CookState = {
-	startedAt: number,
+	holdStartedAt: number,
+	cookStartedAt: number?,
+}
+
+type ProjectileState = {
+	id: string,
+	owner: Player,
+	path: any,
+	launchedAt: number,
+	position: Vector3,
+	lastPosition: Vector3,
+	landed: boolean,
+	physicalProjectile: Instance?,
+	physicalRoot: BasePart?,
 }
 
 local BombService = {}
@@ -27,11 +42,22 @@ local releaseRemote: RemoteEvent? = nil
 local effectRemote: RemoteEvent? = nil
 local heartbeatConnection: RBXScriptConnection? = nil
 local cookStates: { [Player]: CookState } = {}
+local activeProjectiles: { [string]: ProjectileState } = {}
 local seenRoundIds: { [Player]: number } = {}
 local characterConnections: { [Player]: RBXScriptConnection } = {}
+local nextProjectileId = 0
 
 local function now(): number
 	return workspace:GetServerTimeNow()
+end
+
+local function isStudioBombTeamProtectionBypassEnabled(): boolean
+	if not RunService:IsStudio() then
+		return false
+	end
+
+	local studioTesting = RoundConfig.StudioTesting
+	return studioTesting ~= nil and studioTesting.AllowBombTeamProtectionBypass == true
 end
 
 local function ensureRemotesFolder(): Folder
@@ -137,6 +163,10 @@ local function sanitizeAimDirection(direction: any, fallback: Vector3): Vector3
 	return unit.Unit
 end
 
+local function getThrowOrigin(rootPart: BasePart): Vector3
+	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
+end
+
 local function getBombAsset(): Instance?
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
 	local bombs = assets and assets:FindFirstChild("Bombs")
@@ -154,7 +184,22 @@ local function getFirstBasePart(instance: Instance): BasePart?
 	return instance:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function prepareProjectileInstance(): (Instance, BasePart)
+local function getProjectileFolder(): Folder
+	local existing = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = BombConfig.ProjectileFolderName
+	folder.Parent = workspace
+	return folder
+end
+
+local function preparePhysicalProjectile(projectileId: string, owner: Player): (Instance, BasePart)
 	local asset = getBombAsset()
 	local projectile: Instance
 	local rootPart: BasePart?
@@ -173,7 +218,7 @@ local function prepareProjectileInstance(): (Instance, BasePart)
 		rootPart = part
 	end
 
-	projectile.Name = "BombProjectile"
+	projectile.Name = "BombProjectile_" .. projectileId
 	if projectile:IsA("Model") and rootPart then
 		projectile.PrimaryPart = rootPart
 	end
@@ -182,34 +227,87 @@ local function prepareProjectileInstance(): (Instance, BasePart)
 		if descendant:IsA("BasePart") then
 			descendant.Anchored = false
 			descendant.CanCollide = true
-			descendant.CanQuery = false
-			descendant.CanTouch = true
+			descendant.CanQuery = true
+			descendant.CanTouch = false
 		end
 	end
 	if projectile:IsA("BasePart") then
 		projectile.Anchored = false
 		projectile.CanCollide = true
-		projectile.CanQuery = false
-		projectile.CanTouch = true
+		projectile.CanQuery = true
+		projectile.CanTouch = false
 	end
 
 	assert(rootPart, "Bomb projectile requires a BasePart")
+	projectile:SetAttribute("ProjectileId", projectileId)
+	projectile:SetAttribute("OwnerUserId", owner.UserId)
 	return projectile, rootPart
 end
 
-local function getProjectileFolder(): Folder
-	local existing = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
+local function getTargetPositionFromPayload(payload: any, origin: Vector3, fallbackDirection: Vector3): Vector3
+	if typeof(payload) == "table" then
+		local targetPosition = payload.targetPosition
+		if BombTrajectory.IsFiniteVector(targetPosition) then
+			return targetPosition
+		end
+
+		local aimDirection = payload.aimDirection
+		if BombTrajectory.IsFiniteVector(aimDirection) then
+			local direction = sanitizeAimDirection(aimDirection, fallbackDirection)
+			return origin + direction * BombConfig.NoHitFallbackDistance
+		end
+	elseif BombTrajectory.IsFiniteVector(payload) then
+		if payload.Magnitude > 1.5 then
+			return payload
+		end
+
+		local direction = sanitizeAimDirection(payload, fallbackDirection)
+		return origin + direction * BombConfig.NoHitFallbackDistance
 	end
 
-	local folder = Instance.new("Folder")
-	folder.Name = BombConfig.ProjectileFolderName
-	folder.Parent = workspace
-	return folder
+	return origin + fallbackDirection * BombConfig.NoHitFallbackDistance
+end
+
+local function calculateTrajectory(origin: Vector3, targetPosition: Vector3)
+	return BombTrajectory.CreatePath(
+		origin,
+		targetPosition,
+		BombConfig.TravelSpeed,
+		BombConfig.ArcHeightMin,
+		BombConfig.ArcHeightPerStud,
+		BombConfig.ArcHeightMax
+	)
+end
+
+local function createTargetResolveParams(owner: Player): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local character = owner.Character
+	params.FilterDescendantsInstances = if character then { character } else {}
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+	return params
+end
+
+local function resolveLandingTarget(owner: Player, origin: Vector3, targetPosition: Vector3, useDirectTarget: boolean): Vector3
+	local params = createTargetResolveParams(owner)
+	local resolvedTargetPosition = BombTrajectory.ResolveLandingTarget(
+		origin,
+		targetPosition,
+		useDirectTarget,
+		BombConfig.LandingResolveUp,
+		BombConfig.LandingResolveDown,
+		BombConfig.NoHitFallbackDistance,
+		function(rayOrigin: Vector3, rayDirection: Vector3)
+			return workspace:Raycast(rayOrigin, rayDirection, params)
+		end
+	)
+	return resolvedTargetPosition
+end
+
+local function createProjectileId(player: Player): string
+	nextProjectileId += 1
+	return string.format("%d:%d", player.UserId, nextProjectileId)
 end
 
 local function getDamageForDistance(distance: number, directDamage: number, nearMax: number, nearMin: number, outerMax: number, outerMin: number): number
@@ -293,13 +391,14 @@ end
 
 local function damageEnemyAnchors(owner: Player, origin: Vector3)
 	local ownerTeam = getTeamName(owner)
+	local bypassTeamProtection = isStudioBombTeamProtectionBypassEnabled()
 
 	for _, core in ipairs(CollectionService:GetTagged(RoundConfig.Tags.TeamCore)) do
 		local trackedCore = RoundService:GetTrackedCore(core)
 		if not trackedCore then
 			continue
 		end
-		if ownerTeam and trackedCore:GetAttribute("Team") == ownerTeam then
+		if not bypassTeamProtection and ownerTeam and trackedCore:GetAttribute("Team") == ownerTeam then
 			continue
 		end
 
@@ -322,13 +421,25 @@ local function damageEnemyAnchors(owner: Player, origin: Vector3)
 	end
 end
 
-local function explode(owner: Player, position: Vector3, source: string, projectile: Instance?)
-	if projectile and projectile.Parent then
-		projectile:Destroy()
-	end
+local destroyPhysicalProjectile = nil
+local getProjectilePhysicsPosition = nil
 
+local function explode(owner: Player, position: Vector3, source: string, projectileId: string?)
+	if projectileId then
+		local state = activeProjectiles[projectileId]
+		if state then
+			if getProjectilePhysicsPosition then
+				position = getProjectilePhysicsPosition(state)
+			end
+			if destroyPhysicalProjectile then
+				destroyPhysicalProjectile(state)
+			end
+		end
+		activeProjectiles[projectileId] = nil
+	end
 	fireEffect("Explode", {
 		player = owner,
+		projectileId = projectileId,
 		position = position,
 		source = source,
 		innerRadius = BombConfig.InnerRadius,
@@ -339,7 +450,12 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		return
 	end
 
-	DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius)
+	local debrisPayloads = DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius)
+	if #debrisPayloads > 0 then
+		fireEffect("TerrainDebris", {
+			payloads = debrisPayloads,
+		})
+	end
 	damageEnemyPlayers(owner, position)
 	damageEnemyAnchors(owner, position)
 end
@@ -354,6 +470,15 @@ local function explodeInHand(player: Player, source: string)
 	local position = if rootPart then rootPart.Position else Vector3.zero
 	stopCooking(player)
 	explode(player, position, source, nil)
+end
+
+local function scheduleInHandExplosion(player: Player, state: CookState, cookStartedAt: number)
+	task.delay(BombConfig.FuseSeconds, function()
+		local currentState = cookStates[player]
+		if currentState == state and currentState.cookStartedAt == cookStartedAt then
+			explodeInHand(player, "InHand")
+		end
+	end)
 end
 
 local function consumeBomb(player: Player): boolean
@@ -372,6 +497,258 @@ local function consumeBomb(player: Player): boolean
 	return true
 end
 
+local function startActiveCook(player: Player, state: CookState)
+	if cookStates[player] ~= state or state.cookStartedAt then
+		return
+	end
+	if not isActivePlayer(player) then
+		stopCooking(player)
+		return
+	end
+	if not consumeBomb(player) then
+		stopCooking(player)
+		return
+	end
+
+	local cookStartedAt = now()
+	state.cookStartedAt = cookStartedAt
+	setCookingAttributes(player, true, cookStartedAt)
+
+	fireEffect("Cook", {
+		player = player,
+		startedAt = cookStartedAt,
+		fuseSeconds = BombConfig.FuseSeconds,
+	})
+
+	scheduleInHandExplosion(player, state, cookStartedAt)
+end
+
+local function createSweepParams(owner: Player): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local character = owner.Character
+	params.FilterDescendantsInstances = if character then { character } else {}
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+	return params
+end
+
+local function getSurfaceNormal(owner: Player, position: Vector3): Vector3
+	local params = createSweepParams(owner)
+	local rayOrigin = position + Vector3.yAxis * BombConfig.PostImpactNormalProbeUp
+	local rayDirection = Vector3.new(0, -(BombConfig.PostImpactNormalProbeUp + BombConfig.PostImpactNormalProbeDown), 0)
+	local hit = workspace:Raycast(rayOrigin, rayDirection, params)
+	if hit and BombTrajectory.IsFiniteVector(hit.Normal) and hit.Normal.Magnitude > 0.05 then
+		return hit.Normal.Unit
+	end
+
+	return Vector3.yAxis
+end
+
+local function sweepProjectile(owner: Player, fromPosition: Vector3, toPosition: Vector3): RaycastResult?
+	local direction = toPosition - fromPosition
+	if direction.Magnitude <= 0.001 then
+		return nil
+	end
+
+	local params = createSweepParams(owner)
+	local spherecastOk, spherecastResult = pcall(function()
+		return workspace:Spherecast(fromPosition, BombConfig.SweepRadius, direction, params)
+	end)
+	if spherecastOk then
+		return spherecastResult
+	end
+
+	return workspace:Raycast(fromPosition, direction, params)
+end
+
+local function clampVectorMagnitude(vector: Vector3, maxMagnitude: number): Vector3
+	if vector.Magnitude <= maxMagnitude then
+		return vector
+	end
+
+	return vector.Unit * maxMagnitude
+end
+
+local function getPostImpactVelocity(incomingVelocity: Vector3, normal: Vector3): Vector3
+	if incomingVelocity.Magnitude <= 0.001 then
+		return Vector3.zero
+	end
+
+	local unitNormal = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
+	local normalComponent = unitNormal * incomingVelocity:Dot(unitNormal)
+	local tangentComponent = incomingVelocity - normalComponent
+	local bouncedComponent = -normalComponent * BombConfig.PostImpactBounce
+	local velocity = (tangentComponent + bouncedComponent) * BombConfig.PostImpactVelocityScale
+	return clampVectorMagnitude(velocity, BombConfig.PostImpactMaxSpeed)
+end
+
+local function setProjectileAssemblyMotion(projectile: Instance, velocity: Vector3, angularVelocity: Vector3)
+	for _, descendant in ipairs(projectile:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.AssemblyLinearVelocity = velocity
+			descendant.AssemblyAngularVelocity = angularVelocity
+			pcall(function()
+				descendant:SetNetworkOwner(nil)
+			end)
+		end
+	end
+	if projectile:IsA("BasePart") then
+		projectile.AssemblyLinearVelocity = velocity
+		projectile.AssemblyAngularVelocity = angularVelocity
+		pcall(function()
+			projectile:SetNetworkOwner(nil)
+		end)
+	end
+end
+
+function destroyPhysicalProjectile(state: ProjectileState?)
+	if not state then
+		return
+	end
+
+	local projectile = state.physicalProjectile
+	state.physicalProjectile = nil
+	state.physicalRoot = nil
+	if projectile and projectile.Parent then
+		projectile:Destroy()
+	end
+end
+
+function getProjectilePhysicsPosition(state: ProjectileState): Vector3
+	local rootPart = state.physicalRoot
+	if rootPart and rootPart.Parent then
+		return rootPart.Position
+	end
+
+	return state.position
+end
+
+local function spawnPhysicalProjectile(state: ProjectileState, position: Vector3, normal: Vector3, incomingVelocity: Vector3): Instance?
+	local projectile, rootPart = preparePhysicalProjectile(state.id, state.owner)
+	local unitNormal = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
+	local spawnPosition = position + unitNormal * BombConfig.PostImpactSpawnNormalOffset
+	local spawnCFrame = CFrame.new(spawnPosition)
+
+	if projectile:IsA("Model") then
+		projectile:PivotTo(spawnCFrame)
+	else
+		projectile.CFrame = spawnCFrame
+	end
+
+	projectile.Parent = getProjectileFolder()
+
+	local velocity = getPostImpactVelocity(incomingVelocity, unitNormal)
+	local spinAxis = incomingVelocity:Cross(unitNormal)
+	if spinAxis.Magnitude <= 0.05 then
+		spinAxis = Vector3.new(0.35, 1, 0.2)
+	end
+	local angularVelocity = spinAxis.Unit * BombConfig.PostImpactAngularSpeed
+	setProjectileAssemblyMotion(projectile, velocity, angularVelocity)
+
+	state.physicalProjectile = projectile
+	state.physicalRoot = rootPart
+	state.position = rootPart.Position
+	state.lastPosition = rootPart.Position
+	return projectile
+end
+
+local function fireProjectileImpact(state: ProjectileState, position: Vector3, normal: Vector3, incomingVelocity: Vector3)
+	if state.landed then
+		return
+	end
+
+	state.landed = true
+	state.position = position
+	state.lastPosition = position
+	local physicalProjectile = spawnPhysicalProjectile(state, position, normal, incomingVelocity)
+	fireEffect("Impact", {
+		player = state.owner,
+		projectileId = state.id,
+		position = position,
+		impactNormal = normal,
+		impactVelocity = incomingVelocity,
+		physicalProjectile = physicalProjectile,
+	})
+end
+
+local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any, startedAt: number, remainingFuse: number)
+	local fallbackDirection = rootPart.CFrame.LookVector
+	local origin = getThrowOrigin(rootPart)
+	local targetPosition = getTargetPositionFromPayload(targetPayload, origin, fallbackDirection)
+	local useDirectTarget = typeof(targetPayload) == "table" and targetPayload.targetHit == true
+	local resolvedTargetPosition = resolveLandingTarget(player, origin, targetPosition, useDirectTarget)
+	local trajectory = calculateTrajectory(origin, resolvedTargetPosition)
+	local projectileId = createProjectileId(player)
+	local launchTime = now()
+	local state: ProjectileState = {
+		id = projectileId,
+		owner = player,
+		path = trajectory,
+		launchedAt = launchTime,
+		position = origin,
+		lastPosition = origin,
+		landed = false,
+		physicalProjectile = nil,
+		physicalRoot = nil,
+	}
+	activeProjectiles[projectileId] = state
+
+	fireEffect("Throw", {
+		player = player,
+		projectileId = projectileId,
+		origin = trajectory.origin,
+		targetPosition = trajectory.resolvedTargetPosition,
+		controlPoint = trajectory.controlPoint,
+		duration = trajectory.duration,
+		startedAt = launchTime,
+		fuseStartedAt = startedAt,
+		remainingFuse = remainingFuse,
+	})
+
+	task.delay(remainingFuse, function()
+		local currentState = activeProjectiles[projectileId]
+		if currentState then
+			explode(player, currentState.position, "Projectile", projectileId)
+		end
+	end)
+	task.delay(remainingFuse + BombConfig.ProjectileLifetimePadding, function()
+		local currentState = activeProjectiles[projectileId]
+		if currentState then
+			destroyPhysicalProjectile(currentState)
+			activeProjectiles[projectileId] = nil
+		end
+	end)
+end
+
+local function updateProjectileStates(currentTime: number)
+	for projectileId, state in pairs(activeProjectiles) do
+		if not state.owner.Parent then
+			destroyPhysicalProjectile(state)
+			activeProjectiles[projectileId] = nil
+			continue
+		end
+		if state.landed then
+			state.position = getProjectilePhysicsPosition(state)
+			state.lastPosition = state.position
+			continue
+		end
+
+		local alpha = math.clamp((currentTime - state.launchedAt) / state.path.duration, 0, 1)
+		local nextPosition = BombTrajectory.Evaluate(state.path, alpha)
+		local hit = sweepProjectile(state.owner, state.lastPosition, nextPosition)
+		if hit then
+			fireProjectileImpact(state, hit.Position, hit.Normal, BombTrajectory.GetVelocity(state.path, alpha))
+		elseif alpha >= 1 then
+			local position = state.path.resolvedTargetPosition
+			fireProjectileImpact(state, position, getSurfaceNormal(state.owner, position), BombTrajectory.GetVelocity(state.path, 1))
+		else
+			state.position = nextPosition
+			state.lastPosition = nextPosition
+		end
+	end
+end
+
 local function beginCook(player: Player)
 	if not isActivePlayer(player) then
 		return
@@ -379,31 +756,22 @@ local function beginCook(player: Player)
 	if cookStates[player] then
 		return
 	end
-	if not consumeBomb(player) then
+	if getBombCount(player) <= 0 then
 		return
 	end
 
-	local startedAt = now()
-	cookStates[player] = {
-		startedAt = startedAt,
+	local state = {
+		holdStartedAt = now(),
 	}
-	setCookingAttributes(player, true, startedAt)
+	cookStates[player] = state
+	setCookingAttributes(player, false, 0)
 
-	fireEffect("Cook", {
-		player = player,
-		startedAt = startedAt,
-		fuseSeconds = BombConfig.FuseSeconds,
-	})
-
-	task.delay(BombConfig.FuseSeconds, function()
-		local state = cookStates[player]
-		if state and state.startedAt == startedAt then
-			explodeInHand(player, "InHand")
-		end
+	task.delay(BombConfig.CookDelaySeconds, function()
+		startActiveCook(player, state)
 	end)
 end
 
-local function releaseCook(player: Player, aimDirection: any)
+local function releaseCook(player: Player, targetPayload: any)
 	local state = cookStates[player]
 	if not state then
 		return
@@ -420,66 +788,32 @@ local function releaseCook(player: Player, aimDirection: any)
 		return
 	end
 
-	local elapsed = now() - state.startedAt
-	if elapsed >= BombConfig.FuseSeconds then
+	local currentTime = now()
+	local cookStartedAt = state.cookStartedAt
+	local throwStartedAt = currentTime
+	local remainingFuse = BombConfig.FuseSeconds
+
+	if cookStartedAt then
+		local elapsed = currentTime - cookStartedAt
+		if elapsed >= BombConfig.FuseSeconds then
+			explodeInHand(player, "InHand")
+			return
+		end
+
+		throwStartedAt = cookStartedAt
+		remainingFuse = math.max(BombConfig.FuseSeconds - elapsed, 0)
+	elseif not consumeBomb(player) then
+		stopCooking(player)
+		return
+	end
+
+	if remainingFuse <= 0 then
 		explodeInHand(player, "InHand")
 		return
 	end
 
 	stopCooking(player)
-
-	local fallbackDirection = rootPart.CFrame.LookVector
-	local direction = sanitizeAimDirection(aimDirection, fallbackDirection)
-	local projectile, projectileRoot = prepareProjectileInstance()
-	local spawnCFrame = CFrame.new(rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset))
-	local folder = getProjectileFolder()
-
-	if projectile:IsA("Model") then
-		projectile:PivotTo(spawnCFrame)
-	else
-		projectile.CFrame = spawnCFrame
-	end
-	projectile.Parent = folder
-	projectileRoot:SetNetworkOwner(nil)
-	projectile:SetAttribute("OwnerUserId", player.UserId)
-	projectile:SetAttribute("StartedAt", state.startedAt)
-
-	projectileRoot.AssemblyLinearVelocity = (direction * BombConfig.ThrowSpeed)
-		+ Vector3.yAxis * BombConfig.ThrowUpBoost
-		+ rootPart.AssemblyLinearVelocity * BombConfig.InheritedVelocityScale
-
-	fireEffect("Throw", {
-		player = player,
-		projectile = projectile,
-		position = projectileRoot.Position,
-		direction = direction,
-		startedAt = state.startedAt,
-	})
-
-	local impacted = false
-	projectileRoot.Touched:Connect(function(hit)
-		if impacted or not hit or hit:IsDescendantOf(player.Character or workspace) then
-			return
-		end
-		impacted = true
-		fireEffect("Impact", {
-			player = player,
-			projectile = projectile,
-			position = projectileRoot.Position,
-		})
-	end)
-
-	local remainingFuse = math.max(BombConfig.FuseSeconds - elapsed, 0)
-	task.delay(remainingFuse, function()
-		if projectile.Parent then
-			explode(player, projectileRoot.Position, "Projectile", projectile)
-		end
-	end)
-	task.delay(remainingFuse + BombConfig.ProjectileLifetimePadding, function()
-		if projectile.Parent then
-			projectile:Destroy()
-		end
-	end)
+	throwBomb(player, rootPart, targetPayload, throwStartedAt, remainingFuse)
 end
 
 local function updateRecharge(player: Player, currentTime: number)
@@ -533,6 +867,15 @@ local function disconnectCharacter(player: Player)
 	end
 end
 
+local function clearPlayerProjectiles(player: Player)
+	for projectileId, state in pairs(activeProjectiles) do
+		if state.owner == player then
+			destroyPhysicalProjectile(state)
+			activeProjectiles[projectileId] = nil
+		end
+	end
+end
+
 function BombService:OnStart()
 	beginRemote = ensureRemote(BEGIN_REMOTE_NAME)
 	releaseRemote = ensureRemote(RELEASE_REMOTE_NAME)
@@ -546,6 +889,7 @@ function BombService:OnStart()
 	end
 	heartbeatConnection = game:GetService("RunService").Heartbeat:Connect(function()
 		local currentTime = now()
+		updateProjectileStates(currentTime)
 		for _, player in ipairs(Players:GetPlayers()) do
 			syncPlayerRoundState(player)
 			if not isActivePlayer(player) and cookStates[player] then
@@ -569,6 +913,7 @@ end
 function BombService:OnPlayerRemoving(player: Player)
 	stopCooking(player)
 	seenRoundIds[player] = nil
+	clearPlayerProjectiles(player)
 	disconnectCharacter(player)
 end
 

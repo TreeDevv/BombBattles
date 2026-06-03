@@ -4,7 +4,7 @@ end
 
 return table.freeze({
 	Enabled = true,
-	DebugTransitionsEnabled = true,
+	DebugTransitionsEnabled = false,
 	DebugRootTiltThresholdDegrees = 12,
 	DebugLogCooldownSeconds = 0.15,
 	RootUprightGuardEnabled = false,
@@ -21,14 +21,16 @@ return table.freeze({
 		Throw = {
 			AnimationId = assetId("115997415565360"),
 			Looped = false,
-			Priority = Enum.AnimationPriority.Movement,
-			Weight = 0.65,
+			Priority = Enum.AnimationPriority.Action,
+			Weight = 1,
 		},
 	},
 	BombHoldKeyframeName = "Hold",
 	BombThrowMarkerName = "Throw",
 	BombReleaseFallbackSeconds = 0.45,
 	BombAnimationFadeTime = 0.06,
+	BombAnimationFadeInTime = 0.14,
+	BombAnimationFadeOutTime = 0.16,
 
 	Animations = {
 		Idle = {

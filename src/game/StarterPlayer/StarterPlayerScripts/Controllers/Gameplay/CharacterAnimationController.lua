@@ -362,7 +362,7 @@ function CharacterAnimationController:_markRiskyTransition(eventName: string, tr
 end
 
 function CharacterAnimationController:_updateRootGuard(now: number)
-	if not AnimationConfig.RootUprightGuardEnabled or now > self._rootGuardUntil then
+	if not AnimationConfig.RootUprightGuardEnabled or not AnimationConfig.DebugTransitionsEnabled or now > self._rootGuardUntil then
 		return
 	end
 

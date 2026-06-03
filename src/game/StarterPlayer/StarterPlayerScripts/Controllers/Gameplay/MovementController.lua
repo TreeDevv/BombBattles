@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local MovementConfig = require(ReplicatedStorage.Shared.Config.MovementConfig)
 
 local LocalPlayer = Players.LocalPlayer
@@ -13,6 +14,8 @@ local CROUCH_ACTION_NAME = "BombBattlesCrouch"
 local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 1
 local CONTROLLER_LOOKUP_TIMEOUT = 5
 local NEVER = -math.huge
+local ADMIN_WALK_SPEED_ATTR = AdminConfig.WalkSpeedAttribute
+local KNOCKBACK_UNTIL_ATTR = "Bomb_KnockbackUntil"
 local SLIDE_PHASE_NONE = "None"
 local SLIDE_PHASE_GROUND = "GroundSlide"
 local SLIDE_PHASE_AIR_CARRY = "AirCarry"
@@ -159,8 +162,26 @@ local function getCameraFacingDirection(): Vector3
 	return flattenDirection(camera.CFrame.LookVector)
 end
 
+local function getAdminWalkSpeedOverride(): number?
+	local value = LocalPlayer:GetAttribute(ADMIN_WALK_SPEED_ATTR)
+	if typeof(value) ~= "number" then
+		return nil
+	end
+
+	return math.clamp(value, AdminConfig.MinWalkSpeed, AdminConfig.MaxWalkSpeed)
+end
+
 local function readCameraShiftLocked(character: Model?): boolean
 	return character ~= nil and character:GetAttribute("Camera_ShiftLocked") == true
+end
+
+local function isBombKnockbackActive(character: Model?): boolean
+	if not character then
+		return false
+	end
+
+	local knockbackUntil = character:GetAttribute(KNOCKBACK_UNTIL_ATTR)
+	return typeof(knockbackUntil) == "number" and knockbackUntil > workspace:GetServerTimeNow()
 end
 
 local function exponentialAlpha(responsiveness: number, dt: number): number
@@ -1189,6 +1210,10 @@ function MovementController:_step(dt: number)
 	end
 
 	local now = os.clock()
+	if isBombKnockbackActive(self._character) then
+		self:_clearSlidePhase()
+	end
+
 	local isGrounded = self:_isCurrentlyGrounded()
 	self._wasGrounded = self._isGrounded
 	self._isGrounded = isGrounded
@@ -1257,6 +1282,11 @@ function MovementController:_step(dt: number)
 		targetSpeed = MovementConfig.SprintMoveSpeed
 	elseif isGrounded then
 		targetSpeed = MovementConfig.WalkMoveSpeed
+	end
+
+	local adminWalkSpeed = getAdminWalkSpeedOverride()
+	if adminWalkSpeed then
+		targetSpeed = adminWalkSpeed
 	end
 
 	local hasMoveInput = targetMoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude

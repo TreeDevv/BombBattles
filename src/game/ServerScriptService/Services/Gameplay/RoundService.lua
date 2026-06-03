@@ -16,6 +16,7 @@ local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
+local ROUND_RESPAWN_ENDS_AT_ATTR = "RoundRespawnEndsAt"
 local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
 local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
 
@@ -34,6 +35,9 @@ local running = false
 local roundId = 0
 local currentState = RoundStates.WaitingForPlayers
 local votingOpen = false
+local pendingAdminForceStartMapId: string? = nil
+local pendingAdminReset = false
+local pendingAdminWinnerTeam: string? = nil
 local currentChoices: { MapConfig } = {}
 local voteCounts: { [string]: number } = {}
 local playerVotes: { [Player]: string } = {}
@@ -203,6 +207,16 @@ local function getConfiguredMap(mapId: string): MapConfig?
 	return nil
 end
 
+local function getFirstConfiguredMapId(): string?
+	for _, mapConfig in ipairs(RoundConfig.Maps) do
+		if getMapTemplate(mapConfig.id) then
+			return mapConfig.id
+		end
+	end
+
+	return nil
+end
+
 local function getTeam(teamName: string): Team?
 	local team = Teams:FindFirstChild(teamName)
 	if team and team:IsA("Team") then
@@ -308,6 +322,7 @@ local function clearPlayerRoundState(player: Player)
 	player:SetAttribute(ROUND_ID_ATTR, nil)
 	player:SetAttribute(ROUND_TEAM_ATTR, nil)
 	player:SetAttribute(ROUND_ALIVE_ATTR, nil)
+	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, nil)
 	player.Neutral = true
 	player.Team = nil
 end
@@ -551,6 +566,7 @@ local function eliminatePlayer(player: Player)
 
 	alivePlayers[player] = nil
 	player:SetAttribute(ROUND_ALIVE_ATTR, false)
+	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 	syncAliveCounts()
 
 	task.defer(function()
@@ -562,12 +578,7 @@ end
 
 local function respawnPlayerInRound(player: Player)
 	player:SetAttribute(ROUND_ALIVE_ATTR, true)
-
-	task.defer(function()
-		if player.Parent == Players and currentState == RoundStates.Active and alivePlayers[player] then
-			player:LoadCharacter()
-		end
-	end)
+	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, workspace:GetServerTimeNow() + RoundConfig.RespawnSeconds)
 end
 
 local function handlePlayerDeath(player: Player)
@@ -612,6 +623,7 @@ local function bindCharacter(player: Player)
 
 			if currentState == RoundStates.Active and roundPlayers[player] then
 				bindHumanoid(character)
+				player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 				local activeMap = getActiveMap()
 				local teamName = playerTeams[player]
 				if activeMap and teamName then
@@ -722,6 +734,7 @@ local function assignTeams(players: { Player })
 		player:SetAttribute(ROUND_ID_ATTR, roundId)
 		player:SetAttribute(ROUND_TEAM_ATTR, teamName)
 		player:SetAttribute(ROUND_ALIVE_ATTR, true)
+		player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 		bindCharacter(player)
 	end
 
@@ -785,6 +798,9 @@ end
 local function waitForSecondsOrInvalid(seconds: number, requireMinPlayers: boolean): boolean
 	local deadline = os.clock() + seconds
 	while os.clock() < deadline do
+		if pendingAdminReset or pendingAdminForceStartMapId or pendingAdminWinnerTeam then
+			return false
+		end
 		if requireMinPlayers and #Players:GetPlayers() < getRequiredPlayerCount() then
 			return false
 		end
@@ -804,6 +820,17 @@ local function runActiveRound()
 	local deadline = os.clock() + RoundConfig.RoundSeconds
 
 	while os.clock() < deadline do
+		if pendingAdminReset or pendingAdminForceStartMapId then
+			return
+		end
+
+		if pendingAdminWinnerTeam then
+			local winnerTeam = pendingAdminWinnerTeam
+			pendingAdminWinnerTeam = nil
+			endRound(winnerTeam)
+			return
+		end
+
 		local aliveCounts = countAlivePlayers()
 		local winner = getWinnerFromAliveCounts(aliveCounts)
 		if winner then
@@ -822,6 +849,8 @@ end
 
 local function resetRound()
 	setState(RoundStates.Resetting, "Resetting", 0)
+	pendingAdminReset = false
+	pendingAdminWinnerTeam = nil
 	resetPlayersToLobby()
 	DestructionService:Cleanup()
 	clearActiveMap()
@@ -841,9 +870,23 @@ end
 
 local function runRoundLoop()
 	while running do
-		local requiredPlayerCount = getRequiredPlayerCount()
-		if #Players:GetPlayers() < requiredPlayerCount then
+		if pendingAdminReset and not pendingAdminForceStartMapId then
+			resetRound()
 			setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
+			task.wait(0.2)
+			continue
+		end
+
+		local forcedMapId = pendingAdminForceStartMapId
+		local requiredPlayerCount = getRequiredPlayerCount()
+		if not forcedMapId and #Players:GetPlayers() < requiredPlayerCount then
+			setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
+			setVotingOpen(false)
+			task.wait(1)
+			continue
+		end
+		if forcedMapId and #Players:GetPlayers() == 0 then
+			setState(RoundStates.WaitingForPlayers, "Waiting for admin tester", 0)
 			setVotingOpen(false)
 			task.wait(1)
 			continue
@@ -855,8 +898,16 @@ local function runRoundLoop()
 			continue
 		end
 
-		currentChoices = chooseVoteOptions()
+		if forcedMapId then
+			local forcedMap = getConfiguredMap(forcedMapId)
+			currentChoices = if forcedMap then { forcedMap } else {}
+		else
+			currentChoices = chooseVoteOptions()
+		end
 		if #currentChoices == 0 then
+			if forcedMapId then
+				pendingAdminForceStartMapId = nil
+			end
 			setState(RoundStates.WaitingForPlayers, "Waiting for maps", 0)
 			task.wait(3)
 			continue
@@ -866,16 +917,25 @@ local function runRoundLoop()
 		playerVotes = {}
 		voteCounts = {}
 		syncVoteChoices()
-		setVotingOpen(true)
-		setState(RoundStates.Intermission, "Intermission", RoundConfig.IntermissionSeconds)
+		setVotingOpen(not forcedMapId)
 
-		if not waitForSecondsOrInvalid(RoundConfig.IntermissionSeconds, true) then
+		local selectedMapId: string?
+		if forcedMapId then
+			selectedMapId = forcedMapId
+			pendingAdminForceStartMapId = nil
+			pendingAdminReset = false
+			setState(RoundStates.Intermission, "Admin start", 0)
+		else
+			setState(RoundStates.Intermission, "Intermission", RoundConfig.IntermissionSeconds)
+		end
+
+		if not forcedMapId and not waitForSecondsOrInvalid(RoundConfig.IntermissionSeconds, true) then
 			cancelToWaiting("Round cancelled because not enough players remain")
 			continue
 		end
 
 		setVotingOpen(false)
-		local selectedMapId = chooseWinningMap()
+		selectedMapId = selectedMapId or chooseWinningMap()
 		if not selectedMapId or not getConfiguredMap(selectedMapId) then
 			cancelToWaiting("Round cancelled because no voted map could be selected")
 			continue
@@ -885,7 +945,8 @@ local function runRoundLoop()
 		setState(RoundStates.AssigningTeams, "Assigning teams", 0)
 
 		local roster = getEligiblePlayers()
-		if #roster < getRequiredPlayerCount() then
+		local minimumRosterCount = if forcedMapId then 1 else getRequiredPlayerCount()
+		if #roster < minimumRosterCount then
 			cancelToWaiting("Round cancelled because roster is below minimum")
 			continue
 		end
@@ -930,6 +991,7 @@ local function onSubmitMapVote(player: Player, mapId: any)
 end
 
 function RoundService:OnStart()
+	Players.RespawnTime = RoundConfig.RespawnSeconds
 	createGameReplica()
 	submitMapVoteRemote = ensureVoteRemote()
 	submitMapVoteRemote.OnServerEvent:Connect(onSubmitMapVote)
@@ -1045,6 +1107,157 @@ function RoundService:GetTrackedCore(instance: Instance): Instance?
 	end
 
 	return nil
+end
+
+function RoundService:AdminForceStart(mapId: string?): (boolean, string?)
+	local selectedMapId = mapId
+	if typeof(selectedMapId) ~= "string" or selectedMapId == "" then
+		selectedMapId = getFirstConfiguredMapId()
+	end
+	if not selectedMapId then
+		return false, "No configured map is available"
+	end
+	if not getConfiguredMap(selectedMapId) then
+		return false, "Unknown map: " .. selectedMapId
+	end
+	if not getMapTemplate(selectedMapId) then
+		return false, "Map template is missing: " .. selectedMapId
+	end
+
+	pendingAdminForceStartMapId = selectedMapId
+	pendingAdminReset = currentState ~= RoundStates.WaitingForPlayers
+	pendingAdminWinnerTeam = nil
+	return true, "Queued admin round start for " .. selectedMapId
+end
+
+function RoundService:AdminResetRound(): (boolean, string?)
+	pendingAdminReset = true
+	pendingAdminWinnerTeam = nil
+	return true, "Queued round reset"
+end
+
+function RoundService:AdminEndRound(winnerTeam: string): (boolean, string?)
+	if currentState ~= RoundStates.Active then
+		return false, "A round must be active to force a winner"
+	end
+	if winnerTeam ~= RoundConfig.Teams.Red.name and winnerTeam ~= RoundConfig.Teams.Blue.name and winnerTeam ~= "Draw" then
+		return false, "Invalid winner"
+	end
+
+	pendingAdminWinnerTeam = winnerTeam
+	return true, "Queued " .. winnerTeam .. " win"
+end
+
+function RoundService:AdminDamageTeamCore(teamName: string, damage: number): (boolean, string?)
+	if typeof(teamName) ~= "string" or not teamCoreInstances[teamName] then
+		return false, "Unknown team"
+	end
+	if typeof(damage) ~= "number" or damage <= 0 then
+		return false, "Damage must be positive"
+	end
+
+	for _, core in ipairs(teamCoreInstances[teamName]) do
+		if isCoreAlive(core) then
+			if self:DamageCore(core, damage) then
+				return true, "Damaged " .. teamName .. " core"
+			end
+		end
+	end
+
+	return false, "No live " .. teamName .. " core is available"
+end
+
+function RoundService:AdminDestroyTeamCore(teamName: string): (boolean, string?)
+	if typeof(teamName) ~= "string" or not teamCoreInstances[teamName] then
+		return false, "Unknown team"
+	end
+
+	for _, core in ipairs(teamCoreInstances[teamName]) do
+		if isCoreAlive(core) then
+			if self:MarkCoreDestroyed(core) then
+				return true, "Destroyed " .. teamName .. " core"
+			end
+		end
+	end
+
+	return false, "No live " .. teamName .. " core is available"
+end
+
+function RoundService:AdminRespawnPlayer(player: Player): (boolean, string?)
+	if not player or player.Parent ~= Players then
+		return false, "Target player is not in this server"
+	end
+
+	if currentState ~= RoundStates.Active or not roundPlayers[player] then
+		player:LoadCharacter()
+		task.defer(function()
+			if player.Parent == Players then
+				movePlayerToLobby(player)
+			end
+		end)
+		return true, "Respawned " .. player.Name .. " in lobby"
+	end
+
+	alivePlayers[player] = true
+	player:SetAttribute(ROUND_ALIVE_ATTR, true)
+	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
+	bindCharacter(player)
+	syncAliveCounts()
+	task.defer(function()
+		if player.Parent == Players then
+			player:LoadCharacter()
+		end
+	end)
+	return true, "Respawned " .. player.Name .. " in round"
+end
+
+function RoundService:AdminRespawnAll(): (boolean, string?)
+	for _, player in ipairs(Players:GetPlayers()) do
+		self:AdminRespawnPlayer(player)
+	end
+
+	return true, "Respawned all players"
+end
+
+function RoundService:AdminTeleportPlayer(player: Player, destination: string, sourcePlayer: Player?): (boolean, string?)
+	if not player or player.Parent ~= Players then
+		return false, "Target player is not in this server"
+	end
+	if not player.Character then
+		player:LoadCharacter()
+	end
+
+	if destination == "Lobby" then
+		movePlayerToLobby(player)
+		return true, "Teleported " .. player.Name .. " to lobby"
+	end
+
+	if destination == "Admin" then
+		local sourceCharacter = sourcePlayer and sourcePlayer.Character
+		local sourceRoot = sourceCharacter and sourceCharacter:FindFirstChild("HumanoidRootPart")
+		if sourceRoot and sourceRoot:IsA("BasePart") and player.Character then
+			player.Character:PivotTo(sourceRoot.CFrame + sourceRoot.CFrame.LookVector * 4)
+			return true, "Teleported " .. player.Name .. " to admin"
+		end
+		return false, "Admin character is not available"
+	end
+
+	if destination == "MapSpawn" then
+		local activeMap = getActiveMap()
+		if not activeMap then
+			return false, "No active map is available"
+		end
+
+		local teamName = playerTeams[player]
+		local spawns = if teamName then getTeamSpawns(teamName, activeMap) else getTaggedSpawnParts(RoundConfig.Tags.TeamSpawn, activeMap)
+		if #spawns == 0 then
+			return false, "No map spawn is available"
+		end
+		moveCharacterToSpawn(player, spawns[rng:NextInteger(1, #spawns)])
+		return true, "Teleported " .. player.Name .. " to map"
+	end
+
+	return false, "Unknown teleport destination"
 end
 
 return RoundService

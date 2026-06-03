@@ -25,6 +25,16 @@ local function shouldPlayClick(button)
 	return true
 end
 
+local function shouldBindButton(button)
+	local parent = button.Parent
+	local grandparent = parent and parent.Parent
+	if button.Name == "Bomb" and parent and parent.Name == "Buttons" and grandparent and grandparent.Name == "HUD" then
+		return false
+	end
+
+	return true
+end
+
 local function playClick()
 	clickSound.TimePosition = 0
 	clickSound:Play()
@@ -75,7 +85,7 @@ local function loadConnectionsFor(button)
 end
 
 for _, button in playerGui:GetDescendants() do
-	if button:IsA("TextButton") or button:IsA("ImageButton") then
+	if (button:IsA("TextButton") or button:IsA("ImageButton")) and shouldBindButton(button) then
 		loadConnectionsFor(button)
 	end
 end

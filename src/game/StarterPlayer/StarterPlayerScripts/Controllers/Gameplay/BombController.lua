@@ -7,10 +7,13 @@ local UserInputService = game:GetService("UserInputService")
 
 local AnimationConfig = require(ReplicatedStorage.Shared.Config.AnimationConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
+local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debris)
 
 local LocalPlayer = Players.LocalPlayer
+local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local REMOTES_FOLDER_NAME = "Remotes"
 local BEGIN_REMOTE_NAME = "BeginBombCook"
 local RELEASE_REMOTE_NAME = "ReleaseBombCook"
@@ -18,18 +21,30 @@ local EFFECT_REMOTE_NAME = "BombEffect"
 local BOMB_ACTION_NAME = "BombBattlesPrimaryBomb"
 local PREVIEW_FOLDER_NAME = "BombPreview"
 local PROJECTILE_VISUAL_FOLDER_NAME = "BombProjectileVisuals"
+local EXPLOSION_VFX_FOLDER_NAME = "BombExplosionVFX"
 local RENDER_STEP_NAME = "BombBattlesBombPreview"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 2
+local ROUND_ALIVE_ATTR = "RoundAlive"
+local EXPLOSION_VFX_CLEANUP_SECONDS = 8
 local ATTR = BombConfig.Attributes
 
 local BombController = {}
+BombController.HoldStarted = Signal.new()
+BombController.HoldReleased = Signal.new()
 
 BombController._beginRemote = nil :: RemoteEvent?
 BombController._releaseRemote = nil :: RemoteEvent?
 BombController._effectRemote = nil :: RemoteEvent?
 BombController._effectConnection = nil :: RBXScriptConnection?
+BombController._emitModule = nil :: any
+BombController._emitModuleInitialized = false
+BombController._warnedMissingExplosionVfx = false
+BombController._warnedMissingEmitModule = false
 BombController._characterConnection = nil :: RBXScriptConnection?
+BombController._characterRemovingConnection = nil :: RBXScriptConnection?
 BombController._cookingConnection = nil :: RBXScriptConnection?
+BombController._humanoidConnection = nil :: RBXScriptConnection?
+BombController._stateConnections = {} :: { RBXScriptConnection }
 BombController._character = nil :: Model?
 BombController._animator = nil :: Animator?
 BombController._bombTracks = {} :: { [string]: AnimationTrack }
@@ -42,6 +57,7 @@ BombController._holding = false
 BombController._previewing = false
 BombController._releasePending = false
 BombController._releaseFallbackSerial = 0
+BombController._started = false
 BombController._lastDebugLogTimes = {} :: { [string]: number }
 BombController._projectileVisualFolder = nil :: Folder?
 BombController._projectileVisuals = {} :: {
@@ -51,6 +67,11 @@ BombController._projectileVisuals = {} :: {
 		connection: RBXScriptConnection?,
 		path: any,
 		spin: number,
+		ownsInstance: boolean,
+		highlight: Highlight?,
+		pulseConnection: RBXScriptConnection?,
+		fuseStartedAt: number?,
+		fuseEndsAt: number?,
 	},
 }
 
@@ -64,14 +85,80 @@ local function getRemote(name: string): RemoteEvent?
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
 end
 
-local function getRootPart(): BasePart?
+local function getCharacterParts(): (Model?, Humanoid?, BasePart?)
 	local character = LocalPlayer.Character
 	if not character then
-		return nil
+		return nil, nil, nil
 	end
 
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	return if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+	return character, humanoid, if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+end
+
+local function getRootPart(): BasePart?
+	local _, _, rootPart = getCharacterParts()
+	return rootPart
+end
+
+local function reinforceLaunchVelocity(rootPart: BasePart, launchDirection: Vector3, minimumHorizontal: number, minimumVertical: number)
+	local velocity = rootPart.AssemblyLinearVelocity
+	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+	local horizontalDirection = Vector3.new(launchDirection.X, 0, launchDirection.Z)
+	if horizontalDirection.Magnitude > 0.05 then
+		horizontalDirection = horizontalDirection.Unit
+	end
+
+	local finalHorizontal = horizontalVelocity
+	if horizontalDirection.Magnitude > 0.05 then
+		local forwardSpeed = horizontalVelocity:Dot(horizontalDirection)
+		if forwardSpeed < minimumHorizontal then
+			finalHorizontal += horizontalDirection * (minimumHorizontal - forwardSpeed)
+		end
+	end
+	local finalY = math.max(velocity.Y, minimumVertical)
+
+	rootPart.AssemblyLinearVelocity = Vector3.new(finalHorizontal.X, finalY, finalHorizontal.Z)
+end
+
+local function applyOwnerClientExplosionLaunch(origin: Vector3)
+	local _, humanoid, rootPart = getCharacterParts()
+	if not (humanoid and rootPart and humanoid.Health > 0) then
+		return
+	end
+
+	local distance = (rootPart.Position - origin).Magnitude
+	if distance > BombConfig.OuterRadius then
+		return
+	end
+
+	local away = rootPart.Position - origin
+	if away.Magnitude < 0.05 then
+		away = Vector3.yAxis
+	else
+		away = away.Unit
+	end
+
+	local radiusAlpha = math.clamp(1 - (distance / BombConfig.OuterRadius), 0, 1)
+	local scale = math.max(radiusAlpha, BombConfig.OwnerClientLaunchMinScale)
+	if scale <= 0 then
+		return
+	end
+
+	local horizontal = BombConfig.OwnerClientLaunchHorizontal * scale
+	local velocityDelta = Vector3.new(
+		away.X * horizontal,
+		BombConfig.OwnerClientLaunchVertical * scale,
+		away.Z * horizontal
+	)
+
+	rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
+	reinforceLaunchVelocity(rootPart, away, horizontal, BombConfig.OwnerClientLaunchVertical * scale)
+	task.defer(function()
+		if rootPart.Parent then
+			reinforceLaunchVelocity(rootPart, away, horizontal * 0.8, BombConfig.OwnerClientLaunchVertical * scale * 0.8)
+		end
+	end)
 end
 
 local function getAimDirection(): Vector3
@@ -85,82 +172,34 @@ local function getAimDirection(): Vector3
 	return direction.Unit
 end
 
-local function getThrowOrigin(rootPart: BasePart): Vector3
-	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
-end
-
-local function getRaycastFilterInstances(): { Instance }
-	local filters = {}
-	local character = LocalPlayer.Character
-	if character then
-		table.insert(filters, character)
-	end
-	if BombController._previewFolder and BombController._previewFolder.Parent then
-		table.insert(filters, BombController._previewFolder)
-	end
-	if BombController._projectileVisualFolder and BombController._projectileVisualFolder.Parent then
-		table.insert(filters, BombController._projectileVisualFolder)
-	end
-
-	local projectileFolder = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
-	if projectileFolder then
-		table.insert(filters, projectileFolder)
-	end
-
-	return filters
-end
-
-local function getMouseTargetPosition(origin: Vector3): (Vector3, boolean)
+local function getMouseAimDirection(): Vector3
 	local camera = workspace.CurrentCamera
 	if not camera then
-		return origin + getAimDirection() * BombConfig.NoHitFallbackDistance, false
+		return getAimDirection()
 	end
 
 	local mouseLocation = UserInputService:GetMouseLocation()
 	local ray = camera:ViewportPointToRay(mouseLocation.X, mouseLocation.Y)
-	local raycastParams = RaycastParams.new()
-	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-	raycastParams.FilterDescendantsInstances = getRaycastFilterInstances()
-	raycastParams.IgnoreWater = true
-
-	local result = workspace:Raycast(ray.Origin, ray.Direction * BombConfig.MouseRaycastDistance, raycastParams)
-	if result then
-		return result.Position, true
+	local direction = Vector3.new(ray.Direction.X, math.clamp(ray.Direction.Y, BombConfig.MinAimY, BombConfig.MaxAimY), ray.Direction.Z)
+	if direction.Magnitude < 0.05 then
+		return getAimDirection()
 	end
 
-	return origin + ray.Direction * BombConfig.NoHitFallbackDistance, false
+	return direction.Unit
 end
 
-local function resolveLandingTarget(origin: Vector3, targetPosition: Vector3, useDirectTarget: boolean): Vector3
-	local raycastParams = RaycastParams.new()
-	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
-	raycastParams.FilterDescendantsInstances = getRaycastFilterInstances()
-	raycastParams.IgnoreWater = true
-	raycastParams.RespectCanCollide = true
-
-	local resolvedTargetPosition = BombTrajectory.ResolveLandingTarget(
-		origin,
-		targetPosition,
-		useDirectTarget,
-		BombConfig.LandingResolveUp,
-		BombConfig.LandingResolveDown,
-		BombConfig.NoHitFallbackDistance,
-		function(rayOrigin: Vector3, rayDirection: Vector3)
-			return workspace:Raycast(rayOrigin, rayDirection, raycastParams)
-		end
-	)
-	return resolvedTargetPosition
+local function getThrowOrigin(rootPart: BasePart): Vector3
+	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
 end
 
-local function calculateTrajectory(origin: Vector3, targetPosition: Vector3, useDirectTarget: boolean?)
-	local resolvedTargetPosition = resolveLandingTarget(origin, targetPosition, useDirectTarget == true)
+local function calculateTrajectory(origin: Vector3, aimDirection: Vector3)
 	return BombTrajectory.CreatePath(
 		origin,
-		resolvedTargetPosition,
-		BombConfig.TravelSpeed,
-		BombConfig.ArcHeightMin,
-		BombConfig.ArcHeightPerStud,
-		BombConfig.ArcHeightMax
+		aimDirection,
+		BombConfig.ProjectileLaunchSpeed,
+		BombConfig.ProjectileUpwardVelocity,
+		workspace.Gravity * BombConfig.ProjectileGravityScale,
+		BombConfig.ProjectileMaxFlightSeconds
 	)
 end
 
@@ -197,6 +236,10 @@ local function isCooking(): boolean
 	return LocalPlayer:GetAttribute(ATTR.Cooking) == true
 end
 
+local function isRoundActiveForLocalPlayer(): boolean
+	return RoundController:Get("state") == RoundStates.Active and LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) == true
+end
+
 local function getAnimator(character: Model): Animator?
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
@@ -220,6 +263,24 @@ local function getBombTrackWeight(name: string): number
 	end
 
 	return 1
+end
+
+local function getBombAnimationFadeInTime(): number
+	local fadeTime = AnimationConfig.BombAnimationFadeInTime
+	if typeof(fadeTime) == "number" then
+		return math.max(fadeTime, 0)
+	end
+
+	return math.max(AnimationConfig.BombAnimationFadeTime or 0, 0)
+end
+
+local function getBombAnimationFadeOutTime(): number
+	local fadeTime = AnimationConfig.BombAnimationFadeOutTime
+	if typeof(fadeTime) == "number" then
+		return math.max(fadeTime, 0)
+	end
+
+	return math.max(AnimationConfig.BombAnimationFadeTime or 0, 0)
 end
 
 local function isBombTrackEnabled(name: string): boolean
@@ -351,7 +412,7 @@ function BombController:_disconnectReleaseMarker()
 end
 
 function BombController:_stopBombTracks(fadeTime: number?)
-	local stopFadeTime = fadeTime or AnimationConfig.BombAnimationFadeTime
+	local stopFadeTime = if typeof(fadeTime) == "number" then math.max(fadeTime, 0) else getBombAnimationFadeOutTime()
 	for _, track in pairs(self._bombTracks) do
 		if track.IsPlaying then
 			track:Stop(stopFadeTime)
@@ -368,6 +429,43 @@ function BombController:_clearBombAnimationState()
 	self:_stopBombTracks()
 end
 
+function BombController:_canBeginBombHold(ignoreHolding: boolean?): boolean
+	if not self._started then
+		return false
+	end
+	if self._beginRemote == nil or self._releaseRemote == nil then
+		return false
+	end
+	if not ignoreHolding and (self._holding or self._releasePending or isCooking()) then
+		return false
+	end
+	if getBombCount() <= 0 then
+		return false
+	end
+	if not isRoundActiveForLocalPlayer() then
+		return false
+	end
+
+	local _, humanoid, rootPart = getCharacterParts()
+	return humanoid ~= nil and humanoid.Health > 0 and rootPart ~= nil
+end
+
+function BombController:_cancelHold()
+	if not self._holding then
+		return
+	end
+
+	self:_clearBombAnimationState()
+	self:_stopPreview()
+	self.HoldReleased:Fire()
+end
+
+function BombController:_cancelHoldIfInvalid()
+	if self._holding and not self:_canBeginBombHold(true) then
+		self:_cancelHold()
+	end
+end
+
 function BombController:_destroyBombAnimations()
 	self:_clearBombAnimationState()
 
@@ -379,6 +477,32 @@ function BombController:_destroyBombAnimations()
 	self._bombTracks = {}
 	self._animator = nil
 	self._lastDebugLogTimes = {}
+end
+
+function BombController:_disconnectStateConnections()
+	for _, connection in ipairs(self._stateConnections) do
+		connection:Disconnect()
+	end
+	self._stateConnections = {}
+end
+
+function BombController:_bindInvalidStateSignals()
+	self:_disconnectStateConnections()
+
+	table.insert(self._stateConnections, LocalPlayer:GetAttributeChangedSignal(ATTR.Count):Connect(function()
+		self:_cancelHoldIfInvalid()
+	end))
+	table.insert(self._stateConnections, LocalPlayer:GetAttributeChangedSignal(ROUND_ALIVE_ATTR):Connect(function()
+		self:_cancelHoldIfInvalid()
+	end))
+	table.insert(self._stateConnections, RoundController.StateReceived:Connect(function()
+		self:_cancelHoldIfInvalid()
+	end))
+	table.insert(self._stateConnections, RoundController.StateUpdated:Connect(function(key: string)
+		if key == "state" then
+			self:_cancelHoldIfInvalid()
+		end
+	end))
 end
 
 function BombController:_loadBombAnimations(character: Model)
@@ -466,11 +590,11 @@ function BombController:_playTrack(name: string): AnimationTrack?
 	end
 
 	if track.IsPlaying then
-		track:Stop(0)
+		track:Stop(getBombAnimationFadeOutTime())
 	end
 
 	self:_logDebug("bomb-play-before", name, true)
-	track:Play(AnimationConfig.BombAnimationFadeTime, getBombTrackWeight(name), 1)
+	track:Play(getBombAnimationFadeInTime(), getBombTrackWeight(name), 1)
 	track:AdjustSpeed(1)
 	self:_logDebug("bomb-play-after", name, true)
 	return track
@@ -519,12 +643,8 @@ function BombController:_fireReleaseFromAnimation()
 	if self._releaseRemote then
 		local rootPart = getRootPart()
 		if rootPart then
-			local origin = getThrowOrigin(rootPart)
-			local targetPosition, targetHit = getMouseTargetPosition(origin)
 			self._releaseRemote:FireServer({
-				targetPosition = targetPosition,
-				targetHit = targetHit,
-				aimDirection = getAimDirection(),
+				aimDirection = getMouseAimDirection(),
 			})
 		else
 			self._releaseRemote:FireServer(getAimDirection())
@@ -566,6 +686,7 @@ function BombController:_updatePreview()
 
 	local rootPart = getRootPart()
 	if not rootPart then
+		self:_cancelHoldIfInvalid()
 		self:_stopPreview()
 		return
 	end
@@ -581,9 +702,8 @@ function BombController:_updatePreview()
 	self:_ensurePreviewPoints()
 
 	local origin = getThrowOrigin(rootPart)
-	local targetPosition, targetHit = getMouseTargetPosition(origin)
-	local trajectory = calculateTrajectory(origin, targetPosition, targetHit)
-	local maxPreviewTime = math.min(remaining, trajectory.duration)
+	local trajectory = calculateTrajectory(origin, getMouseAimDirection())
+	local maxPreviewTime = math.min(remaining, trajectory.duration, BombConfig.PreviewMaxSeconds)
 	local dangerAlpha = 1 - math.clamp(remaining / BombConfig.FuseSeconds, 0, 1)
 	local color = BombConfig.PreviewColor:Lerp(BombConfig.PreviewDangerColor, dangerAlpha)
 
@@ -597,8 +717,8 @@ function BombController:_updatePreview()
 end
 
 function BombController:_requestBegin()
-	if self._holding or getBombCount() <= 0 then
-		return
+	if not self:_canBeginBombHold(false) then
+		return false
 	end
 
 	self._holding = true
@@ -608,50 +728,183 @@ function BombController:_requestBegin()
 	if self._beginRemote then
 		self._beginRemote:FireServer()
 	end
+
+	self.HoldStarted:Fire()
+	return true
 end
 
 function BombController:_requestRelease()
 	if not self._holding then
-		return
+		return false
 	end
 
 	self._holding = false
 	self:_playRelease()
+	self.HoldReleased:Fire()
+	return true
+end
+
+function BombController:BeginBombHold(): boolean
+	return self:_requestBegin()
+end
+
+function BombController:ReleaseBombHold(): boolean
+	return self:_requestRelease()
+end
+
+function BombController:IsHoldingBomb(): boolean
+	return self._holding == true
 end
 
 function BombController:_handleAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
 	if inputState == Enum.UserInputState.Begin then
-		self:_requestBegin()
+		self:BeginBombHold()
 	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
-		self:_requestRelease()
+		self:ReleaseBombHold()
 	end
 
 	return Enum.ContextActionResult.Sink
 end
 
-function BombController:_playExplosionEffect(position: Vector3, radius: number)
-	local part = Instance.new("Part")
-	part.Name = "BombExplosionEffect"
-	part.Shape = Enum.PartType.Ball
-	part.Size = Vector3.new(1, 1, 1)
-	part.CFrame = CFrame.new(position)
-	part.Material = Enum.Material.Neon
-	part.Color = BombConfig.PreviewDangerColor
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.Transparency = 0.25
-	part.Parent = workspace
+function BombController:_getExplosionVfxTemplate(): Instance?
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local vfx = assets and assets:FindFirstChild("VFX")
+	local explosion = vfx and vfx:FindFirstChild("Explosion")
+	local template = explosion and explosion:FindFirstChild("Default")
+	if not template and not self._warnedMissingExplosionVfx then
+		self._warnedMissingExplosionVfx = true
+		warn("[BombController] Missing ReplicatedStorage.Assets.VFX.Explosion.Default")
+	end
 
-	local tween = TweenService:Create(part, TweenInfo.new(BombConfig.ExplosionEffectSeconds, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size = Vector3.new(radius * 2, radius * 2, radius * 2),
-		Transparency = 1,
-	})
-	tween.Completed:Connect(function()
-		part:Destroy()
+	return template
+end
+
+function BombController:_getEmitModule()
+	if self._emitModule then
+		return self._emitModule
+	end
+
+	local packages = ReplicatedStorage:WaitForChild("Packages", 10)
+	local moduleScript = packages and packages:WaitForChild("EmitModule", 10)
+	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
+		if not self._warnedMissingEmitModule then
+			self._warnedMissingEmitModule = true
+			warn("[BombController] Missing ReplicatedStorage.Packages.EmitModule")
+		end
+		return nil
+	end
+
+	local ok, emitModule = pcall(require, moduleScript)
+	if not ok then
+		if not self._warnedMissingEmitModule then
+			self._warnedMissingEmitModule = true
+			warn("[BombController] Failed to require EmitModule: " .. tostring(emitModule))
+		end
+		return nil
+	end
+
+	self._emitModule = emitModule
+	return emitModule
+end
+
+function BombController:_ensureEmitModuleInitialized(emitModule): boolean
+	if self._emitModuleInitialized then
+		return true
+	end
+	if type(emitModule.init) ~= "function" then
+		self._emitModuleInitialized = true
+		return true
+	end
+
+	local ok, err = pcall(function()
+		emitModule.init()
 	end)
-	tween:Play()
+	if not ok then
+		warn("[BombController] Failed to initialize EmitModule: " .. tostring(err))
+		return false
+	end
+
+	self._emitModuleInitialized = true
+	return true
+end
+
+function BombController:_getExplosionVfxFolder(): Folder
+	local existing = workspace:FindFirstChild(EXPLOSION_VFX_FOLDER_NAME)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = EXPLOSION_VFX_FOLDER_NAME
+	folder.Parent = workspace
+	return folder
+end
+
+function BombController:_placeExplosionVfx(instance: Instance, position: Vector3)
+	local cframe = CFrame.new(position)
+	if instance:IsA("Model") then
+		instance:PivotTo(cframe)
+	elseif instance:IsA("BasePart") then
+		instance.CFrame = cframe
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.CanTouch = false
+		end
+	end
+	if instance:IsA("BasePart") then
+		instance.Anchored = true
+		instance.CanCollide = false
+		instance.CanQuery = false
+		instance.CanTouch = false
+	end
+end
+
+function BombController:_playExplosionEffect(position: Vector3)
+	local template = self:_getExplosionVfxTemplate()
+	local emitModule = self:_getEmitModule()
+	if not (template and emitModule and self:_ensureEmitModuleInitialized(emitModule)) then
+		return
+	end
+
+	local clone = template:Clone()
+	clone.Name = "BombExplosionVFX"
+	self:_placeExplosionVfx(clone, position)
+	clone.Parent = self:_getExplosionVfxFolder()
+
+	local cleanedUp = false
+	local function cleanup()
+		if cleanedUp then
+			return
+		end
+		cleanedUp = true
+		if clone.Parent then
+			clone:Destroy()
+		end
+	end
+
+	local ok, env = pcall(function()
+		return emitModule.emit(clone)
+	end)
+	if ok and typeof(env) == "table" and env.Finished and type(env.Finished.finally) == "function" then
+		env.Finished:finally(cleanup):catch(function(err)
+			warn("[BombController] Explosion VFX emit failed: " .. tostring(err))
+		end)
+	else
+		if not ok then
+			warn("[BombController] Explosion VFX emit failed: " .. tostring(env))
+		end
+		task.delay(EXPLOSION_VFX_CLEANUP_SECONDS, cleanup)
+	end
+
+	task.delay(EXPLOSION_VFX_CLEANUP_SECONDS, cleanup)
 end
 
 function BombController:_getProjectileVisualFolder(): Folder
@@ -673,6 +926,129 @@ function BombController:_setProjectileVisualCFrame(visual, position: Vector3, ta
 	else
 		visual.rootPart.CFrame = cframe
 	end
+end
+
+function BombController:_getProjectilePulseProgress(visual): (number, number)
+	local fuseStartedAt = visual.fuseStartedAt or getServerTime()
+	local fuseEndsAt = visual.fuseEndsAt or (fuseStartedAt + BombConfig.FuseSeconds)
+	local fuseDuration = math.max(fuseEndsAt - fuseStartedAt, 0.001)
+	local elapsed = math.clamp(getServerTime() - fuseStartedAt, 0, fuseDuration)
+	return elapsed / fuseDuration, elapsed
+end
+
+function BombController:_getProjectilePulseColor(visual, fuseProgress: number?, elapsed: number?): Color3
+	local progress = if typeof(fuseProgress) == "number" then math.clamp(fuseProgress, 0, 1) else 0
+	local pulseElapsed = if typeof(elapsed) == "number" then math.max(elapsed, 0) else 0
+	local startHz = math.max(BombConfig.PulseStartHz, 0.01)
+	local endHz = math.max(BombConfig.PulseEndHz, startHz)
+	local cycles = (startHz * pulseElapsed) + (0.5 * (endHz - startHz) * progress * pulseElapsed)
+	local alpha = (1 - math.cos(cycles * math.pi * 2)) * 0.5
+	return BombConfig.PulseWhite:Lerp(BombConfig.PulseRed, alpha)
+end
+
+function BombController:_updateProjectilePulse(visual)
+	local highlight = visual.highlight
+	if not (highlight and highlight.Parent) then
+		return
+	end
+
+	local fuseProgress, elapsed = self:_getProjectilePulseProgress(visual)
+	local color = self:_getProjectilePulseColor(visual, fuseProgress, elapsed)
+	local fillTransparency = BombConfig.PulseStartFillTransparency
+		+ ((BombConfig.PulseEndFillTransparency - BombConfig.PulseStartFillTransparency) * fuseProgress)
+	local outlineTransparency = BombConfig.PulseStartOutlineTransparency
+		+ ((BombConfig.PulseEndOutlineTransparency - BombConfig.PulseStartOutlineTransparency) * fuseProgress)
+
+	highlight.FillColor = color
+	highlight.OutlineColor = color
+	highlight.FillTransparency = math.clamp(fillTransparency, 0, 1)
+	highlight.OutlineTransparency = math.clamp(outlineTransparency, 0, 1)
+end
+
+function BombController:_stopProjectilePulse(visual)
+	if visual.pulseConnection then
+		visual.pulseConnection:Disconnect()
+		visual.pulseConnection = nil
+	end
+	if visual.highlight and visual.highlight.Parent then
+		visual.highlight:Destroy()
+	end
+	visual.highlight = nil
+end
+
+function BombController:_startProjectilePulse(visual, adornee: Instance, fuseStartedAt: number, fuseEndsAt: number)
+	self:_stopProjectilePulse(visual)
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = "BombFuseHighlight"
+	highlight.Adornee = adornee
+	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+	highlight.FillTransparency = BombConfig.PulseStartFillTransparency
+	highlight.OutlineTransparency = BombConfig.PulseStartOutlineTransparency
+	highlight.Parent = adornee
+
+	visual.highlight = highlight
+	visual.fuseStartedAt = fuseStartedAt
+	visual.fuseEndsAt = fuseEndsAt
+	self:_updateProjectilePulse(visual)
+
+	visual.pulseConnection = RunService.RenderStepped:Connect(function()
+		self:_updateProjectilePulse(visual)
+	end)
+end
+
+function BombController:_findPhysicalProjectile(projectileId: string, physicalProjectile: any): (Instance?, BasePart?)
+	if typeof(physicalProjectile) == "Instance" then
+		local rootPart = getFirstBasePart(physicalProjectile)
+		if rootPart then
+			return physicalProjectile, rootPart
+		end
+	end
+
+	local folder = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
+	local projectile = folder and folder:FindFirstChild("BombProjectile_" .. projectileId)
+	if projectile then
+		local rootPart = getFirstBasePart(projectile)
+		if rootPart then
+			return projectile, rootPart
+		end
+	end
+
+	return nil, nil
+end
+
+function BombController:_transferProjectilePulseToPhysical(projectileId: string, physicalProjectile: any): boolean
+	local visual = self._projectileVisuals[projectileId]
+	if not visual then
+		return false
+	end
+
+	local projectile, rootPart = self:_findPhysicalProjectile(projectileId, physicalProjectile)
+	if not (projectile and rootPart) then
+		return false
+	end
+
+	if visual.connection then
+		visual.connection:Disconnect()
+		visual.connection = nil
+	end
+
+	local airborneInstance = visual.instance
+	self:_startProjectilePulse(
+		visual,
+		projectile,
+		visual.fuseStartedAt or getServerTime(),
+		visual.fuseEndsAt or (getServerTime() + BombConfig.ProjectileLifetimePadding)
+	)
+	if visual.ownsInstance and airborneInstance and airborneInstance.Parent then
+		airborneInstance:Destroy()
+	end
+
+	visual.instance = projectile
+	visual.rootPart = rootPart
+	visual.path = nil
+	visual.ownsInstance = false
+	return true
 end
 
 function BombController:_createProjectileVisual(projectileId: string)
@@ -726,6 +1102,11 @@ function BombController:_createProjectileVisual(projectileId: string)
 		connection = nil,
 		path = nil,
 		spin = 0,
+		ownsInstance = true,
+		highlight = nil,
+		pulseConnection = nil,
+		fuseStartedAt = nil,
+		fuseEndsAt = nil,
 	}
 end
 
@@ -738,7 +1119,8 @@ function BombController:_destroyProjectileVisual(projectileId: string)
 	if visual.connection then
 		visual.connection:Disconnect()
 	end
-	if visual.instance.Parent then
+	self:_stopProjectilePulse(visual)
+	if visual.ownsInstance and visual.instance.Parent then
 		visual.instance:Destroy()
 	end
 	self._projectileVisuals[projectileId] = nil
@@ -805,6 +1187,10 @@ function BombController:_playThrowEffect(payload)
 
 	local startedAt = if typeof(payload.startedAt) == "number" then payload.startedAt else getServerTime()
 	local lifetime = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds
+	local fuseStartedAt = if typeof(payload.fuseStartedAt) == "number" then payload.fuseStartedAt else startedAt
+	local fuseEndsAt = startedAt + lifetime
+	self:_startProjectilePulse(visual, visual.instance, fuseStartedAt, fuseEndsAt)
+
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
 		visual.spin += deltaTime * BombConfig.VisualSpinRadiansPerSecond
 		local alpha = math.clamp((getServerTime() - startedAt) / path.duration, 0, 1)
@@ -850,7 +1236,10 @@ function BombController:_handleProjectileImpact(payload)
 
 	local projectileId = payload.projectileId
 	if typeof(projectileId) == "string" then
-		self:_destroyProjectileVisual(projectileId)
+		local transferred = self:_transferProjectilePulseToPhysical(projectileId, payload.physicalProjectile)
+		if not transferred then
+			self:_destroyProjectileVisual(projectileId)
+		end
 	end
 
 	self:_playImpactEffect(payload.position)
@@ -883,7 +1272,10 @@ function BombController:_bindEffects()
 			if typeof(payload.projectileId) == "string" then
 				self:_destroyProjectileVisual(payload.projectileId)
 			end
-			self:_playExplosionEffect(payload.position, payload.outerRadius or BombConfig.OuterRadius)
+			if payload.player == LocalPlayer then
+				applyOwnerClientExplosionLaunch(payload.position)
+			end
+			self:_playExplosionEffect(payload.position)
 		elseif effectName == "TerrainDebris" and typeof(payload) == "table" then
 			self:_playTerrainDebris(payload.payloads)
 		elseif effectName == "Cook" and typeof(payload) == "table" and payload.player == LocalPlayer then
@@ -900,6 +1292,10 @@ function BombController:_bindCharacter(character: Model?)
 	if self._cookingConnection then
 		self._cookingConnection:Disconnect()
 	end
+	if self._humanoidConnection then
+		self._humanoidConnection:Disconnect()
+		self._humanoidConnection = nil
+	end
 
 	self._cookingConnection = LocalPlayer:GetAttributeChangedSignal(ATTR.Cooking):Connect(function()
 		if not isCooking() then
@@ -910,6 +1306,12 @@ function BombController:_bindCharacter(character: Model?)
 
 	if character then
 		self:_loadBombAnimations(character)
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			self._humanoidConnection = humanoid.HealthChanged:Connect(function()
+				self:_cancelHoldIfInvalid()
+			end)
+		end
 		task.defer(function()
 			if not isCooking() then
 				self:_stopPreview()
@@ -922,7 +1324,9 @@ function BombController:OnStart()
 	self._beginRemote = getRemote(BEGIN_REMOTE_NAME)
 	self._releaseRemote = getRemote(RELEASE_REMOTE_NAME)
 	self._effectRemote = getRemote(EFFECT_REMOTE_NAME)
+	self._started = true
 	self:_bindEffects()
+	self:_bindInvalidStateSignals()
 
 	ContextActionService:UnbindAction(BOMB_ACTION_NAME)
 	ContextActionService:BindAction(
@@ -938,9 +1342,15 @@ function BombController:OnStart()
 	if self._characterConnection then
 		self._characterConnection:Disconnect()
 	end
+	if self._characterRemovingConnection then
+		self._characterRemovingConnection:Disconnect()
+	end
 
 	self._characterConnection = LocalPlayer.CharacterAdded:Connect(function(character)
 		self:_bindCharacter(character)
+	end)
+	self._characterRemovingConnection = LocalPlayer.CharacterRemoving:Connect(function()
+		self:_cancelHold()
 	end)
 	self:_bindCharacter(LocalPlayer.Character)
 end

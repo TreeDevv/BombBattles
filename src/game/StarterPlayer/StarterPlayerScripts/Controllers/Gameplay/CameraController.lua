@@ -40,6 +40,9 @@ CameraController._mouseLocked = false
 CameraController._previousMouseBehavior = nil :: Enum.MouseBehavior?
 CameraController._previousMouseIconEnabled = nil :: boolean?
 CameraController._shiftLocked = CameraConfig.DefaultShiftLocked == true
+CameraController._headLockedCamera = nil :: Camera?
+CameraController._headLockedSubject = nil :: BasePart?
+CameraController._previousCameraSubject = nil :: Instance?
 
 local function getControls(): Controls?
 	local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -89,6 +92,19 @@ end
 local function getRootPart(character: Model): BasePart?
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
 	return if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+end
+
+local function getHumanoid(character: Model): Humanoid?
+	return character:FindFirstChildOfClass("Humanoid")
+end
+
+local function getHeadLockedSubject(character: Model): BasePart?
+	local subject = character:FindFirstChild(CameraConfig.HeadLockedSubjectPartName)
+	return if subject and subject:IsA("BasePart") then subject else nil
+end
+
+local function isValidCameraSubject(subject: Instance?): boolean
+	return subject ~= nil and subject.Parent ~= nil
 end
 
 local function isFirstPerson(camera: Camera): boolean
@@ -153,6 +169,53 @@ function CameraController:_restoreMouse()
 	self._mouseLocked = false
 	self._previousMouseBehavior = nil
 	self._previousMouseIconEnabled = nil
+end
+
+function CameraController:_restoreCameraSubject(camera: Camera?, character: Model?)
+	if not self._headLockedCamera and not self._headLockedSubject and not self._previousCameraSubject then
+		return
+	end
+
+	local targetCamera = camera or self._headLockedCamera
+	if targetCamera then
+		local subject = if isValidCameraSubject(self._previousCameraSubject) then self._previousCameraSubject else nil
+		if not subject and character then
+			subject = getHumanoid(character)
+		end
+
+		if subject then
+			targetCamera.CameraSubject = subject
+		end
+	end
+
+	self._headLockedCamera = nil
+	self._headLockedSubject = nil
+	self._previousCameraSubject = nil
+end
+
+function CameraController:_updateHeadLockedCameraSubject(camera: Camera, character: Model)
+	if not CameraConfig.HeadLockedCameraSubjectEnabled or not self._shiftLocked or camera.CameraType == Enum.CameraType.Scriptable then
+		self:_restoreCameraSubject(camera, character)
+		return
+	end
+
+	local humanoid = getHumanoid(character)
+	local subject = getHeadLockedSubject(character)
+	if not humanoid or humanoid.Health <= 0 or not subject then
+		self:_restoreCameraSubject(camera, character)
+		return
+	end
+
+	if self._headLockedCamera ~= camera or self._headLockedSubject ~= subject then
+		self:_restoreCameraSubject(self._headLockedCamera, character)
+		self._headLockedCamera = camera
+		self._headLockedSubject = subject
+		self._previousCameraSubject = if camera.CameraSubject ~= subject then camera.CameraSubject else nil
+	end
+
+	if camera.CameraSubject ~= subject then
+		camera.CameraSubject = subject
+	end
 end
 
 function CameraController:_publishCameraState(character: Model, firstPerson: boolean)
@@ -262,6 +325,7 @@ function CameraController:_updateFallLag(dt: number, isAirborne: boolean, airbor
 end
 
 function CameraController:_bindCharacter(character: Model)
+	self:_restoreCameraSubject(workspace.CurrentCamera, self._character)
 	self._character = character
 	character:SetAttribute("Camera_ShiftLocked", self._shiftLocked)
 	character:SetAttribute("Camera_FirstPerson", false)
@@ -287,6 +351,7 @@ function CameraController:_step(dt: number)
 	if not camera or not character then
 		self:_resetCameraState(camera)
 		self:_restoreMouse()
+		self:_restoreCameraSubject(camera, character)
 		return
 	end
 
@@ -298,6 +363,7 @@ function CameraController:_step(dt: number)
 	else
 		self:_restoreMouse()
 	end
+	self:_updateHeadLockedCameraSubject(camera, character)
 
 	local controls = self._controls or getControls()
 	self._controls = controls

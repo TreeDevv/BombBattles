@@ -12,6 +12,9 @@
       "Packages": {
         "$className": "Folder",
         "$path": "src/Packages",
+        "EmitModule": {
+          "$path": "src/game/ReplicatedStorage/Packages/EmitModule"
+        },
         "VoxManager": {
           "$path": "src/game/ReplicatedStorage/Packages/VoxManager"
         }
@@ -53,6 +56,15 @@
       },
       "Services": {
         "$className": "Folder",
+        "AdminService": {
+          "$path": "src/game/ServerScriptService/Services/Core/AdminService.lua"
+        },
+        "AbilityService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/AbilityService.lua"
+        },
+        "AbilityBehaviors": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/AbilityBehaviors"
+        },
         "BombService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombService.lua"
         },
@@ -89,6 +101,12 @@
         },
         "Controllers": {
           "$className": "Folder",
+          "AbilityController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/AbilityController.lua"
+          },
+          "AbilityBehaviors": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/AbilityBehaviors"
+          },
           "BombController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombController.lua"
           },
@@ -112,6 +130,18 @@
           },
           "HUDWindowController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/HUDWindowController.lua"
+          },
+          "BombButtonController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/BombButtonController.lua"
+          },
+          "BottomButtonsController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/BottomButtonsController.lua"
+          },
+          "TopHUDController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/TopHUDController.lua"
+          },
+          "AdminPanelController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/AdminPanelController.lua"
           },
           "MovementController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/MovementController.lua"

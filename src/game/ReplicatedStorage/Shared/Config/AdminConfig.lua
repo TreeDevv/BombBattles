@@ -1,0 +1,14 @@
+return table.freeze({
+	EnabledInStudio = true,
+	AllowedUserIds = {},
+	RequestRemoteName = "AdminRequest",
+	RequestCooldownSeconds = 0.15,
+	MaxCoreDamage = 1000,
+	MinWalkSpeed = 4,
+	MaxWalkSpeed = 120,
+	MinJumpPower = 0,
+	MaxJumpPower = 250,
+	WalkSpeedAttribute = "AdminWalkSpeed",
+	JumpPowerAttribute = "AdminJumpPower",
+	DataWipeConfirmation = "WIPE",
+})

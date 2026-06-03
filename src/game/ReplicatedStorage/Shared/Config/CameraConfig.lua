@@ -10,6 +10,8 @@ return table.freeze({
 	ShoulderResponsiveness = 14,
 	DefaultShiftLocked = false,
 	ShiftLockToggleKey = Enum.KeyCode.LeftControl,
+	HeadLockedCameraSubjectEnabled = true,
+	HeadLockedSubjectPartName = "Head",
 	FirstPersonDistanceThreshold = 1,
 	FirstPersonBodyVisible = true,
 	FirstPersonHiddenPartNames = {

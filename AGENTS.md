@@ -1,12 +1,14 @@
 # AGENTS.md
 
-This file defines the required workflow for agents working in `C:\dev\GameTemplate`.
+This file defines the required workflow for agents working in `C:\dev\BombBattles`.
 
 ## Core Rule
 
 - Treat the local Rojo project as the source of truth for code.
 - Treat Roblox Studio, accessed through the MCP server, as the source of truth for non-code content.
 - Do not mix those ownership boundaries unless this file explicitly allows it.
+- Use the converted EmitModule in `src/game/ReplicatedStorage/Packages/EmitModule` for all VFX-related emit behavior. Do not hand-roll alternate emit helpers or direct particle/beam/trail emission flows unless the current task explicitly requires replacing this module.
+- For ability creation or ability changes, follow `docs/AbilityAuthoring.md`. Bias ability work toward client-side input, previews, VFX, SFX, UI, and feel; keep the server focused on state, validation, and authoritative gameplay outcomes.
 
 ## Local Filesystem / VS Code Only
 
@@ -57,18 +59,22 @@ This project is intentionally code-first for Rojo ownership. `GameAssets` and wo
 ## Default Workflow
 
 1. Inspect the relevant local code and Studio state.
-2. For requested systems, behavior changes, Roblox engine issues, or unfamiliar implementation details, search online for related Roblox DevForum and Reddit threads before committing to an approach.
-3. Make script and code changes locally in the Rojo project.
-4. Use Studio MCP for assets, hierarchy changes, property changes, and playtesting.
-5. Keep ownership clean so the same content is not being managed from both places.
+2. For ability work, read `docs/AbilityAuthoring.md` before planning or implementation.
+3. For requested systems, behavior changes, Roblox engine issues, or unfamiliar implementation details, search online for related Roblox DevForum and Reddit threads before committing to an approach.
+4. Make script and code changes locally in the Rojo project.
+5. Use Studio MCP for assets, hierarchy changes, property changes, and playtesting.
+6. Keep ownership clean so the same content is not being managed from both places.
 
 ## Current Source Layout
 
 - Shared low-level utilities live under `src/game/ReplicatedStorage/Shared/Foundation`.
 - Shared authored config lives under `src/game/ReplicatedStorage/Shared/Config`.
 - Shared UI/audio/camera/effect helpers live under `src/game/ReplicatedStorage/Shared/Presentation`.
+- `src/game/ReplicatedStorage/Packages/EmitModule` contains the converted EmitModule source and is the standard VFX emit module.
 - Server services are grouped locally by role under `src/game/ServerScriptService/Services`.
 - Client controllers are grouped locally by role under `src/game/StarterPlayer/StarterPlayerScripts/Controllers`.
+- Client ability behaviors live under `src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/AbilityBehaviors`.
+- Server ability behaviors live under `src/game/ServerScriptService/Services/Gameplay/AbilityBehaviors`.
 - `default.project.json` maps grouped services/controllers back into flat runtime folders.
 
 ## Mixed-Folder Exception

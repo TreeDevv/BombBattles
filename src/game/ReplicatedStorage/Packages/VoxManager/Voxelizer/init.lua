@@ -500,17 +500,6 @@ function VoxDestruct.octreeMeshSubtraction(
 		Reflectance = target.Reflectance,
 	}
 
-	target:Destroy()
-
-	local debrisPayload = nil
-	if debris then
-		if debrisConfig and debrisConfig.ClientSimulated == true then
-			debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
-		else
-			Debris.makeDebris(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
-		end
-	end
-
 	local meshedFolder = workspace:FindFirstChild("CurrentVoxels")
 	if not meshedFolder then
 		meshedFolder = Instance.new("Folder")
@@ -537,6 +526,7 @@ function VoxDestruct.octreeMeshSubtraction(
 		local worldCFrame = targetCFrame * CFrame.new(voxel.center)
 
 		local part = VoxDestruct.VoxelCache:GetPart()
+		part.Parent = nil
 		part.Size = voxel.size
 		part.CFrame = worldCFrame
 		part.Anchored = true
@@ -559,6 +549,17 @@ function VoxDestruct.octreeMeshSubtraction(
 			CollectionService:AddTag(part, generatedVoxelTag)
 		end
 		part.Parent = meshedFolder
+	end
+
+	target:Destroy()
+
+	local debrisPayload = nil
+	if debris then
+		if debrisConfig and debrisConfig.ClientSimulated == true then
+			debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+		else
+			Debris.makeDebris(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+		end
 	end
 
 	return finalVoxels, debrisPayload

@@ -1,0 +1,523 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
+local RoundService = require(ServerScriptService.Services.RoundService)
+local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
+
+local REMOTES_FOLDER_NAME = AbilityConfig.RemotesFolderName
+local REQUEST_REMOTE_NAME = AbilityConfig.RequestRemoteName
+local EFFECT_REMOTE_NAME = AbilityConfig.EffectRemoteName
+local MESSAGE_TYPES = AbilityConfig.MessageTypes
+
+local ABILITY_STATE_TOKEN = ReplicaService.NewClassToken(AbilityConfig.Scope)
+
+type PlayerRuntime = {
+	replica: any?,
+	requestWindowStartedAt: number,
+	requestCount: number,
+	messageWindows: { [string]: { startedAt: number, count: number } },
+}
+
+local AbilityService = {}
+
+local requestRemote: RemoteEvent? = nil
+local effectRemote: RemoteEvent? = nil
+local runtimes: { [Player]: PlayerRuntime } = {}
+local behaviorModules: { [string]: any } = {}
+
+local function now(): number
+	return workspace:GetServerTimeNow()
+end
+
+local function ensureRemotesFolder(): Folder
+	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = REMOTES_FOLDER_NAME
+	folder.Parent = ReplicatedStorage
+	return folder
+end
+
+local function ensureRemote(name: string): RemoteEvent
+	local folder = ensureRemotesFolder()
+	local existing = folder:FindFirstChild(name)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = name
+	remote.Parent = folder
+	return remote
+end
+
+local function getBehaviorFolder(): Instance?
+	local services = ServerScriptService:FindFirstChild("Services")
+	return services and services:FindFirstChild("AbilityBehaviors")
+end
+
+local function loadBehaviors()
+	table.clear(behaviorModules)
+
+	local folder = getBehaviorFolder()
+	if not folder then
+		return
+	end
+
+	for _, child in ipairs(folder:GetChildren()) do
+		if not child:IsA("ModuleScript") then
+			continue
+		end
+
+		local ok, behavior = pcall(require, child)
+		if ok and typeof(behavior) == "table" then
+			behaviorModules[child.Name] = behavior
+		else
+			warn("[AbilityService] Failed to load ability behavior " .. child:GetFullName() .. ": " .. tostring(behavior))
+		end
+	end
+end
+
+local function createRuntime(): PlayerRuntime
+	return {
+		replica = nil,
+		requestWindowStartedAt = 0,
+		requestCount = 0,
+		messageWindows = {},
+	}
+end
+
+local function getRuntime(player: Player): PlayerRuntime
+	local runtime = runtimes[player]
+	if runtime then
+		return runtime
+	end
+
+	runtime = createRuntime()
+	runtimes[player] = runtime
+	return runtime
+end
+
+local function createReplica(player: Player): any
+	local runtime = getRuntime(player)
+	if runtime.replica and runtime.replica:IsActive() then
+		return runtime.replica
+	end
+
+	local replica = ReplicaService.NewReplica({
+		ClassToken = ABILITY_STATE_TOKEN,
+		Tags = { Player = player },
+		Data = AbilityConfig.BuildInitialState(),
+		Replication = player,
+	})
+
+	runtime.replica = replica
+	return replica
+end
+
+local function getReplica(player: Player): any?
+	local runtime = runtimes[player]
+	local replica = runtime and runtime.replica
+	if replica and replica:IsActive() then
+		return replica
+	end
+	return nil
+end
+
+local function getSlotState(player: Player, slot: string)
+	local replica = getReplica(player)
+	if not replica then
+		return nil
+	end
+
+	local slots = replica.Data.slots
+	return if typeof(slots) == "table" then slots[slot] else nil
+end
+
+local function isAliveActivePlayer(player: Player): boolean
+	if not RoundService:IsPlayerActive(player) then
+		return false
+	end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0
+end
+
+local function isPlainString(value: any, maxLength: number): boolean
+	return typeof(value) == "string" and value ~= "" and #value <= maxLength
+end
+
+local function checkWindow(window, maxPerSecond: number, currentTime: number): boolean
+	if currentTime - window.startedAt >= 1 then
+		window.startedAt = currentTime
+		window.count = 0
+	end
+
+	window.count += 1
+	return window.count <= maxPerSecond
+end
+
+local function isRateLimited(player: Player, abilityId: string, messageType: string, definition, currentTime: number): boolean
+	local runtime = getRuntime(player)
+	local globalWindow = {
+		startedAt = runtime.requestWindowStartedAt,
+		count = runtime.requestCount,
+	}
+
+	local allowed = checkWindow(globalWindow, AbilityConfig.GlobalMaxMessagesPerSecond, currentTime)
+	runtime.requestWindowStartedAt = globalWindow.startedAt
+	runtime.requestCount = globalWindow.count
+	if not allowed then
+		return true
+	end
+
+	local key = abilityId .. ":" .. messageType
+	local window = runtime.messageWindows[key]
+	if not window then
+		window = { startedAt = currentTime, count = 0 }
+		runtime.messageWindows[key] = window
+	end
+
+	local maxPerSecond = definition.maxClientMessagesPerSecond or AbilityConfig.DefaultMaxMessagesPerSecond
+	return not checkWindow(window, maxPerSecond, currentTime)
+end
+
+local function resolveRequest(player: Player, request)
+	if typeof(request) ~= "table" then
+		return nil
+	end
+
+	local slot = request.slot
+	if not AbilityConfig.IsKnownSlot(slot) then
+		return nil
+	end
+
+	local slotState = getSlotState(player, slot)
+	if typeof(slotState) ~= "table" then
+		return nil
+	end
+
+	local equippedAbilityId = slotState.abilityId
+	local requestedAbilityId = if typeof(request.abilityId) == "string" and request.abilityId ~= "" then request.abilityId else equippedAbilityId
+	if requestedAbilityId ~= equippedAbilityId then
+		return nil
+	end
+	if not isPlainString(requestedAbilityId, AbilityConfig.MaxAbilityIdLength) then
+		return nil
+	end
+
+	local definition = AbilityConfig.GetDefinition(requestedAbilityId)
+	if not definition or definition.slot ~= slot then
+		return nil
+	end
+
+	local messageType = request.messageType
+	if not isPlainString(messageType, AbilityConfig.MaxMessageTypeLength) then
+		return nil
+	end
+
+	return {
+		slot = slot,
+		slotState = slotState,
+		abilityId = requestedAbilityId,
+		definition = definition,
+		messageType = messageType,
+		payload = request.payload,
+		clientSequence = request.clientSequence,
+	}
+end
+
+local function setSlotValues(player: Player, slot: string, values)
+	local replica = getReplica(player)
+	if replica then
+		replica:SetValues({ "slots", slot }, values)
+	end
+end
+
+local function fireAbilityEffect(effectName: string, payload)
+	if effectRemote then
+		effectRemote:FireAllClients(effectName, payload)
+	end
+end
+
+local function activate(player: Player, resolved, currentTime: number)
+	if not isAliveActivePlayer(player) then
+		return
+	end
+	if typeof(resolved.slotState.cooldownEndsAt) == "number" and resolved.slotState.cooldownEndsAt > currentTime then
+		return
+	end
+
+	local behavior = behaviorModules[resolved.abilityId]
+	local context = {
+		player = player,
+		slot = resolved.slot,
+		abilityId = resolved.abilityId,
+		definition = resolved.definition,
+		slotState = resolved.slotState,
+		payload = resolved.payload,
+		now = currentTime,
+	}
+
+	if behavior and type(behavior.CanActivate) == "function" then
+		local ok, canActivate = pcall(function()
+			return behavior.CanActivate(context)
+		end)
+		if not ok then
+			warn("[AbilityService] CanActivate failed for " .. resolved.abilityId .. ": " .. tostring(canActivate))
+			return
+		end
+		if canActivate == false then
+			return
+		end
+	end
+
+	local behaviorResult = nil
+	if behavior and type(behavior.OnActivate) == "function" then
+		local ok, result = pcall(function()
+			return behavior.OnActivate(context)
+		end)
+		if not ok then
+			warn("[AbilityService] OnActivate failed for " .. resolved.abilityId .. ": " .. tostring(result))
+			return
+		end
+		behaviorResult = result
+	end
+	if behaviorResult == false then
+		return
+	end
+
+	local cooldownSeconds = math.max(tonumber(resolved.definition.cooldownSeconds) or 0, 0)
+	local durationSeconds = math.max(tonumber(resolved.definition.durationSeconds) or 0, 0)
+	local state = if typeof(behaviorResult) == "table" and typeof(behaviorResult.state) == "table"
+		then behaviorResult.state
+		else resolved.slotState.state
+
+	setSlotValues(player, resolved.slot, {
+		cooldownEndsAt = currentTime + cooldownSeconds,
+		activeEndsAt = if durationSeconds > 0 then currentTime + durationSeconds else 0,
+		state = state,
+	})
+
+	local replica = getReplica(player)
+	if replica then
+		replica:SetValue({ "lastActivatedAt" }, currentTime)
+	end
+
+	fireAbilityEffect("Activated", {
+		player = player,
+		slot = resolved.slot,
+		abilityId = resolved.abilityId,
+		startedAt = currentTime,
+		activeEndsAt = if durationSeconds > 0 then currentTime + durationSeconds else 0,
+	})
+
+	if typeof(behaviorResult) == "table" and typeof(behaviorResult.effect) == "table" then
+		fireAbilityEffect(behaviorResult.effect.name or resolved.abilityId, {
+			player = player,
+			slot = resolved.slot,
+			abilityId = resolved.abilityId,
+			payload = behaviorResult.effect.payload,
+		})
+	end
+end
+
+local function handleClientMessage(player: Player, request)
+	local currentTime = now()
+	local resolved = resolveRequest(player, request)
+	if not resolved then
+		return
+	end
+	if isRateLimited(player, resolved.abilityId, resolved.messageType, resolved.definition, currentTime) then
+		return
+	end
+
+	if resolved.messageType == MESSAGE_TYPES.Activate then
+		activate(player, resolved, currentTime)
+		return
+	end
+
+	local behavior = behaviorModules[resolved.abilityId]
+	if behavior and type(behavior.OnClientMessage) == "function" then
+		local ok, err = pcall(function()
+			behavior.OnClientMessage({
+				player = player,
+				slot = resolved.slot,
+				abilityId = resolved.abilityId,
+				definition = resolved.definition,
+				slotState = resolved.slotState,
+				messageType = resolved.messageType,
+				payload = resolved.payload,
+				clientSequence = resolved.clientSequence,
+				now = currentTime,
+			})
+		end)
+		if not ok then
+			warn("[AbilityService] OnClientMessage failed for " .. resolved.abilityId .. ": " .. tostring(err))
+		end
+	end
+end
+
+local function cleanupPlayer(player: Player)
+	local runtime = runtimes[player]
+	if not runtime then
+		return
+	end
+
+	if runtime.replica then
+		runtime.replica:Destroy()
+	end
+	runtimes[player] = nil
+end
+
+local function collectHookCandidates(hookName: string, currentTime: number)
+	local candidates = {}
+
+	for player, runtime in pairs(runtimes) do
+		local replica = runtime.replica
+		if not (player.Parent == Players and replica and replica:IsActive()) then
+			continue
+		end
+
+		local slots = replica.Data.slots
+		if typeof(slots) ~= "table" then
+			continue
+		end
+
+		for slot, slotState in pairs(slots) do
+			if typeof(slotState) ~= "table" or typeof(slotState.abilityId) ~= "string" or slotState.abilityId == "" then
+				continue
+			end
+			if typeof(slotState.activeEndsAt) ~= "number" or slotState.activeEndsAt <= currentTime then
+				continue
+			end
+
+			local behavior = behaviorModules[slotState.abilityId]
+			if not (behavior and type(behavior[hookName]) == "function") then
+				continue
+			end
+
+			local definition = AbilityConfig.GetDefinition(slotState.abilityId)
+			table.insert(candidates, {
+				player = player,
+				slot = slot,
+				slotState = slotState,
+				abilityId = slotState.abilityId,
+				definition = definition,
+				behavior = behavior,
+				priority = (definition and definition.hookPriority) or 0,
+			})
+		end
+	end
+
+	table.sort(candidates, function(left, right)
+		if left.priority == right.priority then
+			if left.player.UserId == right.player.UserId then
+				return left.slot < right.slot
+			end
+			return left.player.UserId < right.player.UserId
+		end
+
+		return left.priority > right.priority
+	end)
+
+	return candidates
+end
+
+function AbilityService:OnStart()
+	loadBehaviors()
+	requestRemote = ensureRemote(REQUEST_REMOTE_NAME)
+	effectRemote = ensureRemote(EFFECT_REMOTE_NAME)
+
+	requestRemote.OnServerEvent:Connect(handleClientMessage)
+
+	for abilityId, behavior in pairs(behaviorModules) do
+		if type(behavior.OnStart) == "function" then
+			local ok, err = pcall(function()
+				behavior.OnStart(self)
+			end)
+			if not ok then
+				warn("[AbilityService] OnStart failed for " .. abilityId .. ": " .. tostring(err))
+			end
+		end
+	end
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		createReplica(player)
+	end
+end
+
+function AbilityService:OnPlayerAdded(player: Player)
+	createReplica(player)
+end
+
+function AbilityService:OnPlayerRemoving(player: Player)
+	for abilityId, behavior in pairs(behaviorModules) do
+		if type(behavior.OnPlayerRemoving) == "function" then
+			local ok, err = pcall(function()
+				behavior.OnPlayerRemoving(player)
+			end)
+			if not ok then
+				warn("[AbilityService] OnPlayerRemoving failed for " .. abilityId .. ": " .. tostring(err))
+			end
+		end
+	end
+
+	cleanupPlayer(player)
+end
+
+function AbilityService:RunHook(hookName: string, context)
+	if typeof(hookName) ~= "string" or hookName == "" then
+		return AbilityResult.Continue()
+	end
+
+	local currentTime = now()
+	for _, candidate in ipairs(collectHookCandidates(hookName, currentTime)) do
+		local ok, result = pcall(function()
+			return candidate.behavior[hookName]({
+				player = candidate.player,
+				slot = candidate.slot,
+				abilityId = candidate.abilityId,
+				definition = candidate.definition,
+				slotState = candidate.slotState,
+				hook = hookName,
+				context = context,
+				now = currentTime,
+			})
+		end)
+		if not ok then
+			warn("[AbilityService] Hook " .. hookName .. " failed for " .. candidate.abilityId .. ": " .. tostring(result))
+			continue
+		end
+
+		if AbilityResult.IsHandled(result) then
+			return result
+		end
+	end
+
+	return AbilityResult.Continue()
+end
+
+function AbilityService:FireEffect(effectName: string, payload)
+	fireAbilityEffect(effectName, payload)
+end
+
+function AbilityService:GetPlayerState(player: Player)
+	local replica = getReplica(player)
+	return replica and replica.Data or nil
+end
+
+return AbilityService

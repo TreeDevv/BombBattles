@@ -421,19 +421,34 @@ local function damageEnemyAnchors(owner: Player, origin: Vector3)
 	end
 end
 
-local destroyPhysicalProjectile = nil
-local getProjectilePhysicsPosition = nil
+local function destroyPhysicalProjectile(state: ProjectileState?)
+	if not state then
+		return
+	end
+
+	local projectile = state.physicalProjectile
+	state.physicalProjectile = nil
+	state.physicalRoot = nil
+	if projectile and projectile.Parent then
+		projectile:Destroy()
+	end
+end
+
+local function getProjectilePhysicsPosition(state: ProjectileState): Vector3
+	local rootPart = state.physicalRoot
+	if rootPart and rootPart.Parent then
+		return rootPart.Position
+	end
+
+	return state.position
+end
 
 local function explode(owner: Player, position: Vector3, source: string, projectileId: string?)
 	if projectileId then
 		local state = activeProjectiles[projectileId]
 		if state then
-			if getProjectilePhysicsPosition then
-				position = getProjectilePhysicsPosition(state)
-			end
-			if destroyPhysicalProjectile then
-				destroyPhysicalProjectile(state)
-			end
+			position = getProjectilePhysicsPosition(state)
+			destroyPhysicalProjectile(state)
 		end
 		activeProjectiles[projectileId] = nil
 	end
@@ -600,28 +615,6 @@ local function setProjectileAssemblyMotion(projectile: Instance, velocity: Vecto
 			projectile:SetNetworkOwner(nil)
 		end)
 	end
-end
-
-function destroyPhysicalProjectile(state: ProjectileState?)
-	if not state then
-		return
-	end
-
-	local projectile = state.physicalProjectile
-	state.physicalProjectile = nil
-	state.physicalRoot = nil
-	if projectile and projectile.Parent then
-		projectile:Destroy()
-	end
-end
-
-function getProjectilePhysicsPosition(state: ProjectileState): Vector3
-	local rootPart = state.physicalRoot
-	if rootPart and rootPart.Parent then
-		return rootPart.Position
-	end
-
-	return state.position
 end
 
 local function spawnPhysicalProjectile(state: ProjectileState, position: Vector3, normal: Vector3, incomingVelocity: Vector3): Instance?

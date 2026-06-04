@@ -42,6 +42,11 @@ return table.freeze({
 	LandingHeavyShakeFadeOutTime = 0.36,
 	LandingHeavyShakePositionInfluence = Vector3.new(0, 0.2, 0),
 	LandingHeavyShakeRotationInfluence = Vector3.new(1.25, 0, 0.35),
+	LandingSettleMinSpeed = 55,
+	LandingSettleSpeedForMax = 100,
+	LandingSettleDuration = 0.16,
+	LandingSettleMaxFOVDip = 1.25,
+	LandingSettleMaxYOffset = -0.12,
 
 	FallLagDelay = 0.35,
 	FallLagFullTime = 1.1,

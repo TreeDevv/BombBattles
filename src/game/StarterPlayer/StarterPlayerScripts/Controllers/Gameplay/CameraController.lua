@@ -16,6 +16,7 @@ local HUD_FOV_BLUR_NAMES = {
 	HUDWindowBlur = true,
 	TemplateUIBlur = true,
 }
+local NEVER = -math.huge
 
 type Controls = {
 	GetMoveVector: (Controls) -> Vector3,
@@ -36,6 +37,10 @@ CameraController._hasObservedGroundedState = false
 CameraController._airborneStartTime = nil :: number?
 CameraController._maxDownwardSpeed = 0
 CameraController._skipNextLandingShake = false
+CameraController._lastLandingSerial = 0
+CameraController._landingSettleStartTime = NEVER
+CameraController._landingSettleIntensity = 0
+CameraController._currentLandingSettleYOffset = 0
 CameraController._mouseLocked = false
 CameraController._previousMouseBehavior = nil :: Enum.MouseBehavior?
 CameraController._previousMouseIconEnabled = nil :: boolean?
@@ -69,6 +74,11 @@ end
 
 local function smoothNumber(current: number, target: number, responsiveness: number, dt: number): number
 	return current + (target - current) * exponentialAlpha(responsiveness, dt)
+end
+
+local function smoothstep(alpha: number): number
+	alpha = math.clamp(alpha, 0, 1)
+	return alpha * alpha * (3 - (2 * alpha))
 end
 
 local function smoothVector(current: Vector3, target: Vector3, responsiveness: number, dt: number): Vector3
@@ -233,6 +243,10 @@ function CameraController:_resetCameraState(camera: Camera?)
 	self._airborneStartTime = nil
 	self._maxDownwardSpeed = 0
 	self._skipNextLandingShake = false
+	self._lastLandingSerial = 0
+	self._landingSettleStartTime = NEVER
+	self._landingSettleIntensity = 0
+	self._currentLandingSettleYOffset = 0
 
 	if camera then
 		self._currentFOV = camera.FieldOfView
@@ -265,6 +279,41 @@ function CameraController:_playLandingBump(airborneTime: number)
 			then CameraConfig.LandingHeavyShakeRotationInfluence
 			else CameraConfig.LandingSmallShakeRotationInfluence
 	)
+end
+
+function CameraController:_updateLandingSettleTrigger(character: Model, now: number)
+	local landingSerial = readNumberAttribute(character, "Movement_LandingSerial")
+	if landingSerial <= self._lastLandingSerial then
+		return
+	end
+
+	self._lastLandingSerial = landingSerial
+	local impactSpeed = readNumberAttribute(character, "Movement_LandingImpactSpeed")
+	local horizontalSpeed = readNumberAttribute(character, "Movement_LandingHorizontalSpeed")
+	local landingSpeed = math.max(impactSpeed, horizontalSpeed)
+	if landingSpeed < CameraConfig.LandingSettleMinSpeed then
+		return
+	end
+
+	local speedRange = math.max(CameraConfig.LandingSettleSpeedForMax - CameraConfig.LandingSettleMinSpeed, 0.001)
+	self._landingSettleIntensity = math.clamp((landingSpeed - CameraConfig.LandingSettleMinSpeed) / speedRange, 0, 1)
+	self._landingSettleStartTime = now
+end
+
+function CameraController:_getLandingSettleAlpha(now: number): number
+	if self._landingSettleStartTime == NEVER then
+		return 0
+	end
+
+	local duration = math.max(CameraConfig.LandingSettleDuration, 0.001)
+	local elapsed = now - self._landingSettleStartTime
+	if elapsed >= duration then
+		self._landingSettleStartTime = NEVER
+		self._landingSettleIntensity = 0
+		return 0
+	end
+
+	return (1 - smoothstep(elapsed / duration)) * self._landingSettleIntensity
 end
 
 function CameraController:_updateFallState(now: number, isGrounded: boolean, velocityY: number): number
@@ -386,7 +435,10 @@ function CameraController:_step(dt: number)
 	local rootPart = getRootPart(character)
 	local velocityY = if rootPart then rootPart.AssemblyLinearVelocity.Y else 0
 
-	local airborneTime = self:_updateFallState(os.clock(), isGrounded, velocityY)
+	local now = os.clock()
+	self:_updateLandingSettleTrigger(character, now)
+	local landingSettleAlpha = self:_getLandingSettleAlpha(now)
+	local airborneTime = self:_updateFallState(now, isGrounded, velocityY)
 	self:_updateFallLag(dt, isAirborne, airborneTime, velocityY)
 
 	local targetFOV = CameraConfig.BaseFOV
@@ -410,6 +462,7 @@ function CameraController:_step(dt: number)
 			else math.clamp((boostedSpeed - 24) / speedRange, 0, 1)
 		targetFOV += CameraConfig.SlideJumpFOVBonus * slideJumpAlpha
 	end
+	targetFOV -= CameraConfig.LandingSettleMaxFOVDip * landingSettleAlpha
 
 	if CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera) then
 		self._currentFOV = camera.FieldOfView
@@ -434,12 +487,14 @@ function CameraController:_step(dt: number)
 		targetRoll = math.rad(-CameraConfig.MaxStrafeRollDegrees * math.clamp(moveVector.X, -1, 1))
 	end
 	self._currentRoll = smoothNumber(self._currentRoll, targetRoll, CameraConfig.RollResponsiveness, dt)
+	self._currentLandingSettleYOffset = CameraConfig.LandingSettleMaxYOffset * landingSettleAlpha
 
 	local shakeCFrame = self:_getCameraShaker():Update(dt)
 
 	camera.CFrame = camera.CFrame
 		* CFrame.new(self._currentShoulderOffset)
 		* CFrame.new(0, self._currentFallLagYOffset, 0)
+		* CFrame.new(0, self._currentLandingSettleYOffset, 0)
 		* CFrame.Angles(0, 0, self._currentRoll)
 		* shakeCFrame
 end

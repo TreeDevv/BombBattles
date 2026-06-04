@@ -26,6 +26,11 @@ local RENDER_STEP_NAME = "BombBattlesBombPreview"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 2
 local ROUND_ALIVE_ATTR = "RoundAlive"
 local EXPLOSION_VFX_CLEANUP_SECONDS = 8
+local AIR_CONTROL_FORCE_AIRBORNE_UNTIL_ATTR = "AirControl_ForceAirborneUntil"
+local AIR_CONTROL_LAUNCH_SOURCE_ATTR = "AirControl_LaunchSource"
+local AIR_CONTROL_LAUNCH_SERIAL_ATTR = "AirControl_LaunchSerial"
+local AIR_CONTROL_LAUNCHED_AT_ATTR = "AirControl_LaunchedAt"
+local AIR_CONTROL_EXPLOSIVE_MIN_AIR_TIME = 0.4
 local ATTR = BombConfig.Attributes
 
 local BombController = {}
@@ -101,28 +106,25 @@ local function getRootPart(): BasePart?
 	return rootPart
 end
 
-local function reinforceLaunchVelocity(rootPart: BasePart, launchDirection: Vector3, minimumHorizontal: number, minimumVertical: number)
-	local velocity = rootPart.AssemblyLinearVelocity
-	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
-	local horizontalDirection = Vector3.new(launchDirection.X, 0, launchDirection.Z)
-	if horizontalDirection.Magnitude > 0.05 then
-		horizontalDirection = horizontalDirection.Unit
+local function markAirControlLaunch(character: Model?, source: string, minAirTime: number)
+	if not character then
+		return
 	end
 
-	local finalHorizontal = horizontalVelocity
-	if horizontalDirection.Magnitude > 0.05 then
-		local forwardSpeed = horizontalVelocity:Dot(horizontalDirection)
-		if forwardSpeed < minimumHorizontal then
-			finalHorizontal += horizontalDirection * (minimumHorizontal - forwardSpeed)
-		end
-	end
-	local finalY = math.max(velocity.Y, minimumVertical)
-
-	rootPart.AssemblyLinearVelocity = Vector3.new(finalHorizontal.X, finalY, finalHorizontal.Z)
+	local now = os.clock()
+	local currentForceUntil = character:GetAttribute(AIR_CONTROL_FORCE_AIRBORNE_UNTIL_ATTR)
+	local currentSerial = character:GetAttribute(AIR_CONTROL_LAUNCH_SERIAL_ATTR)
+	character:SetAttribute(
+		AIR_CONTROL_FORCE_AIRBORNE_UNTIL_ATTR,
+		math.max(if typeof(currentForceUntil) == "number" then currentForceUntil else 0, now + minAirTime)
+	)
+	character:SetAttribute(AIR_CONTROL_LAUNCH_SOURCE_ATTR, source)
+	character:SetAttribute(AIR_CONTROL_LAUNCH_SERIAL_ATTR, (if typeof(currentSerial) == "number" then currentSerial else 0) + 1)
+	character:SetAttribute(AIR_CONTROL_LAUNCHED_AT_ATTR, now)
 end
 
 local function applyOwnerClientExplosionLaunch(origin: Vector3)
-	local _, humanoid, rootPart = getCharacterParts()
+	local character, humanoid, rootPart = getCharacterParts()
 	if not (humanoid and rootPart and humanoid.Health > 0) then
 		return
 	end
@@ -153,12 +155,7 @@ local function applyOwnerClientExplosionLaunch(origin: Vector3)
 	)
 
 	rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
-	reinforceLaunchVelocity(rootPart, away, horizontal, BombConfig.OwnerClientLaunchVertical * scale)
-	task.defer(function()
-		if rootPart.Parent then
-			reinforceLaunchVelocity(rootPart, away, horizontal * 0.8, BombConfig.OwnerClientLaunchVertical * scale * 0.8)
-		end
-	end)
+	markAirControlLaunch(character, "Explosive", AIR_CONTROL_EXPLOSIVE_MIN_AIR_TIME)
 end
 
 local function getAimDirection(): Vector3

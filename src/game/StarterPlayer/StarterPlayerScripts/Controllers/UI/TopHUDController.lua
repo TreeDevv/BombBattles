@@ -6,6 +6,7 @@ local TweenService = game:GetService("TweenService")
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
+local ReplayClient = require(script.Parent:WaitForChild("Replay"):WaitForChild("ReplayClient"))
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -54,6 +55,7 @@ TopHUDController._topNativePosition = nil :: UDim2?
 TopHUDController._topHiddenPosition = nil :: UDim2?
 TopHUDController._topShown = false
 TopHUDController._topTween = nil :: Tween?
+TopHUDController._replayTopbarActive = false
 TopHUDController._rosterSyncSerial = 0
 TopHUDController._nukeTimer = nil :: Frame?
 TopHUDController._nukeTimerLabel = nil :: TextLabel?
@@ -117,6 +119,20 @@ end
 
 local function shouldShowTopBar(state: string?): boolean
 	return state == RoundStates.RoundStarting or state == RoundStates.Active
+end
+
+local function isReplayTopbarVisible(hud: Instance?): boolean
+	if not hud then
+		return false
+	end
+
+	local killReplay = hud:FindFirstChild("KillReplay")
+	if killReplay and killReplay:IsA("GuiObject") and killReplay.Visible then
+		return true
+	end
+
+	local potg = hud:FindFirstChild("POTG")
+	return potg ~= nil and potg:IsA("GuiObject") and potg.Visible
 end
 
 function TopHUDController:_trackConnection(connection: RBXScriptConnection)
@@ -543,7 +559,7 @@ end
 
 function TopHUDController:_updateTopVisibility(instant: boolean?)
 	local state = RoundController:GetState()
-	self:_setTopVisible(shouldShowTopBar(state and state.state), instant)
+	self:_setTopVisible(shouldShowTopBar(state and state.state) and not self._replayTopbarActive, instant)
 end
 
 function TopHUDController:_updateFrame()
@@ -575,6 +591,7 @@ function TopHUDController:_bindHud(hud: Instance?)
 	if not hud then
 		return
 	end
+	self._replayTopbarActive = isReplayTopbarVisible(hud)
 
 	local top = hud:FindFirstChild("Top")
 	if not (top and top:IsA("Frame")) then
@@ -643,8 +660,27 @@ function TopHUDController:_untrackPlayer(player: Player)
 	self:_syncRosters()
 end
 
+function TopHUDController:_bindReplaySignals()
+	local replayStarted = ReplayClient and ReplayClient.ReplayStarted
+	if replayStarted and type(replayStarted.Connect) == "function" then
+		self:_trackConnection(replayStarted:Connect(function()
+			self._replayTopbarActive = isReplayTopbarVisible(PlayerGui:FindFirstChild("HUD"))
+			self:_updateTopVisibility(false)
+		end))
+	end
+
+	local replayEnded = ReplayClient and ReplayClient.ReplayEnded
+	if replayEnded and type(replayEnded.Connect) == "function" then
+		self:_trackConnection(replayEnded:Connect(function()
+			self._replayTopbarActive = isReplayTopbarVisible(PlayerGui:FindFirstChild("HUD"))
+			self:_updateTopVisibility(false)
+		end))
+	end
+end
+
 function TopHUDController:OnStart()
 	self:_disconnectAll()
+	self._replayTopbarActive = isReplayTopbarVisible(PlayerGui:FindFirstChild("HUD"))
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		self:_trackPlayer(player)
@@ -682,6 +718,7 @@ function TopHUDController:OnStart()
 	self:_trackConnection(RunService.RenderStepped:Connect(function()
 		self:_updateFrame()
 	end))
+	self:_bindReplaySignals()
 
 	self:_bindHud(PlayerGui:FindFirstChild("HUD"))
 end

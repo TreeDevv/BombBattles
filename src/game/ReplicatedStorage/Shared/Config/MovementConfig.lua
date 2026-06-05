@@ -68,6 +68,10 @@ return table.freeze({
 	FacingResponsiveness = 24,
 	FaceCameraDirection = true,
 	DisableHumanoidAutoRotate = true,
+	AirUprightStabilizationEnabled = true,
+	AirUprightMaxTiltDegrees = 2,
+	AirUprightAngularVelocityDamping = 0,
+	AirUprightApplyWhileKnockback = true,
 	SnapGroundStop = true,
 
 	AirMoveSpeed = 18,

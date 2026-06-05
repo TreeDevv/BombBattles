@@ -175,6 +175,11 @@ local function flattenVelocity(velocity: Vector3): Vector3
 	return Vector3.new(velocity.X, 0, velocity.Z)
 end
 
+local function getTiltDegrees(cframe: CFrame): number
+	local upDot = math.clamp(cframe.UpVector:Dot(Vector3.yAxis), -1, 1)
+	return math.deg(math.acos(upDot))
+end
+
 local function getMoveVectorWithDeadzone(moveVector: Vector3): Vector3
 	local minMoveMagnitude = MovementConfig.MinMoveMagnitude
 	local x = if math.abs(moveVector.X) >= minMoveMagnitude then moveVector.X else 0
@@ -1791,6 +1796,50 @@ function MovementController:_updateLandingState(now: number, isGrounded: boolean
 	end
 end
 
+function MovementController:_applyAirUprightStabilization(isGrounded: boolean): (number, Vector3, boolean)
+	local rootPart = self._rootPart
+	local humanoid = self._humanoid
+	if not (rootPart and rootPart.Parent) then
+		return 0, Vector3.zero, false
+	end
+
+	local tiltDegrees = getTiltDegrees(rootPart.CFrame)
+	local angularVelocity = rootPart.AssemblyAngularVelocity
+	if not MovementConfig.AirUprightStabilizationEnabled
+		or isGrounded
+		or not humanoid
+		or humanoid.Health <= 0
+	then
+		return tiltDegrees, angularVelocity, false
+	end
+
+	local knockbackUntil = getBombKnockbackUntil(self._character)
+	if not MovementConfig.AirUprightApplyWhileKnockback and knockbackUntil > workspace:GetServerTimeNow() then
+		return tiltDegrees, angularVelocity, false
+	end
+
+	local horizontalFacing = flattenDirection(rootPart.CFrame.LookVector)
+	if horizontalFacing.Magnitude < MovementConfig.MinMoveMagnitude then
+		horizontalFacing = flattenDirection(self._smoothedFacingDirection)
+	end
+	if horizontalFacing.Magnitude < MovementConfig.MinMoveMagnitude then
+		horizontalFacing = Vector3.new(0, 0, -1)
+	end
+
+	local maxTiltDegrees = math.max(tonumber(MovementConfig.AirUprightMaxTiltDegrees) or 0, 0)
+	if tiltDegrees > maxTiltDegrees then
+		rootPart.CFrame = CFrame.lookAt(rootPart.Position, rootPart.Position + horizontalFacing, Vector3.yAxis)
+	end
+
+	local damping = math.clamp(tonumber(MovementConfig.AirUprightAngularVelocityDamping) or 0, 0, 1)
+	local dampedAngularVelocity = Vector3.new(angularVelocity.X * damping, angularVelocity.Y, angularVelocity.Z * damping)
+	if dampedAngularVelocity ~= angularVelocity then
+		rootPart.AssemblyAngularVelocity = dampedAngularVelocity
+	end
+
+	return getTiltDegrees(rootPart.CFrame), rootPart.AssemblyAngularVelocity, true
+end
+
 function MovementController:_setDebugAttributes(data)
 	local character = self._character
 	if not character then
@@ -1822,6 +1871,9 @@ function MovementController:_setDebugAttributes(data)
 	character:SetAttribute("Movement_AirControlHorizontalSpeed", data.airControlHorizontalSpeed)
 	character:SetAttribute("Movement_AirControlLaunchSource", data.airControlLaunchSource)
 	character:SetAttribute("Movement_AirControlForceAirborneUntil", data.airControlForceAirborneUntil)
+	character:SetAttribute("Movement_AirUprightStabilized", data.airUprightStabilized)
+	character:SetAttribute("Movement_AirUprightTiltDegrees", data.airUprightTiltDegrees)
+	character:SetAttribute("Movement_AirUprightAngularVelocity", data.airUprightAngularVelocity)
 	character:SetAttribute("Movement_LandingImpactSpeed", data.landingImpactSpeed)
 	character:SetAttribute("Movement_LandingHorizontalSpeed", data.landingHorizontalSpeed)
 	character:SetAttribute("Movement_LandingSerial", data.landingSerial)
@@ -2095,6 +2147,8 @@ function MovementController:_step(dt: number)
 	end
 
 	self:_updateAirControl(now, isGrounded)
+	local airUprightTiltDegrees, airUprightAngularVelocity, airUprightStabilized =
+		self:_applyAirUprightStabilization(isGrounded)
 
 	self:_setDebugAttributes({
 		isGrounded = isGrounded,
@@ -2121,6 +2175,9 @@ function MovementController:_step(dt: number)
 		airControlHorizontalSpeed = self._airControlHorizontalSpeed,
 		airControlLaunchSource = self._airControlLaunchSource,
 		airControlForceAirborneUntil = self._airControlForceAirborneUntil,
+		airUprightStabilized = airUprightStabilized,
+		airUprightTiltDegrees = airUprightTiltDegrees,
+		airUprightAngularVelocity = airUprightAngularVelocity,
 		landingImpactSpeed = self._landingImpactSpeed,
 		landingHorizontalSpeed = self._landingHorizontalSpeed,
 		landingSerial = self._landingSerial,
@@ -2206,6 +2263,9 @@ function MovementController:_bindCharacter(character: Model)
 	character:SetAttribute("Movement_AirControlHorizontalSpeed", 0)
 	character:SetAttribute("Movement_AirControlLaunchSource", AIR_LAUNCH_SOURCE_DEFAULT)
 	character:SetAttribute("Movement_AirControlForceAirborneUntil", 0)
+	character:SetAttribute("Movement_AirUprightStabilized", false)
+	character:SetAttribute("Movement_AirUprightTiltDegrees", 0)
+	character:SetAttribute("Movement_AirUprightAngularVelocity", Vector3.zero)
 	character:SetAttribute("Movement_LandingImpactSpeed", 0)
 	character:SetAttribute("Movement_LandingHorizontalSpeed", 0)
 	character:SetAttribute("Movement_LandingSerial", self._landingSerial)

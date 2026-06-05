@@ -38,6 +38,14 @@ local GAME_STATE_TOKEN = ReplicaService.NewClassToken(RoundConfig.Scope)
 type MapConfig = {
 	id: string,
 	displayName: string,
+	thumbnailImage: string?,
+}
+
+type VoteChoice = {
+	choiceId: string,
+	mapId: string,
+	displayName: string,
+	thumbnailImage: string?,
 }
 
 local getConfiguredMap: (string) -> MapConfig?
@@ -56,7 +64,7 @@ local votingOpen = false
 local pendingAdminForceStartMapId: string? = nil
 local pendingAdminReset = false
 local pendingAdminWinnerTeam: string? = nil
-local currentChoices: { MapConfig } = {}
+local currentChoices: { VoteChoice } = {}
 local voteCounts: { [string]: number } = {}
 local playerVotes: { [Player]: string } = {}
 local roundPlayers: { [Player]: boolean } = {}
@@ -140,6 +148,7 @@ local function buildInitialState()
 		},
 		voteChoices = {},
 		voteCounts = {},
+		voteVoters = {},
 		scoreboardStats = {},
 		scoreboardPlatforms = {},
 		roundResults = {},
@@ -1283,7 +1292,16 @@ local function bindCharacter(player: Player)
 	end))
 end
 
-local function chooseVoteOptions(): { MapConfig }
+local function makeVoteChoice(mapConfig: MapConfig, occurrence: number): VoteChoice
+	return {
+		choiceId = if occurrence <= 1 then mapConfig.id else mapConfig.id .. ":" .. tostring(occurrence),
+		mapId = mapConfig.id,
+		displayName = mapConfig.displayName,
+		thumbnailImage = mapConfig.thumbnailImage,
+	}
+end
+
+local function chooseVoteOptions(): { VoteChoice }
 	local available = {}
 	for _, mapConfig in ipairs(RoundConfig.Maps) do
 		if getMapTemplate(mapConfig.id) then
@@ -1292,9 +1310,19 @@ local function chooseVoteOptions(): { MapConfig }
 	end
 
 	local choices = {}
+	local sourceMaps = table.clone(available)
+	local occurrences = {}
 	while #available > 0 and #choices < RoundConfig.VoteChoiceCount do
 		local index = rng:NextInteger(1, #available)
-		table.insert(choices, table.remove(available, index))
+		local mapConfig = table.remove(available, index)
+		occurrences[mapConfig.id] = (occurrences[mapConfig.id] or 0) + 1
+		table.insert(choices, makeVoteChoice(mapConfig, occurrences[mapConfig.id]))
+	end
+
+	while #sourceMaps > 0 and #choices < RoundConfig.VoteChoiceCount do
+		local mapConfig = sourceMaps[rng:NextInteger(1, #sourceMaps)]
+		occurrences[mapConfig.id] = (occurrences[mapConfig.id] or 0) + 1
+		table.insert(choices, makeVoteChoice(mapConfig, occurrences[mapConfig.id]))
 	end
 
 	return choices
@@ -1303,39 +1331,72 @@ end
 local function syncVoteChoices()
 	local choices = {}
 	local counts = {}
+	local voters = {}
 
-	for _, mapConfig in ipairs(currentChoices) do
+	for _, choice in ipairs(currentChoices) do
 		table.insert(choices, {
-			id = mapConfig.id,
-			displayName = mapConfig.displayName,
+			id = choice.choiceId,
+			choiceId = choice.choiceId,
+			mapId = choice.mapId,
+			displayName = choice.displayName,
+			thumbnailImage = choice.thumbnailImage,
 		})
-		counts[mapConfig.id] = voteCounts[mapConfig.id] or 0
+		counts[choice.choiceId] = voteCounts[choice.choiceId] or 0
+		voters[choice.choiceId] = {}
+	end
+
+	for player, choiceId in pairs(playerVotes) do
+		if voters[choiceId] and player.Parent == Players then
+			table.insert(voters[choiceId], player.UserId)
+		end
 	end
 
 	setReplicaValue({ "voteChoices" }, choices)
 	setReplicaValue({ "voteCounts" }, counts)
+	setReplicaValue({ "voteVoters" }, voters)
 end
 
-local function isCurrentChoice(mapId: string): boolean
-	for _, mapConfig in ipairs(currentChoices) do
-		if mapConfig.id == mapId then
-			return true
+local function getCurrentChoice(choiceId: string): VoteChoice?
+	for _, choice in ipairs(currentChoices) do
+		if choice.choiceId == choiceId then
+			return choice
 		end
 	end
-	return false
+	return nil
+end
+
+local function isCurrentChoice(choiceId: string): boolean
+	return getCurrentChoice(choiceId) ~= nil
+end
+
+local function clearPlayerVote(player: Player): boolean
+	local previousChoiceId = playerVotes[player]
+	if not previousChoiceId then
+		return false
+	end
+
+	playerVotes[player] = nil
+	if voteCounts[previousChoiceId] then
+		voteCounts[previousChoiceId] = math.max(voteCounts[previousChoiceId] - 1, 0)
+	end
+	return true
+end
+
+local function buildForcedVoteChoice(mapConfig: MapConfig): VoteChoice
+	return makeVoteChoice(mapConfig, 1)
 end
 
 local function chooseWinningMap(): string?
 	local tied = {}
 	local best = -math.huge
 
-	for _, mapConfig in ipairs(currentChoices) do
-		local count = voteCounts[mapConfig.id] or 0
+	for _, choice in ipairs(currentChoices) do
+		local count = voteCounts[choice.choiceId] or 0
 		if count > best then
 			best = count
-			tied = { mapConfig.id }
+			tied = { choice.choiceId }
 		elseif count == best then
-			table.insert(tied, mapConfig.id)
+			table.insert(tied, choice.choiceId)
 		end
 	end
 
@@ -1343,7 +1404,12 @@ local function chooseWinningMap(): string?
 		return nil
 	end
 
-	return tied[rng:NextInteger(1, #tied)]
+	local winningChoice = getCurrentChoice(tied[rng:NextInteger(1, #tied)])
+	if winningChoice then
+		return winningChoice.mapId
+	end
+
+	return nil
 end
 
 local function getEligiblePlayers(): { Player }
@@ -1553,7 +1619,7 @@ local function runRoundLoop()
 
 		if forcedMapId then
 			local forcedMap = getConfiguredMap(forcedMapId)
-			currentChoices = if forcedMap then { forcedMap } else {}
+			currentChoices = if forcedMap then { buildForcedVoteChoice(forcedMap) } else {}
 		else
 			currentChoices = chooseVoteOptions()
 		end
@@ -1622,25 +1688,26 @@ local function runRoundLoop()
 	end
 end
 
-local function onSubmitMapVote(player: Player, mapId: any)
+local function onSubmitMapVote(player: Player, choiceId: any)
 	if currentState ~= RoundStates.Intermission then
 		return
 	end
 	if not votingOpen then
 		return
 	end
-	if typeof(mapId) ~= "string" then
+	if typeof(choiceId) ~= "string" then
 		return
 	end
-	if playerVotes[player] ~= nil then
+	if playerVotes[player] == choiceId then
 		return
 	end
-	if not isCurrentChoice(mapId) then
+	if not isCurrentChoice(choiceId) then
 		return
 	end
 
-	playerVotes[player] = mapId
-	voteCounts[mapId] = (voteCounts[mapId] or 0) + 1
+	clearPlayerVote(player)
+	playerVotes[player] = choiceId
+	voteCounts[choiceId] = (voteCounts[choiceId] or 0) + 1
 	syncVoteChoices()
 end
 
@@ -1768,7 +1835,10 @@ end
 
 function RoundService:OnPlayerRemoving(player: Player)
 	respawnTokens[player] = nil
-	playerVotes[player] = nil
+	local voteChanged = clearPlayerVote(player)
+	if voteChanged then
+		syncVoteChoices()
+	end
 	removePlayerScoreboardState(player)
 	disconnectCharacterConnections(player)
 	disconnectLobbyCharacterConnection(player)

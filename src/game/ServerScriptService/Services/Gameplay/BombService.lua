@@ -692,6 +692,15 @@ local function getProjectilePhysicsPosition(state: ProjectileState): Vector3
 	return state.position
 end
 
+local function getProjectilePhysicsVelocity(state: ProjectileState): Vector3
+	local rootPart = state.physicalRoot
+	if rootPart and rootPart.Parent then
+		return rootPart.AssemblyLinearVelocity
+	end
+
+	return Vector3.zero
+end
+
 local function explode(owner: Player, position: Vector3, source: string, projectileId: string?)
 	if projectileId then
 		local state = activeProjectiles[projectileId]
@@ -856,6 +865,23 @@ local function createSweepParams(owner: Player): RaycastParams
 	return params
 end
 
+local function createPhysicalGroundParams(state: ProjectileState): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local excluded = {}
+	local character = state.owner.Character
+	if character then
+		table.insert(excluded, character)
+	end
+	if state.physicalProjectile then
+		table.insert(excluded, state.physicalProjectile)
+	end
+	params.FilterDescendantsInstances = excluded
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+	return params
+end
+
 local function getSurfaceNormal(owner: Player, position: Vector3): Vector3
 	local params = createSweepParams(owner)
 	local rayOrigin = position + Vector3.yAxis * BombConfig.PostImpactNormalProbeUp
@@ -917,6 +943,62 @@ local function setProjectileAssemblyMotion(projectile: Instance, velocity: Vecto
 			projectile:SetNetworkOwner(nil)
 		end)
 	end
+end
+
+local function dampVector(vector: Vector3, dampingPerSecond: number, dt: number, stopSpeed: number): Vector3
+	if vector.Magnitude <= stopSpeed then
+		return Vector3.zero
+	end
+
+	local dampingAlpha = math.clamp(dampingPerSecond * dt, 0, 1)
+	local speed = vector.Magnitude * (1 - dampingAlpha)
+	if speed <= stopSpeed then
+		return Vector3.zero
+	end
+
+	return vector.Unit * speed
+end
+
+local function isPhysicalProjectileGrounded(state: ProjectileState, rootPart: BasePart): boolean
+	local radius = math.max(NORMAL_PROJECTILE_PHYSICS.radius, rootPart.Size.X * 0.5, rootPart.Size.Z * 0.5, 0.1)
+	local probeDistance = radius + math.max(NORMAL_PROJECTILE_PHYSICS.surfaceOffset, 0) + 0.35
+	local hit = workspace:Raycast(rootPart.Position, Vector3.yAxis * -probeDistance, createPhysicalGroundParams(state))
+	return hit ~= nil and hit.Normal.Y >= NORMAL_PROJECTILE_PHYSICS.floorNormalY
+end
+
+local function dampGroundedPhysicalProjectile(state: ProjectileState, dt: number)
+	local projectile = state.physicalProjectile
+	local rootPart = state.physicalRoot
+	if not (projectile and projectile.Parent and rootPart and rootPart.Parent) then
+		return
+	end
+	if not isPhysicalProjectileGrounded(state, rootPart) then
+		return
+	end
+
+	local velocity = rootPart.AssemblyLinearVelocity
+	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+	local dampedHorizontal = dampVector(
+		horizontalVelocity,
+		NORMAL_PROJECTILE_PHYSICS.groundedFrictionPerSecond,
+		dt,
+		NORMAL_PROJECTILE_PHYSICS.minRollSpeed
+	)
+
+	local verticalSpeed = velocity.Y
+	if math.abs(verticalSpeed) <= NORMAL_PROJECTILE_PHYSICS.minRollSpeed then
+		verticalSpeed = 0
+	end
+
+	local radius = math.max(NORMAL_PROJECTILE_PHYSICS.radius, 0.1)
+	local dampedAngular = dampVector(
+		rootPart.AssemblyAngularVelocity,
+		NORMAL_PROJECTILE_PHYSICS.groundedFrictionPerSecond * 1.35,
+		dt,
+		NORMAL_PROJECTILE_PHYSICS.minRollSpeed / radius
+	)
+	local dampedVelocity = Vector3.new(dampedHorizontal.X, verticalSpeed, dampedHorizontal.Z)
+	setProjectileAssemblyMotion(projectile, dampedVelocity, dampedAngular)
 end
 
 local function spawnPhysicalProjectile(state: ProjectileState, position: Vector3, normal: Vector3, incomingVelocity: Vector3): Instance?
@@ -1106,7 +1188,7 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 	return true
 end
 
-local function updateProjectileStates(currentTime: number)
+local function updateProjectileStates(currentTime: number, deltaTime: number)
 	for projectileId, state in pairs(activeProjectiles) do
 		if not state.owner.Parent then
 			destroyPhysicalProjectile(state)
@@ -1118,7 +1200,9 @@ local function updateProjectileStates(currentTime: number)
 		local nextPosition = state.position
 		local currentVelocity = Vector3.zero
 		if state.landed then
+			dampGroundedPhysicalProjectile(state, deltaTime)
 			nextPosition = getProjectilePhysicsPosition(state)
+			currentVelocity = getProjectilePhysicsVelocity(state)
 		else
 			alpha = math.clamp((currentTime - state.launchedAt) / state.path.duration, 0, 1)
 			if expired then
@@ -1337,9 +1421,9 @@ function BombService:OnStart()
 	if heartbeatConnection then
 		heartbeatConnection:Disconnect()
 	end
-	heartbeatConnection = game:GetService("RunService").Heartbeat:Connect(function()
+	heartbeatConnection = game:GetService("RunService").Heartbeat:Connect(function(deltaTime)
 		local currentTime = now()
-		updateProjectileStates(currentTime)
+		updateProjectileStates(currentTime, deltaTime)
 		for _, player in ipairs(Players:GetPlayers()) do
 			syncPlayerRoundState(player)
 			if not isActivePlayer(player) and cookStates[player] then

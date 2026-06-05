@@ -1,11 +1,15 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local WorldTextEffect = {}
 
 local DEFAULT_LIFETIME = 1
 local DEFAULT_MAX_ACTIVE = 80
-local DEFAULT_SIZE = UDim2.fromOffset(190, 46)
-local DEFAULT_STUDS_OFFSET = Vector3.new(0, 2.8, 0)
+local DEFAULT_MAX_DISTANCE = 300
+local FINAL_SIZE_SCALE = 0.5
+local START_SIZE_SCALE = 0.2
+local POP_SECONDS = 0.22
+local TEXT_WHIPS_FOLDER_PATH = { "Assets", "TextWhips" }
 local activeAnchors = {}
 
 local function isFiniteNumber(value: any): boolean
@@ -19,13 +23,6 @@ local function isFiniteVector3(value: any): boolean
 		and isFiniteNumber(value.Z)
 end
 
-local function isFiniteColor3(value: any): boolean
-	return typeof(value) == "Color3"
-		and isFiniteNumber(value.R)
-		and isFiniteNumber(value.G)
-		and isFiniteNumber(value.B)
-end
-
 local function playTween(instance: Instance, tweenInfo: TweenInfo, goals)
 	local ok, tween = pcall(function()
 		return TweenService:Create(instance, tweenInfo, goals)
@@ -33,6 +30,118 @@ local function playTween(instance: Instance, tweenInfo: TweenInfo, goals)
 	if ok then
 		tween:Play()
 	end
+end
+
+local function getTextWhipsFolder(): Instance?
+	local current: Instance? = ReplicatedStorage
+	for _, childName in ipairs(TEXT_WHIPS_FOLDER_PATH) do
+		current = if current then current:FindFirstChild(childName) else nil
+	end
+	return current
+end
+
+local function getTemplate(templateName: string): Instance?
+	local folder = getTextWhipsFolder()
+	local template = folder and folder:FindFirstChild(templateName)
+	if not template then
+		warn(("[WorldTextEffect] Missing TextWhip template %q"):format(templateName))
+	end
+	return template
+end
+
+local function scaleUDim2(value: UDim2, scale: number): UDim2
+	return UDim2.new(
+		value.X.Scale * scale,
+		value.X.Offset * scale,
+		value.Y.Scale * scale,
+		value.Y.Offset * scale
+	)
+end
+
+local function sanitizeBasePart(part: BasePart)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Transparency = 1
+end
+
+local function prepareClone(clone: Instance, position: Vector3)
+	if clone:IsA("BasePart") then
+		sanitizeBasePart(clone)
+		clone.CFrame = CFrame.new(position)
+	elseif clone:IsA("Model") then
+		clone:PivotTo(CFrame.new(position))
+	end
+
+	for _, descendant in ipairs(clone:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			sanitizeBasePart(descendant)
+		elseif descendant:IsA("BaseScript") then
+			descendant.Disabled = true
+		end
+	end
+end
+
+local function getBillboards(root: Instance): { BillboardGui }
+	local billboards = {}
+	if root:IsA("BillboardGui") then
+		table.insert(billboards, root)
+	end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("BillboardGui") then
+			table.insert(billboards, descendant)
+		end
+	end
+	return billboards
+end
+
+local function animateBillboards(root: Instance, lifetime: number, maxDistance: number?)
+	local popTween = TweenInfo.new(math.min(POP_SECONDS, lifetime * 0.4), Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+	local fadeDelay = math.max(lifetime * 0.45, 0)
+	local fadeSeconds = math.max(lifetime - fadeDelay, 0.05)
+	local fadeTween = TweenInfo.new(fadeSeconds, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+	for _, billboard in ipairs(getBillboards(root)) do
+		local authoredSize = billboard.Size
+		local finalSize = scaleUDim2(authoredSize, FINAL_SIZE_SCALE)
+		billboard.AlwaysOnTop = true
+		billboard.MaxDistance = maxDistance or DEFAULT_MAX_DISTANCE
+		billboard.Size = scaleUDim2(finalSize, START_SIZE_SCALE)
+		playTween(billboard, popTween, {
+			Size = finalSize,
+		})
+	end
+
+	task.delay(fadeDelay, function()
+		if not root.Parent then
+			return
+		end
+
+		for _, descendant in ipairs(root:GetDescendants()) do
+			if descendant:IsA("ImageLabel") or descendant:IsA("ImageButton") then
+				playTween(descendant, fadeTween, {
+					BackgroundTransparency = 1,
+					ImageTransparency = 1,
+				})
+			elseif descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+				playTween(descendant, fadeTween, {
+					BackgroundTransparency = 1,
+					TextStrokeTransparency = 1,
+					TextTransparency = 1,
+				})
+			elseif descendant:IsA("GuiObject") then
+				playTween(descendant, fadeTween, {
+					BackgroundTransparency = 1,
+				})
+			elseif descendant:IsA("UIStroke") then
+				playTween(descendant, fadeTween, {
+					Transparency = 1,
+				})
+			end
+		end
+	end)
 end
 
 local function removeActive(anchor: Instance)
@@ -62,75 +171,62 @@ local function pruneActive(maxActive: number)
 	end
 end
 
+local function tweenAnchor(anchor: Instance, fromPosition: Vector3, toPosition: Vector3, lifetime: number)
+	local tweenInfo = TweenInfo.new(lifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	if anchor:IsA("BasePart") then
+		playTween(anchor, tweenInfo, {
+			CFrame = CFrame.new(toPosition),
+		})
+	elseif anchor:IsA("Model") then
+		local driver = Instance.new("CFrameValue")
+		driver.Value = CFrame.new(fromPosition)
+		driver.Parent = anchor
+		local connection = driver:GetPropertyChangedSignal("Value"):Connect(function()
+			if anchor.Parent then
+				anchor:PivotTo(driver.Value)
+			end
+		end)
+		local tween = TweenService:Create(driver, tweenInfo, {
+			Value = CFrame.new(toPosition),
+		})
+		tween.Completed:Connect(function()
+			connection:Disconnect()
+			driver:Destroy()
+		end)
+		tween:Play()
+	end
+end
+
 function WorldTextEffect.Play(parent: Instance, descriptor)
 	if not parent or not parent.Parent or typeof(descriptor) ~= "table" then
 		return nil
 	end
 
-	local text = descriptor.text
+	local templateName = descriptor.templateName
 	local position = descriptor.position
-	if typeof(text) ~= "string" or text == "" or not isFiniteVector3(position) then
+	if typeof(templateName) ~= "string" or templateName == "" or not isFiniteVector3(position) then
 		return nil
 	end
 
 	local lifetime = if isFiniteNumber(descriptor.lifetime) then math.clamp(descriptor.lifetime, 0.15, 5) else DEFAULT_LIFETIME
 	local maxActive = if isFiniteNumber(descriptor.maxActive) then math.max(1, math.floor(descriptor.maxActive)) else DEFAULT_MAX_ACTIVE
-	local color = if isFiniteColor3(descriptor.color) then descriptor.color else Color3.fromRGB(255, 255, 255)
-	local strokeColor = if isFiniteColor3(descriptor.strokeColor) then descriptor.strokeColor else Color3.fromRGB(0, 0, 0)
-	local textSize = if isFiniteNumber(descriptor.textSize) then math.clamp(descriptor.textSize, 10, 64) else 20
 	local lift = if isFiniteVector3(descriptor.lift) then descriptor.lift else Vector3.new(0, 2.4, 0)
-	local studsOffset = if isFiniteVector3(descriptor.studsOffset) then descriptor.studsOffset else DEFAULT_STUDS_OFFSET
+	local maxDistance = if isFiniteNumber(descriptor.maxDistance) then descriptor.maxDistance else DEFAULT_MAX_DISTANCE
+	local template = getTemplate(templateName)
+	if not template then
+		return nil
+	end
 
 	pruneActive(maxActive)
 
-	local anchor = Instance.new("Part")
-	anchor.Name = "WorldTextMarker"
-	anchor.Anchored = true
-	anchor.CanCollide = false
-	anchor.CanQuery = false
-	anchor.CanTouch = false
-	anchor.CastShadow = false
-	anchor.Transparency = 1
-	anchor.Size = Vector3.new(0.2, 0.2, 0.2)
-	anchor.CFrame = CFrame.new(position)
+	local anchor = template:Clone()
+	anchor.Name = "WorldText_" .. templateName
+	prepareClone(anchor, position)
 	anchor.Parent = parent
 	table.insert(activeAnchors, anchor)
 
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "Billboard"
-	billboard.AlwaysOnTop = true
-	billboard.MaxDistance = if isFiniteNumber(descriptor.maxDistance) then descriptor.maxDistance else 300
-	billboard.Size = DEFAULT_SIZE
-	billboard.StudsOffset = studsOffset
-	billboard.Parent = anchor
-
-	local label = Instance.new("TextLabel")
-	label.Name = "Label"
-	label.BackgroundTransparency = 1
-	label.Size = UDim2.fromScale(1, 1)
-	label.Font = Enum.Font.GothamBold
-	label.Text = text
-	label.TextColor3 = color
-	label.TextSize = textSize
-	label.TextStrokeColor3 = strokeColor
-	label.TextStrokeTransparency = 0.35
-	label.TextTruncate = Enum.TextTruncate.AtEnd
-	label.Parent = billboard
-
-	local scale = Instance.new("UIScale")
-	scale.Scale = 0.78
-	scale.Parent = label
-
-	playTween(anchor, TweenInfo.new(lifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		CFrame = CFrame.new(position + lift),
-	})
-	playTween(scale, TweenInfo.new(math.min(lifetime * 0.35, 0.25), Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-		Scale = 1,
-	})
-	playTween(label, TweenInfo.new(lifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-		TextTransparency = 1,
-		TextStrokeTransparency = 1,
-	})
+	tweenAnchor(anchor, position, position + lift, lifetime)
+	animateBillboards(anchor, lifetime, maxDistance)
 
 	task.delay(lifetime + 0.05, function()
 		destroyAnchor(anchor)

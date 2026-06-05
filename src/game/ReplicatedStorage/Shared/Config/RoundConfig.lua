@@ -6,7 +6,7 @@ return {
 	RoundSeconds = 180,
 	RespawnSeconds = 7,
 	ResetSeconds = 5,
-	VoteChoiceCount = 3,
+	VoteChoiceCount = 4,
 	StudioTesting = {
 		MinPlayers = 1,
 		HoldSoloRoundsActive = true,
@@ -53,6 +53,7 @@ return {
 		{
 			id = "Ships",
 			displayName = "Ships",
+			thumbnailImage = "",
 		},
 	},
 }

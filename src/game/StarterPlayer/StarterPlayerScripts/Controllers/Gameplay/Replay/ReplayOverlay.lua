@@ -2,93 +2,131 @@ local Players = game:GetService("Players")
 
 local LocalPlayer = Players.LocalPlayer
 
+local HUD_NAME = "HUD"
+local KILL_REPLAY_FRAME_NAME = "KillReplay"
+local POTG_FRAME_NAME = "POTG"
+
 local ReplayOverlay = {}
 
-function ReplayOverlay.Create(payload, options)
-	options = options or {}
+local warnedMessages = {} :: { [string]: boolean }
+
+local function warnOnce(message: string)
+	if warnedMessages[message] then
+		return
+	end
+
+	warnedMessages[message] = true
+	warn("[ReplayOverlay] " .. message)
+end
+
+local function findFrame(parent: Instance?, childName: string): Frame?
+	local child = if parent then parent:FindFirstChild(childName) else nil
+	return if child and child:IsA("Frame") then child else nil
+end
+
+local function findTextLabel(parent: Instance?, childName: string): TextLabel?
+	local child = if parent then parent:FindFirstChild(childName) else nil
+	return if child and child:IsA("TextLabel") then child else nil
+end
+
+local function getHud(): ScreenGui?
 	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
 	if not playerGui then
+		warnOnce("PlayerGui unavailable; replay topbar skipped")
 		return nil
 	end
 
-	local overlayName = options.overlayName or "_KillReplayOverlay"
-	local localReplayAttribute = options.localReplayAttribute or "BombBattlesLocalReplay"
-	local existing = playerGui:FindFirstChild(overlayName)
-	if existing and existing:GetAttribute(localReplayAttribute) == true then
-		existing:Destroy()
+	local hud = playerGui:FindFirstChild(HUD_NAME)
+	if not (hud and hud:IsA("ScreenGui")) then
+		warnOnce("HUD ScreenGui unavailable; replay topbar skipped")
+		return nil
 	end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = overlayName
-	gui:SetAttribute(localReplayAttribute, true)
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 1000
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = playerGui
+	return hud
+end
 
-	local frame = Instance.new("Frame")
-	frame.Name = "Bar"
-	frame.AnchorPoint = Vector2.new(0.5, 0)
-	frame.Position = UDim2.fromScale(0.5, 0)
-	frame.Size = UDim2.new(1, 0, 0, 94)
-	frame.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
-	frame.BackgroundTransparency = 0.18
-	frame.BorderSizePixel = 0
-	frame.Parent = gui
-
-	local getPlayerDisplayName = options.getPlayerDisplayName
-	local isFiniteNumber = options.isFiniteNumber or function(value)
-		return typeof(value) == "number" and value == value and math.abs(value) < math.huge
+local function hideReplayTopbars(hud: ScreenGui)
+	local killReplay = findFrame(hud, KILL_REPLAY_FRAME_NAME)
+	if killReplay then
+		killReplay.Visible = false
 	end
-	local titleText = if payload.type == "POTGReplay"
-		then "PLAY OF THE GAME"
-		else "KILLED BY: " .. (if getPlayerDisplayName then getPlayerDisplayName(payload.killerUserId) else tostring(payload.killerUserId))
 
-	local title = Instance.new("TextLabel")
-	title.Name = "Title"
-	title.BackgroundTransparency = 1
-	title.Position = UDim2.new(0, 24, 0, 14)
-	title.Size = UDim2.new(1, -48, 0, 36)
-	title.Font = Enum.Font.GothamBold
-	title.Text = titleText
-	title.TextColor3 = Color3.fromRGB(255, 255, 255)
-	title.TextSize = 24
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextTruncate = Enum.TextTruncate.AtEnd
-	title.Parent = frame
+	local potg = findFrame(hud, POTG_FRAME_NAME)
+	if potg then
+		potg.Visible = false
+	end
+end
 
-	local sourceText = ""
+local function getDisplayName(userId: any, getPlayerDisplayName): string
+	if type(getPlayerDisplayName) == "function" then
+		return getPlayerDisplayName(userId)
+	end
+
+	return tostring(userId)
+end
+
+local function getReplayTopbar(payload, hud: ScreenGui): (Frame?, TextLabel?, string?)
 	if payload.type == "POTGReplay" then
-		sourceText = if getPlayerDisplayName then getPlayerDisplayName(payload.playerUserId) else tostring(payload.playerUserId)
-		if typeof(payload.reason) == "string" and payload.reason ~= "" then
-			sourceText ..= " / " .. payload.reason
+		local frame = findFrame(hud, POTG_FRAME_NAME)
+		local inner = findFrame(frame, "Inner")
+		return frame, findTextLabel(inner, "ByPlayer"), "POTG"
+	end
+
+	if payload.type == "KillReplay" then
+		local frame = findFrame(hud, KILL_REPLAY_FRAME_NAME)
+		local inner = findFrame(frame, "Inner")
+		return frame, findTextLabel(inner, "KilledBy"), "KillReplay"
+	end
+
+	return nil, nil, nil
+end
+
+function ReplayOverlay.Create(payload, options)
+	options = options or {}
+	if typeof(payload) ~= "table" then
+		warnOnce("Invalid replay payload; replay topbar skipped")
+		return nil
+	end
+
+	local hud = getHud()
+	if not hud then
+		return nil
+	end
+
+	hideReplayTopbars(hud)
+
+	local frame, playerLabel, topbarName = getReplayTopbar(payload, hud)
+	if not (frame and playerLabel and topbarName) then
+		warnOnce(("Missing authored %s replay topbar or semantic label; replay topbar skipped"):format(tostring(payload.type)))
+		return nil
+	end
+
+	if payload.type == "POTGReplay" then
+		playerLabel.Text = "BY " .. getDisplayName(payload.playerUserId, options.getPlayerDisplayName)
+	else
+		playerLabel.Text = "KILLED BY " .. getDisplayName(payload.killerUserId, options.getPlayerDisplayName)
+	end
+
+	frame.Visible = true
+
+	local handle = {
+		_frame = frame,
+		_hud = hud,
+		_topbarName = topbarName,
+	}
+
+	function handle:Destroy()
+		if self._hud and self._hud.Parent then
+			hideReplayTopbars(self._hud)
+			return
 		end
-		if isFiniteNumber(payload.score) then
-			sourceText ..= " / Score: " .. tostring(math.floor(payload.score + 0.5))
-		end
-	elseif typeof(payload.sourceType) == "string" and payload.sourceType ~= "" then
-		sourceText = payload.sourceType
-		if typeof(payload.sourceId) == "string" and payload.sourceId ~= "" then
-			sourceText ..= " / " .. payload.sourceId
+
+		if self._frame and self._frame.Parent then
+			self._frame.Visible = false
 		end
 	end
 
-	local source = Instance.new("TextLabel")
-	source.Name = "Source"
-	source.BackgroundTransparency = 1
-	source.Position = UDim2.new(0, 24, 0, 52)
-	source.Size = UDim2.new(1, -48, 0, 24)
-	source.Font = Enum.Font.Gotham
-	source.Text = sourceText
-	source.TextColor3 = Color3.fromRGB(220, 226, 235)
-	source.TextSize = 16
-	source.TextXAlignment = Enum.TextXAlignment.Left
-	source.TextTruncate = Enum.TextTruncate.AtEnd
-	source.Visible = sourceText ~= ""
-	source.Parent = frame
-
-	return gui
+	return handle
 end
 
 return ReplayOverlay

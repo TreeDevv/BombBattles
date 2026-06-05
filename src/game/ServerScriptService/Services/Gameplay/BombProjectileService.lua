@@ -472,6 +472,75 @@ local function fireSettle(state: ProjectileState)
 	})
 end
 
+local function dampVector(vector: Vector3, dampingPerSecond: number, dt: number, stopSpeed: number): Vector3
+	if vector.Magnitude <= stopSpeed then
+		return Vector3.zero
+	end
+
+	local dampingAlpha = math.clamp(dampingPerSecond * dt, 0, 1)
+	local speed = vector.Magnitude * (1 - dampingAlpha)
+	if speed <= stopSpeed then
+		return Vector3.zero
+	end
+
+	return vector.Unit * speed
+end
+
+local function isPhysicalProjectileGrounded(state: ProjectileState, rootPart: BasePart): boolean
+	local radius = math.max(state.physics.radius, rootPart.Size.X * 0.5, rootPart.Size.Z * 0.5, 0.1)
+	local probeDistance = radius + math.max(state.physics.surfaceOffset, 0) + 0.35
+	local hit = workspace:Raycast(rootPart.Position, Vector3.yAxis * -probeDistance, createRaycastParams(state))
+	return hit ~= nil and hit.Normal.Y >= state.physics.floorNormalY
+end
+
+local function dampGroundedPhysicalProjectile(state: ProjectileState, dt: number)
+	if state.bombType ~= BombProjectileConfig.BombType.Normal then
+		return
+	end
+
+	local projectile = state.physicalProjectile
+	local rootPart = state.physicalRoot
+	if not (projectile and projectile.Parent and rootPart and rootPart.Parent) then
+		return
+	end
+	if not isPhysicalProjectileGrounded(state, rootPart) then
+		state.grounded = false
+		return
+	end
+
+	state.grounded = true
+	local velocity = rootPart.AssemblyLinearVelocity
+	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
+	local dampedHorizontal = dampVector(
+		horizontalVelocity,
+		state.physics.groundedFrictionPerSecond,
+		dt,
+		state.physics.minRollSpeed
+	)
+
+	local verticalSpeed = velocity.Y
+	if math.abs(verticalSpeed) <= state.physics.minRollSpeed then
+		verticalSpeed = 0
+	end
+
+	local radius = math.max(state.physics.radius, 0.1)
+	local dampedAngular = dampVector(
+		rootPart.AssemblyAngularVelocity,
+		state.physics.groundedFrictionPerSecond * 1.35,
+		dt,
+		state.physics.minRollSpeed / radius
+	)
+	local dampedVelocity = Vector3.new(dampedHorizontal.X, verticalSpeed, dampedHorizontal.Z)
+	setPhysicalMotion(projectile, dampedVelocity, dampedAngular)
+	state.position = rootPart.Position
+	state.velocity = dampedVelocity
+
+	if dampedHorizontal.Magnitude <= 0 and math.abs(verticalSpeed) <= 0 and dampedAngular.Magnitude <= 0 and not state.settled then
+		state.settled = true
+		fireSettle(state)
+	end
+end
+
 local function redirectProjectile(state: ProjectileState, result, currentTime: number): boolean
 	if typeof(result) ~= "table" then
 		return false
@@ -592,6 +661,7 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	end
 
 	if state.physicalProjectile then
+		dampGroundedPhysicalProjectile(state, fixedDt)
 		state.position = getPhysicalPosition(state)
 		state.velocity = getPhysicalVelocity(state)
 		if not handleStepHook(state, state.position + state.velocity * fixedDt, currentTime) then

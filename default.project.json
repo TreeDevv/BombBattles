@@ -182,6 +182,15 @@
           "KillEffectController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/KillEffectController.lua"
           },
+          "MapVoteController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/MapVoteController.lua"
+          },
+          "NotificationController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/NotificationController.lua"
+          },
+          "GameStateNotificationController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GameStateNotificationController.lua"
+          },
           "WorldTextController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/WorldTextController.lua"
           },

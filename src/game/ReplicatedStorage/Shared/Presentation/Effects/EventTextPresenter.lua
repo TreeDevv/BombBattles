@@ -5,37 +5,21 @@ local EventTextPresenter = {}
 
 local KINDS = WorldTextConstants.Kinds
 local MAX_ACTIVE = 80
+local random = Random.new()
+
+local TEXT_WHIPS = table.freeze({
+	kill = table.freeze({ "ELIMINATED", "KO" }),
+	explosion = table.freeze({ "POW", "BAM", "WHAM", "KAPOW", "BANG" }),
+})
 
 local STYLES = table.freeze({
-	throw = table.freeze({
-		color = Color3.fromRGB(255, 226, 112),
-		lifetime = 0.7,
-		offset = Vector3.new(0, 0.6, 0),
-		textSize = 18,
-	}),
 	explosion = table.freeze({
-		color = Color3.fromRGB(255, 216, 96),
-		lifetime = 0.85,
+		lifetime = 1,
 		offset = Vector3.new(0, 1.5, 0),
-		textSize = 22,
-	}),
-	damage = table.freeze({
-		color = Color3.fromRGB(255, 92, 92),
-		lifetime = 0.8,
-		offset = Vector3.new(0, 1.4, 0),
-		textSize = 20,
 	}),
 	elimination = table.freeze({
-		color = Color3.fromRGB(255, 235, 235),
 		lifetime = 1.2,
 		offset = Vector3.new(0, 2.5, 0),
-		textSize = 22,
-	}),
-	ability = table.freeze({
-		color = Color3.fromRGB(150, 235, 255),
-		lifetime = 1,
-		offset = Vector3.new(0, 2.3, 0),
-		textSize = 20,
 	}),
 })
 
@@ -68,16 +52,12 @@ local function getPosition(event, options): Vector3?
 	return nil
 end
 
-local function getAbilityName(event): string
-	if typeof(event) == "table" then
-		if typeof(event.abilityName) == "string" and event.abilityName ~= "" then
-			return event.abilityName
-		end
-		if typeof(event.abilityId) == "string" and event.abilityId ~= "" then
-			return event.abilityId
-		end
+local function chooseVariant(variants: { string }): string?
+	local count = #variants
+	if count <= 0 then
+		return nil
 	end
-	return "ABILITY"
+	return variants[random:NextInteger(1, count)]
 end
 
 local function buildDescriptor(event, options)
@@ -87,35 +67,26 @@ local function buildDescriptor(event, options)
 		return nil
 	end
 
-	local text = nil
+	local templateName = nil
 	local style = nil
-	if kind == KINDS.BombThrown then
-		text = "THROW"
-		style = STYLES.throw
-	elseif kind == KINDS.BombExploded then
-		text = "BOOM"
+	if kind == KINDS.BombExploded then
+		templateName = chooseVariant(TEXT_WHIPS.explosion)
 		style = STYLES.explosion
-	elseif kind == KINDS.PlayerDamaged then
-		text = if typeof(event) == "table" and isFiniteNumber(event.amount)
-			then "-" .. tostring(math.floor(event.amount + 0.5))
-			else "HIT"
-		style = STYLES.damage
 	elseif kind == KINDS.PlayerKilled then
-		text = "ELIMINATED"
+		templateName = chooseVariant(TEXT_WHIPS.kill)
 		style = STYLES.elimination
-	elseif kind == KINDS.AbilityUsed then
-		text = getAbilityName(event)
-		style = STYLES.ability
 	else
 		return nil
 	end
 
+	if not templateName or not style then
+		return nil
+	end
+
 	return {
-		text = text,
+		templateName = templateName,
 		position = position + style.offset,
-		color = style.color,
 		lifetime = style.lifetime,
-		textSize = style.textSize,
 		maxActive = MAX_ACTIVE,
 	}
 end

@@ -9,6 +9,7 @@ Use this when adding UI frames that should be controlled by `FrameController`.
 - Add the CollectionService tag `Frame` to the `GuiObject` that should open and close.
 - Name the tagged instance exactly what code will pass to `FrameController:OpenFrame(frameName)`. Frame names must be unique within `PlayerGui`.
 - Set the boolean attribute `Exclusive` to `true` when opening this frame should move same-`ScreenGui` sibling HUD elements offscreen and show a click-to-close backdrop.
+- Optionally set the string attribute `SlideFrom` to `Right` when a frame should animate in from the right edge. Frames without this attribute use the default top-slide animation.
 
 ## Code Usage
 
@@ -31,6 +32,7 @@ FrameController:CloseCurrentFrame()
 - `OpenFrame("Name")` resolves by `Instance.Name`, not by a display label or attribute.
 - Opening a new frame closes the currently open frame first.
 - Exclusive frames affect only visible sibling `GuiObject`s in the same `ScreenGui`.
+- `SlideFrom = "Right"` changes only the frame's own open/close direction; it does not imply exclusive backdrop behavior.
 - The backdrop is created at runtime by code; do not add a permanent backdrop instance for this system.
 - Keep frame visuals and layout in Studio. Only script logic belongs in the Rojo project.
 
@@ -40,4 +42,5 @@ FrameController:CloseCurrentFrame()
 - Frame has CollectionService tag `Frame`.
 - Frame name is unique and matches the code call.
 - Optional `Exclusive` attribute is a boolean, not a string.
+- Optional `SlideFrom` attribute is the string `Right` for side panels.
 - Sibling HUD elements that should slide away are direct `GuiObject` children of the same `ScreenGui`.

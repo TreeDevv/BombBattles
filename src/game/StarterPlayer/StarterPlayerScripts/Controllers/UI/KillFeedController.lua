@@ -3,19 +3,24 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
+local ROUND_TEAM_ATTR = "RoundTeam"
 local REMOTES_FOLDER_NAME = "Remotes"
 local KILL_FEED_REMOTE_NAME = "KillFeed"
 local MAX_ENTRIES = 5
 local HOLD_SECONDS = 4
 local ENTER_TWEEN = TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local FADE_TWEEN = TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local RESPAWNS_DISABLED_ENTER_TWEEN = TweenInfo.new(0.36, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local RESPAWNS_DISABLED_EXIT_TWEEN = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 local ENTER_OFFSET = UDim2.fromOffset(16, 6)
 local MIN_SLIDE_PIXELS = 18
+local RESPAWNS_DISABLED_HIDE_PADDING = 24
 
 local RED_TEAM_NAME = RoundConfig.Teams.Red.name
 local BLUE_TEAM_NAME = RoundConfig.Teams.Blue.name
@@ -46,10 +51,25 @@ KillFeedController._fadeLayer = nil :: Frame?
 KillFeedController._templateGradientRotation = 0
 KillFeedController._nextLayoutOrder = 0
 KillFeedController._remoteBindSerial = 0
+KillFeedController._respawnsDisabledBanner = nil :: Frame?
+KillFeedController._respawnsDisabledNativePosition = nil :: UDim2?
+KillFeedController._respawnsDisabledHiddenPosition = nil :: UDim2?
+KillFeedController._respawnsDisabledShown = false
+KillFeedController._respawnsDisabledTween = nil :: Tween?
 
 local function findTextLabel(parent: Instance?, childName: string): TextLabel?
 	local child = if parent then parent:FindFirstChild(childName) else nil
 	return if child and child:IsA("TextLabel") then child else nil
+end
+
+local function getLocalTeamName(): string?
+	local attributeTeam = LocalPlayer:GetAttribute(ROUND_TEAM_ATTR)
+	if typeof(attributeTeam) == "string" and attributeTeam ~= "" then
+		return attributeTeam
+	end
+
+	local team = LocalPlayer.Team
+	return if team then team.Name else nil
 end
 
 local function getPayloadString(payload, primaryKey: string, fallbackKey: string): string
@@ -202,8 +222,113 @@ function KillFeedController:_clearEntries(animate: boolean?)
 	self._fadingEntries = {}
 end
 
+function KillFeedController:_clearRespawnsDisabledBannerBinding()
+	if self._respawnsDisabledTween then
+		self._respawnsDisabledTween:Cancel()
+		self._respawnsDisabledTween = nil
+	end
+
+	self._respawnsDisabledBanner = nil
+	self._respawnsDisabledNativePosition = nil
+	self._respawnsDisabledHiddenPosition = nil
+	self._respawnsDisabledShown = false
+end
+
+function KillFeedController:_setRespawnsDisabledBannerVisible(visible: boolean, instant: boolean?)
+	local banner = self._respawnsDisabledBanner
+	if not (banner and self._respawnsDisabledNativePosition and self._respawnsDisabledHiddenPosition) then
+		return
+	end
+	if self._respawnsDisabledShown == visible and banner.Visible == visible and not instant then
+		return
+	end
+
+	self._respawnsDisabledShown = visible
+	if self._respawnsDisabledTween then
+		self._respawnsDisabledTween:Cancel()
+		self._respawnsDisabledTween = nil
+	end
+
+	local targetPosition = if visible then self._respawnsDisabledNativePosition else self._respawnsDisabledHiddenPosition
+	if visible then
+		banner.Visible = true
+	end
+
+	if instant then
+		banner.Position = targetPosition
+		banner.Visible = visible
+		return
+	end
+
+	local tweenInfo = if visible then RESPAWNS_DISABLED_ENTER_TWEEN else RESPAWNS_DISABLED_EXIT_TWEEN
+	self._respawnsDisabledTween = TweenService:Create(banner, tweenInfo, {
+		Position = targetPosition,
+	})
+	self._respawnsDisabledTween:Play()
+	self._respawnsDisabledTween.Completed:Once(function()
+		if self._respawnsDisabledBanner == banner and not self._respawnsDisabledShown then
+			banner.Visible = false
+		end
+	end)
+end
+
+function KillFeedController:_updateRespawnsDisabledBanner(instant: boolean?)
+	local state = RoundController:GetState()
+	local shouldShow = false
+
+	if state and state.state == RoundStates.Active then
+		local teamName = getLocalTeamName()
+		local respawnsEnabled = state.respawnsEnabled
+		if teamName and typeof(respawnsEnabled) == "table" and respawnsEnabled[teamName] == false then
+			shouldShow = true
+		end
+	end
+
+	self:_setRespawnsDisabledBannerVisible(shouldShow, instant)
+end
+
+function KillFeedController:_captureRespawnsDisabledBanner(banner: Frame?, layer: Frame?)
+	self:_clearRespawnsDisabledBannerBinding()
+	if not (banner and layer) then
+		return
+	end
+
+	banner.Visible = false
+	task.defer(function()
+		if not (banner.Parent and layer.Parent) then
+			return
+		end
+
+		local absolutePosition = banner.AbsolutePosition
+		local absoluteSize = banner.AbsoluteSize
+		if absoluteSize.X <= 0 or absoluteSize.Y <= 0 then
+			return
+		end
+
+		local layerPosition = layer.AbsolutePosition
+		local nativePosition = UDim2.fromOffset(absolutePosition.X - layerPosition.X, absolutePosition.Y - layerPosition.Y)
+		local hiddenPosition = UDim2.fromOffset(
+			absolutePosition.X - layerPosition.X + absoluteSize.X + RESPAWNS_DISABLED_HIDE_PADDING,
+			absolutePosition.Y - layerPosition.Y
+		)
+
+		banner.Parent = layer
+		banner.AnchorPoint = Vector2.new(0, 0)
+		banner.Size = UDim2.fromOffset(absoluteSize.X, absoluteSize.Y)
+		banner.Position = hiddenPosition
+		banner.Visible = false
+
+		self._respawnsDisabledBanner = banner
+		self._respawnsDisabledNativePosition = nativePosition
+		self._respawnsDisabledHiddenPosition = hiddenPosition
+		self._respawnsDisabledShown = false
+		self:_updateRespawnsDisabledBanner(false)
+	end)
+end
+
 function KillFeedController:_clearHudBinding()
 	self:_clearEntries()
+	self:_clearRespawnsDisabledBannerBinding()
 	if self._fadeLayer then
 		self._fadeLayer:Destroy()
 	end
@@ -397,6 +522,7 @@ function KillFeedController:_bindHud(hud: Instance?)
 	if not (template and template:IsA("Frame")) then
 		return
 	end
+	local respawnsDisabled = feed:FindFirstChild("RespawnsDisabled")
 
 	local prototype = template:Clone()
 	prototype.Visible = false
@@ -411,6 +537,10 @@ function KillFeedController:_bindHud(hud: Instance?)
 	self._template = prototype
 	self._fadeLayer = createFadeLayer(hud)
 	self._templateGradientRotation = if gradient then gradient.Rotation else 0
+	self:_captureRespawnsDisabledBanner(
+		if respawnsDisabled and respawnsDisabled:IsA("Frame") then respawnsDisabled else nil,
+		self._fadeLayer
+	)
 end
 
 function KillFeedController:_bindCurrentHud()
@@ -448,9 +578,21 @@ function KillFeedController:OnStart()
 			end)
 		end
 	end))
+	self:_trackConnection(LocalPlayer:GetAttributeChangedSignal(ROUND_TEAM_ATTR):Connect(function()
+		self:_updateRespawnsDisabledBanner(false)
+	end))
+	self:_trackConnection(LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+		self:_updateRespawnsDisabledBanner(false)
+	end))
+	self:_trackConnection(RoundController.StateReceived:Connect(function()
+		self:_updateRespawnsDisabledBanner(false)
+	end))
 	self:_trackConnection(RoundController.StateUpdated:Connect(function(key)
 		if key == "roundId" then
 			self:_clearEntries(true)
+		end
+		if key == "respawnsEnabled" or key == "state" or key == "roundId" then
+			self:_updateRespawnsDisabledBanner(key == "roundId")
 		end
 	end))
 

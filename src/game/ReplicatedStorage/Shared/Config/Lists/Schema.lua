@@ -22,6 +22,18 @@ return {
 		},
 	},
 
+	Quests = {
+		key = "quests",
+		value = {
+			dayKey = "",
+			countryCode = "",
+			utcOffsetMinutes = 0,
+			resetAtUnix = 0,
+			progress = {},
+			claimed = {},
+		},
+	},
+
 	Diagnostics = {
 		key = "diagnostics",
 		value = {},

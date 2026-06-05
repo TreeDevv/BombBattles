@@ -101,6 +101,9 @@
         "PurchaseReceiptService": {
           "$path": "src/game/ServerScriptService/Services/Economy/PurchaseReceiptService.lua"
         },
+        "QuestService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/QuestService.lua"
+        },
         "POTGService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/POTGService.lua"
         },
@@ -187,6 +190,12 @@
           },
           "NotificationController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/NotificationController.lua"
+          },
+          "AFKController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/AFKController.lua"
+          },
+          "QuestController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/QuestController.lua"
           },
           "GameStateNotificationController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GameStateNotificationController.lua"

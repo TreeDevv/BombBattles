@@ -7,19 +7,26 @@ local Teams = game:GetService("Teams")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local DataService = require(ServerScriptService.Services.DataService)
+local QuestService = require(ServerScriptService.Services.QuestService)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 
 local TEAM_ORDER = { RoundConfig.Teams.Red.name, RoundConfig.Teams.Blue.name }
 local REMOTES_FOLDER_NAME = "Remotes"
 local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
+local SET_AFK_REMOTE_NAME = "SetAFK"
 local REPORT_PREFERRED_INPUT_REMOTE_NAME = "ReportPreferredInput"
 local KILL_FEED_REMOTE_NAME = "KillFeed"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
 local ROUND_RESPAWN_ENDS_AT_ATTR = "RoundRespawnEndsAt"
+local AFK_ATTR = "AFK"
+local AFK_SOURCE_ATTR = "AFKSource"
+local AFK_STARTED_AT_ATTR = "AFKStartedAt"
+local AFK_MARKER_NAME = "AFK"
 local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
 local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
 local ASSIST_WINDOW_SECONDS = 10
@@ -55,10 +62,12 @@ local RoundService = {}
 
 local gameReplica = nil
 local submitMapVoteRemote: RemoteEvent? = nil
+local setAFKRemote: RemoteEvent? = nil
 local reportPreferredInputRemote: RemoteEvent? = nil
 local killFeedRemote: RemoteEvent? = nil
 local running = false
 local roundId = 0
+local activeRoundStartedAt = 0
 local currentState = RoundStates.WaitingForPlayers
 local votingOpen = false
 local pendingAdminForceStartMapId: string? = nil
@@ -82,6 +91,7 @@ local rewardedRoundIds: { [number]: boolean } = {}
 local recentDamageContributors: { [string]: { [string]: { damagedAt: number, teamName: string?, sourceType: string?, sourceId: string? } } } =
 	{}
 local rng = Random.new()
+local missingAFKTemplateWarned = false
 
 local function debugDeathFlow(message: string, ...)
 	if DEBUG_DEATH_FLOW then
@@ -182,6 +192,22 @@ local function ensureVoteRemote(): RemoteEvent
 
 	local remote = Instance.new("RemoteEvent")
 	remote.Name = SUBMIT_MAP_VOTE_REMOTE_NAME
+	remote.Parent = folder
+	return remote
+end
+
+local function ensureSetAFKRemote(): RemoteEvent
+	local folder = ensureRemotesFolder()
+	local existing = folder:FindFirstChild(SET_AFK_REMOTE_NAME)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = SET_AFK_REMOTE_NAME
 	remote.Parent = folder
 	return remote
 end
@@ -492,6 +518,7 @@ local function buildRoundResults(winnerTeam: string)
 		winnerTeam = winnerTeam,
 		selectedMapId = selectedMapId,
 		mapDisplayName = getMapDisplayName(selectedMapId),
+		durationSeconds = roundNonNegative(os.clock() - activeRoundStartedAt),
 		players = {},
 	}
 
@@ -538,6 +565,7 @@ end
 local function publishRoundResults(winnerTeam: string)
 	local results = buildRoundResults(winnerTeam)
 	awardRoundResults(results)
+	QuestService:ReportRoundResults(results)
 	setReplicaValue({ "roundResults" }, deepCopy(results))
 end
 
@@ -856,6 +884,68 @@ local function movePlayerToLobby(player: Player)
 	moveCharacterToSpawn(player, lobbySpawns[rng:NextInteger(1, #lobbySpawns)])
 end
 
+local function isPlayerAFK(player: Player): boolean
+	return player:GetAttribute(AFK_ATTR) == true
+end
+
+local function getAFKTemplate(): Instance?
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local ui = assets and assets:FindFirstChild("UI")
+	local template = ui and ui:FindFirstChild(AFK_MARKER_NAME)
+	if template then
+		return template
+	end
+
+	if not missingAFKTemplateWarned then
+		missingAFKTemplateWarned = true
+		warn("[RoundService] Missing ReplicatedStorage.Assets.UI.AFK template")
+	end
+	return nil
+end
+
+local function removeAFKMarker(player: Player)
+	local character = player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then
+		return
+	end
+
+	for _, child in ipairs(rootPart:GetChildren()) do
+		if child.Name == AFK_MARKER_NAME then
+			child:Destroy()
+		end
+	end
+end
+
+local function syncPlayerAFKMarker(player: Player)
+	removeAFKMarker(player)
+
+	if not isPlayerAFK(player) then
+		return
+	end
+
+	local character = player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then
+		return
+	end
+
+	local template = getAFKTemplate()
+	if not template then
+		return
+	end
+
+	local marker = template:Clone()
+	marker.Name = AFK_MARKER_NAME
+	local billboardGui = marker:FindFirstChild("BillboardGui")
+	local frame = billboardGui and billboardGui:FindFirstChild("Frame")
+	local timerLabel = frame and frame:FindFirstChild("Timer")
+	if timerLabel and timerLabel:IsA("TextLabel") then
+		timerLabel.Text = "0:00"
+	end
+	marker.Parent = rootPart
+end
+
 local function bumpRespawnToken(player: Player): number
 	local token = (respawnTokens[player] or 0) + 1
 	respawnTokens[player] = token
@@ -1074,6 +1164,7 @@ local function bindLobbyCharacter(player: Player)
 
 			bindNonRoundHumanoid(character)
 			movePlayerToLobby(player)
+			syncPlayerAFKMarker(player)
 		end)
 	end
 
@@ -1271,6 +1362,7 @@ local function bindCharacter(player: Player)
 		task.defer(function()
 			if currentState == RoundStates.Active and roundPlayers[player] and not alivePlayers[player] then
 				movePlayerToLobby(player)
+				syncPlayerAFKMarker(player)
 				return
 			end
 
@@ -1285,8 +1377,10 @@ local function bindCharacter(player: Player)
 						moveCharacterToSpawn(player, spawns[rng:NextInteger(1, #spawns)])
 					end
 				end
+				syncPlayerAFKMarker(player)
 			else
 				movePlayerToLobby(player)
+				syncPlayerAFKMarker(player)
 			end
 		end)
 	end))
@@ -1382,6 +1476,55 @@ local function clearPlayerVote(player: Player): boolean
 	return true
 end
 
+local function normalizeAFKSource(value: any): string
+	return if value == "Auto" then "Auto" else "Manual"
+end
+
+local function fireAFKResult(player: Player, accepted: boolean, reason: string?)
+	if setAFKRemote then
+		setAFKRemote:FireClient(player, {
+			accepted = accepted,
+			afk = isPlayerAFK(player),
+			source = player:GetAttribute(AFK_SOURCE_ATTR),
+			reason = reason,
+		})
+	end
+end
+
+local function setPlayerAFK(player: Player, afk: boolean, source: string): boolean
+	if player.Parent ~= Players then
+		return false
+	end
+
+	if afk and currentState == RoundStates.Active and roundPlayers[player] then
+		Notify.Send(player, "You can't go AFK during a round.", {
+			color = "Orange",
+			duration = 3,
+		})
+		fireAFKResult(player, false, "ActiveRound")
+		return false
+	end
+
+	local wasAFK = isPlayerAFK(player)
+	player:SetAttribute(AFK_ATTR, afk)
+	player:SetAttribute(AFK_SOURCE_ATTR, if afk then normalizeAFKSource(source) else nil)
+	player:SetAttribute(AFK_STARTED_AT_ATTR, if afk then workspace:GetServerTimeNow() else nil)
+
+	if afk then
+		local voteChanged = clearPlayerVote(player)
+		if voteChanged then
+			syncVoteChoices()
+		end
+	end
+
+	if wasAFK ~= afk then
+		syncPlayerAFKMarker(player)
+	end
+
+	fireAFKResult(player, true, nil)
+	return true
+end
+
 local function buildForcedVoteChoice(mapConfig: MapConfig): VoteChoice
 	return makeVoteChoice(mapConfig, 1)
 end
@@ -1415,11 +1558,15 @@ end
 local function getEligiblePlayers(): { Player }
 	local players = {}
 	for _, player in ipairs(Players:GetPlayers()) do
-		if player.Parent == Players then
+		if player.Parent == Players and not isPlayerAFK(player) then
 			table.insert(players, player)
 		end
 	end
 	return players
+end
+
+local function getEligiblePlayerCount(): number
+	return #getEligiblePlayers()
 end
 
 local function shufflePlayers(players: { Player })
@@ -1514,7 +1661,7 @@ local function waitForSecondsOrInvalid(seconds: number, requireMinPlayers: boole
 		if pendingAdminReset or pendingAdminForceStartMapId or pendingAdminWinnerTeam then
 			return false
 		end
-		if requireMinPlayers and #Players:GetPlayers() < getRequiredPlayerCount() then
+		if requireMinPlayers and getEligiblePlayerCount() < getRequiredPlayerCount() then
 			return false
 		end
 		task.wait(0.2)
@@ -1534,6 +1681,7 @@ end
 
 local function runActiveRound()
 	setState(RoundStates.Active, "Battle", RoundConfig.RoundSeconds)
+	activeRoundStartedAt = os.clock()
 	local deadline = os.clock() + RoundConfig.RoundSeconds
 
 	while os.clock() < deadline do
@@ -1598,13 +1746,13 @@ local function runRoundLoop()
 
 		local forcedMapId = pendingAdminForceStartMapId
 		local requiredPlayerCount = getRequiredPlayerCount()
-		if not forcedMapId and #Players:GetPlayers() < requiredPlayerCount then
+		if not forcedMapId and getEligiblePlayerCount() < requiredPlayerCount then
 			setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
 			setVotingOpen(false)
 			task.wait(1)
 			continue
 		end
-		if forcedMapId and #Players:GetPlayers() == 0 then
+		if forcedMapId and getEligiblePlayerCount() == 0 then
 			setState(RoundStates.WaitingForPlayers, "Waiting for admin tester", 0)
 			setVotingOpen(false)
 			task.wait(1)
@@ -1695,6 +1843,9 @@ local function onSubmitMapVote(player: Player, choiceId: any)
 	if not votingOpen then
 		return
 	end
+	if isPlayerAFK(player) then
+		return
+	end
 	if typeof(choiceId) ~= "string" then
 		return
 	end
@@ -1709,6 +1860,19 @@ local function onSubmitMapVote(player: Player, choiceId: any)
 	playerVotes[player] = choiceId
 	voteCounts[choiceId] = (voteCounts[choiceId] or 0) + 1
 	syncVoteChoices()
+end
+
+local function onSetAFK(player: Player, payload: any)
+	if typeof(payload) ~= "table" then
+		return
+	end
+
+	local requestedAFK = payload.afk
+	if typeof(requestedAFK) ~= "boolean" then
+		return
+	end
+
+	setPlayerAFK(player, requestedAFK, normalizeAFKSource(payload.source))
 end
 
 local function onReportPreferredInput(player: Player, preferredInput: any)
@@ -1797,11 +1961,16 @@ function RoundService:OnStart()
 	createGameReplica()
 	submitMapVoteRemote = ensureVoteRemote()
 	submitMapVoteRemote.OnServerEvent:Connect(onSubmitMapVote)
+	setAFKRemote = ensureSetAFKRemote()
+	setAFKRemote.OnServerEvent:Connect(onSetAFK)
 	reportPreferredInputRemote = ensureReportPreferredInputRemote()
 	reportPreferredInputRemote.OnServerEvent:Connect(onReportPreferredInput)
 	killFeedRemote = ensureKillFeedRemote()
 
 	for _, player in ipairs(Players:GetPlayers()) do
+		player:SetAttribute(AFK_ATTR, false)
+		player:SetAttribute(AFK_SOURCE_ATTR, nil)
+		player:SetAttribute(AFK_STARTED_AT_ATTR, nil)
 		bindLobbyCharacter(player)
 		if not player.Character then
 			player:LoadCharacter()
@@ -1821,6 +1990,9 @@ end
 
 function RoundService:OnPlayerAdded(player: Player)
 	clearPlayerRoundState(player)
+	player:SetAttribute(AFK_ATTR, false)
+	player:SetAttribute(AFK_SOURCE_ATTR, nil)
+	player:SetAttribute(AFK_STARTED_AT_ATTR, nil)
 	bindLobbyCharacter(player)
 	task.defer(function()
 		if player.Parent ~= Players then
@@ -1839,6 +2011,7 @@ function RoundService:OnPlayerRemoving(player: Player)
 	if voteChanged then
 		syncVoteChoices()
 	end
+	removeAFKMarker(player)
 	removePlayerScoreboardState(player)
 	disconnectCharacterConnections(player)
 	disconnectLobbyCharacterConnection(player)

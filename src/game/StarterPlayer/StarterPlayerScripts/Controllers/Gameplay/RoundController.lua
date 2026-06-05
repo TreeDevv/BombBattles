@@ -6,15 +6,19 @@ local ReplicaController = require(ReplicatedStorage.Packages.ReplicaController)
 
 local REMOTES_FOLDER_NAME = "Remotes"
 local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
+local SET_AFK_REMOTE_NAME = "SetAFK"
 
 local RoundController = {}
 
 RoundController.StateReceived = Signal.new()
 RoundController.StateUpdated = Signal.new()
+RoundController.AFKResult = Signal.new()
 RoundController.Loaded = false
 
 local data = nil
 local submitMapVoteRemote: RemoteEvent? = nil
+local setAFKRemote: RemoteEvent? = nil
+local warnedMissingSetAFKRemote = false
 
 local function getSubmitMapVoteRemote(): RemoteEvent?
 	if submitMapVoteRemote and submitMapVoteRemote.Parent then
@@ -33,6 +37,36 @@ local function getSubmitMapVoteRemote(): RemoteEvent?
 	end
 
 	return nil
+end
+
+local function getSetAFKRemote(): RemoteEvent?
+	if setAFKRemote and setAFKRemote.Parent then
+		return setAFKRemote
+	end
+
+	local remotes = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, 10)
+	if not remotes then
+		return nil
+	end
+
+	local remote = remotes:WaitForChild(SET_AFK_REMOTE_NAME, 10)
+	if remote and remote:IsA("RemoteEvent") then
+		setAFKRemote = remote
+		return remote
+	end
+
+	return nil
+end
+
+local function bindSetAFKRemote()
+	local remote = getSetAFKRemote()
+	if not remote then
+		return
+	end
+
+	remote.OnClientEvent:Connect(function(payload)
+		RoundController.AFKResult:Fire(payload)
+	end)
 end
 
 local function bindReplica(replica)
@@ -61,6 +95,7 @@ function RoundController:OnStart()
 	ReplicaController.ReplicaOfClassCreated(RoundConfig.Scope, bindReplica)
 	ReplicaController.RequestData()
 	task.spawn(getSubmitMapVoteRemote)
+	task.spawn(bindSetAFKRemote)
 end
 
 function RoundController:GetState()
@@ -83,6 +118,23 @@ function RoundController:SubmitMapVote(mapId: string)
 	local remote = getSubmitMapVoteRemote()
 	if remote then
 		remote:FireServer(mapId)
+	end
+end
+
+function RoundController:SetAFK(afk: boolean, source: string?)
+	if typeof(afk) ~= "boolean" then
+		return
+	end
+
+	local remote = getSetAFKRemote()
+	if remote then
+		remote:FireServer({
+			afk = afk,
+			source = if source == "Auto" then "Auto" else "Manual",
+		})
+	elseif not warnedMissingSetAFKRemote then
+		warn("[RoundController] SetAFK remote unavailable; AFK request was not sent.")
+		warnedMissingSetAFKRemote = true
 	end
 end
 

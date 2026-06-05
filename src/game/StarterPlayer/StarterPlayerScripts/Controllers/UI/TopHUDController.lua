@@ -24,6 +24,7 @@ local NUKE_REVEAL_SECONDS = 60
 local FULL_BLACKOUT_OFFSET = Vector2.new(0, 0.5)
 local EMPTY_BLACKOUT_OFFSET = Vector2.new(0, -0.5)
 local TOP_SLIDE_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local RESPAWN_SPIN_TWEEN = TweenInfo.new(8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1)
 local NUKE_SIZE_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local NUKE_FADE_TWEEN = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 
@@ -64,6 +65,7 @@ TopHUDController._nukeCollapsedSize = nil :: UDim2?
 TopHUDController._nukeShown = false
 TopHUDController._nukeTweens = {} :: { Tween }
 TopHUDController._nukeFaders = {} :: { [Instance]: { property: string, value: number } }
+TopHUDController._respawnSpinTweens = {} :: { Tween }
 
 local function findChild(parent: Instance?, childName: string): Instance?
 	return if parent then parent:FindFirstChild(childName) else nil
@@ -423,6 +425,26 @@ function TopHUDController:_cancelNukeTweens()
 	self._nukeTweens = {}
 end
 
+function TopHUDController:_cancelRespawnSpinTweens()
+	for _, tween in ipairs(self._respawnSpinTweens) do
+		tween:Cancel()
+	end
+	self._respawnSpinTweens = {}
+end
+
+function TopHUDController:_startRespawnSpinner(label: ImageLabel?, direction: number)
+	if not label then
+		return
+	end
+
+	label.Rotation = label.Rotation % 360
+	local tween = TweenService:Create(label, RESPAWN_SPIN_TWEEN, {
+		Rotation = label.Rotation + 360 * direction,
+	})
+	table.insert(self._respawnSpinTweens, tween)
+	tween:Play()
+end
+
 function TopHUDController:_setNukeFaders(transparent: boolean, tween: boolean)
 	for item, fader in pairs(self._nukeFaders) do
 		if item.Parent then
@@ -586,6 +608,7 @@ function TopHUDController:_bindHud(hud: Instance?)
 		self._topTween:Cancel()
 		self._topTween = nil
 	end
+	self:_cancelRespawnSpinTweens()
 	self:_captureNukeTimer(nil)
 
 	if not hud then
@@ -611,6 +634,8 @@ function TopHUDController:_bindHud(hud: Instance?)
 	local leftTeam = top:FindFirstChild("LeftTeam")
 	local rightTeam = top:FindFirstChild("RightTeam")
 	local leftBackground = findChild(leftTeam, "Background")
+	self:_startRespawnSpinner(findImageLabel(leftTeam, "Respawn"), 1)
+	self:_startRespawnSpinner(findImageLabel(rightTeam, "Respawn"), -1)
 
 	self._spawnerLabels[LEFT_TEAM_NAME] = findTextLabel(leftTeam, "SpawnerCount")
 	self._spawnerLabels[RIGHT_TEAM_NAME] = findTextLabel(rightTeam, "SpawnerCount")

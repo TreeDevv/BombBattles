@@ -14,6 +14,7 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local FRAMES_GUI_NAME = "Frames"
 local FRAME_NAME = "MapVote"
+local AFK_ATTR = "AFK"
 local CONTROLLER_AVATAR_ATTR = "MapVoteControllerAvatar"
 local CARD_SCALE_NAME = "MapVoteControllerScale"
 
@@ -69,6 +70,7 @@ MapVoteController._pendingChoiceId = ""
 MapVoteController._dismissedRoundId = nil :: number?
 MapVoteController._openedRoundId = nil :: number?
 MapVoteController._votingOpen = false
+MapVoteController._suppressDismissOnce = false
 
 local function disconnectAll(connections: { RBXScriptConnection })
 	for _, connection in ipairs(connections) do
@@ -164,6 +166,10 @@ local function hasChoice(choices: { VoteChoice }, choiceId: string): boolean
 		end
 	end
 	return false
+end
+
+local function isLocalPlayerAFK(): boolean
+	return LocalPlayer:GetAttribute(AFK_ATTR) == true
 end
 
 local function formatTimer(state): string
@@ -322,8 +328,11 @@ function MapVoteController:_syncVisibility()
 		and #getVoteChoices(state) > 0
 
 	self._votingOpen = votingOpen
-	if not votingOpen then
+	if not votingOpen or isLocalPlayerAFK() then
 		if self._frame and self._frame.Visible then
+			if isLocalPlayerAFK() then
+				self._suppressDismissOnce = true
+			end
 			FrameController:CloseFrame(FRAME_NAME)
 		end
 		return
@@ -354,6 +363,7 @@ function MapVoteController:_submitChoice(card: CardRecord)
 	self._pendingChoiceId = card.choiceId
 	self:_render()
 	RoundController:SubmitMapVote(card.choiceId)
+	FrameController:CloseFrame(FRAME_NAME)
 end
 
 function MapVoteController:_captureAvatarTemplate(playerList: Frame?): ImageLabel?
@@ -478,6 +488,10 @@ function MapVoteController:_bindMapVote(frame: Instance?)
 	self:_trackMapVoteConnection(frame:GetPropertyChangedSignal("Visible"):Connect(function()
 		local state = RoundController:GetState()
 		local roundId = if state and typeof(state.roundId) == "number" then state.roundId else 0
+		if not frame.Visible and self._suppressDismissOnce then
+			self._suppressDismissOnce = false
+			return
+		end
 		if not frame.Visible and self._votingOpen and self._openedRoundId == roundId then
 			self._dismissedRoundId = roundId
 		end
@@ -521,6 +535,7 @@ function MapVoteController:OnStart()
 	self._dismissedRoundId = nil
 	self._openedRoundId = nil
 	self._votingOpen = false
+	self._suppressDismissOnce = false
 
 	self:_trackConnection(PlayerGui.ChildAdded:Connect(function(child)
 		if child.Name == FRAMES_GUI_NAME then
@@ -539,6 +554,9 @@ function MapVoteController:OnStart()
 			end
 			self:_sync()
 		end
+	end))
+	self:_trackConnection(LocalPlayer:GetAttributeChangedSignal(AFK_ATTR):Connect(function()
+		self:_sync()
 	end))
 	self:_trackConnection(RunService.RenderStepped:Connect(function()
 		if self._timer and self._frame and self._frame.Visible then

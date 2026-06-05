@@ -85,9 +85,19 @@ BombController._heldBombs = {} :: {
 	[Player]: {
 		instance: Instance,
 		rootPart: BasePart,
+		highlight: Highlight?,
+		pulseConnection: RBXScriptConnection?,
+		fuseStartedAt: number?,
+		fuseEndsAt: number?,
 	},
 }
 BombController._heldBombWanted = {} :: { [Player]: boolean }
+BombController._heldBombPulseTimes = {} :: {
+	[Player]: {
+		fuseStartedAt: number,
+		fuseEndsAt: number,
+	},
+}
 BombController._projectileVisualFolder = nil :: Folder?
 BombController._projectileVisuals = {} :: {
 	[string]: {
@@ -516,6 +526,9 @@ end
 
 function BombController:_destroyHeldBomb(player: Player)
 	local held = self._heldBombs[player]
+	if held then
+		self:_stopBombPulse(held)
+	end
 	if held and held.instance.Parent then
 		held.instance:Destroy()
 	end
@@ -535,6 +548,7 @@ end
 
 function BombController:_hideHeldBomb(player: Player)
 	self._heldBombWanted[player] = nil
+	self._heldBombPulseTimes[player] = nil
 	self:_destroyHeldBomb(player)
 end
 
@@ -593,15 +607,41 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 	constraint.Attachment1 = bombAttachment
 	constraint.Parent = rootPart
 
-	self._heldBombs[player] = {
+	local held = {
 		instance = instance,
 		rootPart = rootPart,
+		highlight = nil,
+		pulseConnection = nil,
+		fuseStartedAt = nil,
+		fuseEndsAt = nil,
 	}
+	self._heldBombs[player] = held
+
+	local pulseTimes = self._heldBombPulseTimes[player]
+	if pulseTimes then
+		self:_startBombPulse(held, instance, pulseTimes.fuseStartedAt, pulseTimes.fuseEndsAt)
+	end
 end
 
 function BombController:_showHeldBomb(player: Player)
 	self._heldBombWanted[player] = true
 	self:_ensureHeldBomb(player, 0)
+end
+
+function BombController:_startHeldBombPulse(player: Player, startedAt: number?, fuseSeconds: number?)
+	local fuseStartedAt = if typeof(startedAt) == "number" then startedAt else getServerTime()
+	local duration = if typeof(fuseSeconds) == "number" then math.max(fuseSeconds, 0.001) else BombConfig.FuseSeconds
+	local fuseEndsAt = fuseStartedAt + duration
+
+	self._heldBombPulseTimes[player] = {
+		fuseStartedAt = fuseStartedAt,
+		fuseEndsAt = fuseEndsAt,
+	}
+
+	local held = self._heldBombs[player]
+	if held and held.instance.Parent then
+		self:_startBombPulse(held, held.instance, fuseStartedAt, fuseEndsAt)
+	end
 end
 
 function BombController:_startPreview()
@@ -1169,7 +1209,7 @@ function BombController:_setProjectileVisualCFrame(visual, position: Vector3, ta
 	end
 end
 
-function BombController:_getProjectilePulseProgress(visual): (number, number)
+function BombController:_getBombPulseProgress(visual): (number, number)
 	local fuseStartedAt = visual.fuseStartedAt or getServerTime()
 	local fuseEndsAt = visual.fuseEndsAt or (fuseStartedAt + BombConfig.FuseSeconds)
 	local fuseDuration = math.max(fuseEndsAt - fuseStartedAt, 0.001)
@@ -1177,7 +1217,7 @@ function BombController:_getProjectilePulseProgress(visual): (number, number)
 	return elapsed / fuseDuration, elapsed
 end
 
-function BombController:_getProjectilePulseColor(visual, fuseProgress: number?, elapsed: number?): Color3
+function BombController:_getBombPulseColor(visual, fuseProgress: number?, elapsed: number?): Color3
 	local progress = if typeof(fuseProgress) == "number" then math.clamp(fuseProgress, 0, 1) else 0
 	local pulseElapsed = if typeof(elapsed) == "number" then math.max(elapsed, 0) else 0
 	local startHz = math.max(BombConfig.PulseStartHz, 0.01)
@@ -1187,14 +1227,14 @@ function BombController:_getProjectilePulseColor(visual, fuseProgress: number?, 
 	return BombConfig.PulseWhite:Lerp(BombConfig.PulseRed, alpha)
 end
 
-function BombController:_updateProjectilePulse(visual)
+function BombController:_updateBombPulse(visual)
 	local highlight = visual.highlight
 	if not (highlight and highlight.Parent) then
 		return
 	end
 
-	local fuseProgress, elapsed = self:_getProjectilePulseProgress(visual)
-	local color = self:_getProjectilePulseColor(visual, fuseProgress, elapsed)
+	local fuseProgress, elapsed = self:_getBombPulseProgress(visual)
+	local color = self:_getBombPulseColor(visual, fuseProgress, elapsed)
 	local fillTransparency = BombConfig.PulseStartFillTransparency
 		+ ((BombConfig.PulseEndFillTransparency - BombConfig.PulseStartFillTransparency) * fuseProgress)
 	local outlineTransparency = BombConfig.PulseStartOutlineTransparency
@@ -1206,7 +1246,7 @@ function BombController:_updateProjectilePulse(visual)
 	highlight.OutlineTransparency = math.clamp(outlineTransparency, 0, 1)
 end
 
-function BombController:_stopProjectilePulse(visual)
+function BombController:_stopBombPulse(visual)
 	if visual.pulseConnection then
 		visual.pulseConnection:Disconnect()
 		visual.pulseConnection = nil
@@ -1217,8 +1257,8 @@ function BombController:_stopProjectilePulse(visual)
 	visual.highlight = nil
 end
 
-function BombController:_startProjectilePulse(visual, adornee: Instance, fuseStartedAt: number, fuseEndsAt: number)
-	self:_stopProjectilePulse(visual)
+function BombController:_startBombPulse(visual, adornee: Instance, fuseStartedAt: number, fuseEndsAt: number)
+	self:_stopBombPulse(visual)
 
 	local highlight = Instance.new("Highlight")
 	highlight.Name = "BombFuseHighlight"
@@ -1231,10 +1271,10 @@ function BombController:_startProjectilePulse(visual, adornee: Instance, fuseSta
 	visual.highlight = highlight
 	visual.fuseStartedAt = fuseStartedAt
 	visual.fuseEndsAt = fuseEndsAt
-	self:_updateProjectilePulse(visual)
+	self:_updateBombPulse(visual)
 
 	visual.pulseConnection = RunService.RenderStepped:Connect(function()
-		self:_updateProjectilePulse(visual)
+		self:_updateBombPulse(visual)
 	end)
 end
 
@@ -1275,7 +1315,7 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 	end
 
 	local airborneInstance = visual.instance
-	self:_startProjectilePulse(
+	self:_startBombPulse(
 		visual,
 		projectile,
 		visual.fuseStartedAt or getServerTime(),
@@ -1362,7 +1402,7 @@ function BombController:_destroyProjectileVisual(projectileId: string)
 	if visual.connection then
 		visual.connection:Disconnect()
 	end
-	self:_stopProjectilePulse(visual)
+	self:_stopBombPulse(visual)
 	if visual.ownsInstance and visual.instance.Parent then
 		visual.instance:Destroy()
 	end
@@ -1448,7 +1488,7 @@ function BombController:_playThrowEffect(payload)
 	local lifetime = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds
 	local fuseStartedAt = if typeof(payload.fuseStartedAt) == "number" then payload.fuseStartedAt else startedAt
 	local fuseEndsAt = startedAt + lifetime
-	self:_startProjectilePulse(visual, visual.instance, fuseStartedAt, fuseEndsAt)
+	self:_startBombPulse(visual, visual.instance, fuseStartedAt, fuseEndsAt)
 
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
 		visual.spin += deltaTime * BombConfig.VisualSpinRadiansPerSecond
@@ -1749,7 +1789,7 @@ function BombController:_bindEffects()
 		elseif effectName == "ProjectileDestroy" and typeof(payload) == "table" then
 			self:_handleProjectileDestroy(payload)
 		elseif effectName == "Explode" and typeof(payload) == "table" and typeof(payload.position) == "Vector3" then
-			if payloadPlayer then
+			if payloadPlayer and payload.source == "InHand" then
 				self:_hideHeldBomb(payloadPlayer)
 			end
 			if typeof(payload.projectileId) == "string" then
@@ -1766,8 +1806,13 @@ function BombController:_bindEffects()
 			self:_playExplosionEffect(payload.position)
 		elseif effectName == "TerrainDebris" and typeof(payload) == "table" then
 			self:_playTerrainDebris(payload.payloads)
-		elseif effectName == "Cook" and typeof(payload) == "table" and payload.player == LocalPlayer then
-			self:_startPreview()
+		elseif effectName == "Cook" and typeof(payload) == "table" then
+			if payloadPlayer then
+				self:_startHeldBombPulse(payloadPlayer, payload.startedAt, payload.fuseSeconds)
+			end
+			if payload.player == LocalPlayer then
+				self:_startPreview()
+			end
 		end
 	end)
 end

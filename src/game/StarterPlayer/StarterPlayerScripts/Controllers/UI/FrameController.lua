@@ -7,6 +7,7 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local FRAME_TAG = "Frame"
 local EXCLUSIVE_ATTRIBUTE = "Exclusive"
+local SLIDE_FROM_ATTRIBUTE = "SlideFrom"
 local BACKDROP_NAME = "FrameControllerBackdrop"
 
 local TOP_MARGIN_PX = 32
@@ -40,6 +41,9 @@ local FrameController = {}
 
 FrameController.FrameTag = FRAME_TAG
 FrameController.ExclusiveAttribute = EXCLUSIVE_ATTRIBUTE
+FrameController.SlideFromAttribute = SLIDE_FROM_ATTRIBUTE
+FrameController.SlideFromTop = "Top"
+FrameController.SlideFromRight = "Right"
 
 local function addPositionOffset(position: UDim2, xOffset: number, yOffset: number): UDim2
 	return UDim2.new(
@@ -78,6 +82,21 @@ end
 local function getAboveScreenPosition(guiObject: GuiObject, originalPosition: UDim2): UDim2
 	local bottom = guiObject.AbsolutePosition.Y + guiObject.AbsoluteSize.Y
 	return addPositionOffset(originalPosition, 0, -bottom - TOP_MARGIN_PX)
+end
+
+local function getRightOfScreenPosition(guiObject: GuiObject, originalPosition: UDim2): UDim2
+	local viewportSize = getViewportSize()
+	local absolutePosition = guiObject.AbsolutePosition
+	return addPositionOffset(originalPosition, viewportSize.X - absolutePosition.X + EDGE_MARGIN_PX, 0)
+end
+
+local function getHiddenFramePosition(guiObject: GuiObject, originalPosition: UDim2): UDim2
+	local slideFrom = guiObject:GetAttribute(SLIDE_FROM_ATTRIBUTE)
+	if slideFrom == FrameController.SlideFromRight then
+		return getRightOfScreenPosition(guiObject, originalPosition)
+	end
+
+	return getAboveScreenPosition(guiObject, originalPosition)
 end
 
 local function getClosestOffscreenPosition(guiObject: GuiObject, originalPosition: UDim2): UDim2
@@ -495,7 +514,7 @@ function FrameController:OpenFrame(frameName: string): GuiObject?
 	self:_restoreFrameZIndex(record)
 
 	frame.Position = record.originalPosition
-	local hiddenPosition = getAboveScreenPosition(frame, record.originalPosition)
+	local hiddenPosition = getHiddenFramePosition(frame, record.originalPosition)
 	local isExclusive = frame:GetAttribute(EXCLUSIVE_ATTRIBUTE) == true
 
 	if isExclusive then
@@ -552,7 +571,7 @@ function FrameController:CloseFrame(frameName: string, instant: boolean?)
 		return
 	end
 
-	local hiddenPosition = getAboveScreenPosition(frame, record.originalPosition)
+	local hiddenPosition = getHiddenFramePosition(frame, record.originalPosition)
 	local tween = TweenService:Create(frame, CLOSE_TWEEN, {
 		Position = hiddenPosition,
 	})

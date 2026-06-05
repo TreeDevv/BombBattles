@@ -22,6 +22,13 @@ local BOMB_ACTION_NAME = "BombBattlesPrimaryBomb"
 local PREVIEW_FOLDER_NAME = "BombPreview"
 local PROJECTILE_VISUAL_FOLDER_NAME = "BombProjectileVisuals"
 local EXPLOSION_VFX_FOLDER_NAME = "BombExplosionVFX"
+local HELD_BOMB_VISUAL_NAME = "BombHeldVisual"
+local HELD_BOMB_GRIP_ATTACHMENT_NAME = "BombGripAttachment"
+local HELD_BOMB_CONSTRAINT_NAME = "BombGripConstraint"
+local HELD_BOMB_WELD_NAME = "BombHeldWeld"
+local HELD_BOMB_ATTACH_RETRY_SECONDS = 0.1
+local HELD_BOMB_ATTACH_MAX_ATTEMPTS = 5
+local ANIMATOR_LOOKUP_TIMEOUT = 5
 local RENDER_STEP_NAME = "BombBattlesBombPreview"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 2
 local ROUND_ALIVE_ATTR = "RoundAlive"
@@ -31,6 +38,7 @@ local AIR_CONTROL_LAUNCH_SOURCE_ATTR = "AirControl_LaunchSource"
 local AIR_CONTROL_LAUNCH_SERIAL_ATTR = "AirControl_LaunchSerial"
 local AIR_CONTROL_LAUNCHED_AT_ATTR = "AirControl_LaunchedAt"
 local AIR_CONTROL_EXPLOSIVE_MIN_AIR_TIME = 0.4
+local MIN_AIM_HORIZONTAL = 0.08
 local ATTR = BombConfig.Attributes
 
 local BombController = {}
@@ -47,6 +55,7 @@ BombController._warnedMissingExplosionVfx = false
 BombController._warnedMissingEmitModule = false
 BombController._characterConnection = nil :: RBXScriptConnection?
 BombController._characterRemovingConnection = nil :: RBXScriptConnection?
+BombController._playerRemovingConnection = nil :: RBXScriptConnection?
 BombController._cookingConnection = nil :: RBXScriptConnection?
 BombController._humanoidConnection = nil :: RBXScriptConnection?
 BombController._stateConnections = {} :: { RBXScriptConnection }
@@ -64,6 +73,13 @@ BombController._releasePending = false
 BombController._releaseFallbackSerial = 0
 BombController._started = false
 BombController._lastDebugLogTimes = {} :: { [string]: number }
+BombController._heldBombs = {} :: {
+	[Player]: {
+		instance: Instance,
+		rootPart: BasePart,
+	},
+}
+BombController._heldBombWanted = {} :: { [Player]: boolean }
 BombController._projectileVisualFolder = nil :: Folder?
 BombController._projectileVisuals = {} :: {
 	[string]: {
@@ -71,6 +87,13 @@ BombController._projectileVisuals = {} :: {
 		rootPart: BasePart,
 		connection: RBXScriptConnection?,
 		path: any,
+		customProjectile: boolean?,
+		position: Vector3?,
+		velocity: Vector3?,
+		targetPosition: Vector3?,
+		targetVelocity: Vector3?,
+		acceleration: Vector3?,
+		settled: boolean?,
 		spin: number,
 		ownsInstance: boolean,
 		highlight: Highlight?,
@@ -104,6 +127,25 @@ end
 local function getRootPart(): BasePart?
 	local _, _, rootPart = getCharacterParts()
 	return rootPart
+end
+
+local function getHorizontalDirection(direction: Vector3?): Vector3?
+	if typeof(direction) ~= "Vector3" then
+		return nil
+	end
+
+	local horizontal = Vector3.new(direction.X, 0, direction.Z)
+	if horizontal.Magnitude <= MIN_AIM_HORIZONTAL then
+		return nil
+	end
+
+	return horizontal.Unit
+end
+
+local function getFallbackAimDirection(): Vector3
+	local rootPart = getRootPart()
+	local horizontal = if rootPart then getHorizontalDirection(rootPart.CFrame.LookVector) else nil
+	return horizontal or Vector3.new(0, 0, -1)
 end
 
 local function markAirControlLaunch(character: Model?, source: string, minAirTime: number)
@@ -158,15 +200,25 @@ local function applyOwnerClientExplosionLaunch(origin: Vector3)
 	markAirControlLaunch(character, "Explosive", AIR_CONTROL_EXPLOSIVE_MIN_AIR_TIME)
 end
 
-local function getAimDirection(): Vector3
-	local camera = workspace.CurrentCamera
-	local direction = if camera then camera.CFrame.LookVector else Vector3.new(0, 0.1, -1)
+local function sanitizeAimDirection(direction: Vector3, fallback: Vector3): Vector3
+	local horizontal = getHorizontalDirection(direction)
+	if not horizontal then
+		horizontal = getHorizontalDirection(fallback) or Vector3.new(0, 0, -1)
+		direction = Vector3.new(horizontal.X, direction.Y, horizontal.Z)
+	end
+
 	direction = Vector3.new(direction.X, math.clamp(direction.Y, BombConfig.MinAimY, BombConfig.MaxAimY), direction.Z)
 	if direction.Magnitude < 0.05 then
-		return Vector3.new(0, 0.15, -1).Unit
+		return Vector3.new(horizontal.X, 0.15, horizontal.Z).Unit
 	end
 
 	return direction.Unit
+end
+
+local function getAimDirection(): Vector3
+	local camera = workspace.CurrentCamera
+	local direction = if camera then camera.CFrame.LookVector else Vector3.new(0, 0.1, -1)
+	return sanitizeAimDirection(direction, getFallbackAimDirection())
 end
 
 local function getMouseAimDirection(): Vector3
@@ -177,12 +229,7 @@ local function getMouseAimDirection(): Vector3
 
 	local mouseLocation = UserInputService:GetMouseLocation()
 	local ray = camera:ViewportPointToRay(mouseLocation.X, mouseLocation.Y)
-	local direction = Vector3.new(ray.Direction.X, math.clamp(ray.Direction.Y, BombConfig.MinAimY, BombConfig.MaxAimY), ray.Direction.Z)
-	if direction.Magnitude < 0.05 then
-		return getAimDirection()
-	end
-
-	return direction.Unit
+	return sanitizeAimDirection(ray.Direction, getFallbackAimDirection())
 end
 
 local function getThrowOrigin(rootPart: BasePart): Vector3
@@ -220,6 +267,78 @@ local function getBombAsset(): Instance?
 	return bombs:FindFirstChild(BombConfig.RuntimeBombName) or bombs:FindFirstChildWhichIsA("Model") or bombs:FindFirstChildWhichIsA("BasePart")
 end
 
+local function createBombVisualInstance(): (Instance, BasePart?)
+	local asset = getBombAsset()
+	if asset then
+		local instance = asset:Clone()
+		return instance, getFirstBasePart(instance)
+	end
+
+	local part = Instance.new("Part")
+	part.Name = BombConfig.RuntimeBombName
+	part.Shape = Enum.PartType.Ball
+	part.Size = BombConfig.RuntimeBombSize
+	part.Material = Enum.Material.Neon
+	part.Color = Color3.fromRGB(45, 45, 45)
+	return part, part
+end
+
+local function getRightGripAttachment(character: Model?): Attachment?
+	if not character then
+		return nil
+	end
+
+	local rightHand = character:FindFirstChild("RightHand")
+	local rightHandGrip = rightHand and rightHand:FindFirstChild("RightGripAttachment")
+	if rightHandGrip and rightHandGrip:IsA("Attachment") then
+		return rightHandGrip
+	end
+
+	local rightArm = character:FindFirstChild("Right Arm")
+	local rightArmGrip = rightArm and rightArm:FindFirstChild("RightGripAttachment")
+	if rightArmGrip and rightArmGrip:IsA("Attachment") then
+		return rightArmGrip
+	end
+
+	local fallbackGrip = character:FindFirstChild("RightGripAttachment", true)
+	return if fallbackGrip and fallbackGrip:IsA("Attachment") then fallbackGrip else nil
+end
+
+local function getHeldGripOffset(): CFrame
+	return if typeof(BombConfig.HeldGripOffset) == "CFrame" then BombConfig.HeldGripOffset else CFrame.new()
+end
+
+local function getBaseParts(instance: Instance): { BasePart }
+	local parts: { BasePart } = {}
+	if instance:IsA("BasePart") then
+		table.insert(parts, instance)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			table.insert(parts, descendant)
+		end
+	end
+	return parts
+end
+
+local function prepareHeldBombVisual(instance: Instance, rootPart: BasePart)
+	for _, part in ipairs(getBaseParts(instance)) do
+		part.Anchored = false
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Massless = true
+
+		if part ~= rootPart then
+			local weld = Instance.new("WeldConstraint")
+			weld.Name = HELD_BOMB_WELD_NAME
+			weld.Part0 = rootPart
+			weld.Part1 = part
+			weld.Parent = rootPart
+		end
+	end
+end
+
 local function getServerTime(): number
 	return workspace:GetServerTimeNow()
 end
@@ -237,20 +356,38 @@ local function isRoundActiveForLocalPlayer(): boolean
 	return RoundController:Get("state") == RoundStates.Active and LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) == true
 end
 
-local function getAnimator(character: Model): Animator?
+local function isServerAnimator(animator: Animator): boolean
+	local attributeName = AnimationConfig.ServerAnimatorAttributeName
+	return typeof(attributeName) ~= "string" or attributeName == "" or animator:GetAttribute(attributeName) == true
+end
+
+local function findServerAnimator(humanoid: Humanoid): Animator?
+	for _, child in ipairs(humanoid:GetChildren()) do
+		if child:IsA("Animator") and isServerAnimator(child) then
+			return child
+		end
+	end
+
+	return nil
+end
+
+local function waitForServerAnimator(character: Model): Animator?
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	if not humanoid then
 		return nil
 	end
 
-	local animator = humanoid:FindFirstChildOfClass("Animator")
-	if animator then
-		return animator
-	end
+	local deadline = os.clock() + ANIMATOR_LOOKUP_TIMEOUT
+	repeat
+		local animator = findServerAnimator(humanoid)
+		if animator then
+			return animator
+		end
 
-	animator = Instance.new("Animator")
-	animator.Parent = humanoid
-	return animator
+		task.wait()
+	until os.clock() >= deadline or not humanoid.Parent
+
+	return nil
 end
 
 local function getBombTrackWeight(name: string): number
@@ -369,6 +506,96 @@ function BombController:_setPreviewVisible(visible: boolean)
 	end
 end
 
+function BombController:_destroyHeldBomb(player: Player)
+	local held = self._heldBombs[player]
+	if held and held.instance.Parent then
+		held.instance:Destroy()
+	end
+	self._heldBombs[player] = nil
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	for _, child in ipairs(character:GetChildren()) do
+		if child.Name == HELD_BOMB_VISUAL_NAME then
+			child:Destroy()
+		end
+	end
+end
+
+function BombController:_hideHeldBomb(player: Player)
+	self._heldBombWanted[player] = nil
+	self:_destroyHeldBomb(player)
+end
+
+function BombController:_ensureHeldBomb(player: Player, attempt: number)
+	if self._heldBombWanted[player] ~= true or player.Parent ~= Players then
+		return
+	end
+
+	local held = self._heldBombs[player]
+	if held and held.instance.Parent then
+		return
+	end
+	self:_destroyHeldBomb(player)
+
+	local character = player.Character
+	local gripAttachment = getRightGripAttachment(character)
+	if not (character and gripAttachment) then
+		if attempt < HELD_BOMB_ATTACH_MAX_ATTEMPTS then
+			task.delay(HELD_BOMB_ATTACH_RETRY_SECONDS, function()
+				self:_ensureHeldBomb(player, attempt + 1)
+			end)
+		end
+		return
+	end
+
+	local instance, rootPart = createBombVisualInstance()
+	if not rootPart then
+		instance:Destroy()
+		return
+	end
+
+	instance.Name = HELD_BOMB_VISUAL_NAME
+	if instance:IsA("Model") then
+		instance.PrimaryPart = rootPart
+	end
+
+	prepareHeldBombVisual(instance, rootPart)
+
+	local gripOffset = getHeldGripOffset()
+	local bombAttachment = Instance.new("Attachment")
+	bombAttachment.Name = HELD_BOMB_GRIP_ATTACHMENT_NAME
+	bombAttachment.CFrame = gripOffset
+	bombAttachment.Parent = rootPart
+
+	local rootCFrame = gripAttachment.WorldCFrame * gripOffset:Inverse()
+	if instance:IsA("Model") then
+		instance:PivotTo(rootCFrame)
+	elseif instance:IsA("BasePart") then
+		instance.CFrame = rootCFrame
+	end
+	instance.Parent = character
+
+	local constraint = Instance.new("RigidConstraint")
+	constraint.Name = HELD_BOMB_CONSTRAINT_NAME
+	constraint.Attachment0 = gripAttachment
+	constraint.Attachment1 = bombAttachment
+	constraint.Parent = rootPart
+
+	self._heldBombs[player] = {
+		instance = instance,
+		rootPart = rootPart,
+	}
+end
+
+function BombController:_showHeldBomb(player: Player)
+	self._heldBombWanted[player] = true
+	self:_ensureHeldBomb(player, 0)
+end
+
 function BombController:_startPreview()
 	if self._previewing then
 		return
@@ -424,6 +651,7 @@ function BombController:_clearBombAnimationState()
 	self:_disconnectReleaseMarker()
 	self:_disconnectAnimationConnections()
 	self:_stopBombTracks()
+	self:_hideHeldBomb(LocalPlayer)
 end
 
 function BombController:_canBeginBombHold(ignoreHolding: boolean?): boolean
@@ -505,8 +733,9 @@ end
 function BombController:_loadBombAnimations(character: Model)
 	self:_destroyBombAnimations()
 
-	local animator = getAnimator(character)
+	local animator = waitForServerAnimator(character)
 	if not animator then
+		warn("[BombController] Missing server-created Animator for character:", character:GetFullName())
 		return
 	end
 
@@ -917,6 +1146,11 @@ function BombController:_getProjectileVisualFolder(): Folder
 end
 
 function BombController:_setProjectileVisualCFrame(visual, position: Vector3, tangent: Vector3, spin: number)
+	if tangent.Magnitude < 0.05 then
+		tangent = Vector3.zAxis
+	else
+		tangent = tangent.Unit
+	end
 	local cframe = CFrame.lookAt(position, position + tangent) * CFrame.Angles(spin, spin * 0.35, 0)
 	if visual.instance:IsA("Model") then
 		visual.instance:PivotTo(cframe)
@@ -1049,23 +1283,7 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 end
 
 function BombController:_createProjectileVisual(projectileId: string)
-	local asset = getBombAsset()
-	local instance: Instance
-	local rootPart: BasePart?
-
-	if asset then
-		instance = asset:Clone()
-		rootPart = getFirstBasePart(instance)
-	else
-		local part = Instance.new("Part")
-		part.Name = BombConfig.RuntimeBombName
-		part.Shape = Enum.PartType.Ball
-		part.Size = BombConfig.RuntimeBombSize
-		part.Material = Enum.Material.Neon
-		part.Color = Color3.fromRGB(45, 45, 45)
-		instance = part
-		rootPart = part
-	end
+	local instance, rootPart = createBombVisualInstance()
 
 	if not rootPart then
 		instance:Destroy()
@@ -1098,6 +1316,13 @@ function BombController:_createProjectileVisual(projectileId: string)
 		rootPart = rootPart,
 		connection = nil,
 		path = nil,
+		customProjectile = false,
+		position = nil,
+		velocity = nil,
+		targetPosition = nil,
+		targetVelocity = nil,
+		acceleration = nil,
+		settled = false,
 		spin = 0,
 		ownsInstance = true,
 		highlight = nil,
@@ -1133,8 +1358,13 @@ function BombController:_playThrowEffect(payload)
 		return
 	end
 
-	local path = BombTrajectory.FromPayload(payload)
-	if not path then
+	local customProjectile = payload.customProjectile == true
+	local path = if customProjectile then nil else BombTrajectory.FromPayload(payload)
+	if not customProjectile and not path then
+		return
+	end
+	local startPosition = if typeof(payload.position) == "Vector3" then payload.position else payload.origin
+	if customProjectile and typeof(startPosition) ~= "Vector3" then
 		return
 	end
 
@@ -1144,6 +1374,17 @@ function BombController:_playThrowEffect(payload)
 		return
 	end
 	visual.path = path
+	visual.customProjectile = customProjectile
+	if customProjectile then
+		local velocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else payload.initialVelocity
+		local acceleration = if typeof(payload.acceleration) == "Vector3" then payload.acceleration else Vector3.new(0, -workspace.Gravity, 0)
+		visual.position = startPosition
+		visual.velocity = if typeof(velocity) == "Vector3" then velocity else Vector3.zero
+		visual.targetPosition = visual.position
+		visual.targetVelocity = visual.velocity
+		visual.acceleration = acceleration
+		visual.settled = false
+	end
 	self._projectileVisuals[projectileId] = visual
 
 	local rootPart = visual.rootPart
@@ -1190,13 +1431,41 @@ function BombController:_playThrowEffect(payload)
 
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
 		visual.spin += deltaTime * BombConfig.VisualSpinRadiansPerSecond
-		local alpha = math.clamp((getServerTime() - startedAt) / path.duration, 0, 1)
-		local position = BombTrajectory.Evaluate(path, alpha)
-		local tangent = BombTrajectory.GetTangent(path, alpha)
-		self:_setProjectileVisualCFrame(visual, position, tangent, visual.spin)
+		if visual.customProjectile then
+			local position = visual.position or visual.targetPosition or rootPart.Position
+			local velocity = visual.velocity or visual.targetVelocity or Vector3.zero
+			if visual.settled then
+				position = visual.targetPosition or position
+				velocity = Vector3.zero
+			else
+				local acceleration = visual.acceleration or Vector3.zero
+				velocity += acceleration * deltaTime
+				position += velocity * deltaTime
+
+				local positionAlpha = 1 - math.exp(-18 * deltaTime)
+				local velocityAlpha = 1 - math.exp(-14 * deltaTime)
+				if typeof(visual.targetPosition) == "Vector3" then
+					position = position:Lerp(visual.targetPosition, positionAlpha)
+				end
+				if typeof(visual.targetVelocity) == "Vector3" then
+					velocity = velocity:Lerp(visual.targetVelocity, velocityAlpha)
+				end
+			end
+
+			visual.position = position
+			visual.velocity = velocity
+			local tangent = if velocity.Magnitude > 0.05 then velocity else visual.targetVelocity or Vector3.zAxis
+			self:_setProjectileVisualCFrame(visual, position, tangent, visual.spin)
+		elseif path then
+			local alpha = math.clamp((getServerTime() - startedAt) / path.duration, 0, 1)
+			local position = BombTrajectory.Evaluate(path, alpha)
+			local tangent = BombTrajectory.GetTangent(path, alpha)
+			self:_setProjectileVisualCFrame(visual, position, tangent, visual.spin)
+		end
 	end)
 
-	task.delay(lifetime + BombConfig.ProjectileLifetimePadding, function()
+	local cleanupDelay = lifetime + BombConfig.ProjectileLifetimePadding + (if customProjectile then 10 else 0)
+	task.delay(cleanupDelay, function()
 		self:_destroyProjectileVisual(projectileId)
 	end)
 end
@@ -1226,6 +1495,79 @@ function BombController:_playImpactEffect(position: Vector3)
 	tween:Play()
 end
 
+function BombController:_handleProjectileSnapshot(payload)
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
+		return
+	end
+	if payload.customProjectile ~= true then
+		return
+	end
+	if typeof(payload.position) ~= "Vector3" then
+		return
+	end
+
+	local projectileId = payload.projectileId
+	local visual = self._projectileVisuals[projectileId]
+	if not visual then
+		self:_playThrowEffect({
+			player = payload.player,
+			projectileId = projectileId,
+			customProjectile = true,
+			position = payload.position,
+			velocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else Vector3.zero,
+			acceleration = Vector3.new(0, -workspace.Gravity, 0),
+			startedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
+			fuseStartedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
+			remainingFuse = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds,
+		})
+		visual = self._projectileVisuals[projectileId]
+		if not visual then
+			return
+		end
+	end
+
+	visual.customProjectile = true
+	visual.targetPosition = payload.position
+	visual.targetVelocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else Vector3.zero
+	if typeof(payload.acceleration) == "Vector3" then
+		visual.acceleration = payload.acceleration
+	end
+	visual.settled = payload.settled == true
+	if visual.position == nil or visual.settled then
+		visual.position = payload.position
+	end
+	if visual.velocity == nil or visual.settled then
+		visual.velocity = visual.targetVelocity
+	end
+end
+
+function BombController:_handleProjectileSettle(payload)
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
+		return
+	end
+	if payload.customProjectile ~= true or typeof(payload.position) ~= "Vector3" then
+		return
+	end
+
+	local visual = self._projectileVisuals[payload.projectileId]
+	if visual then
+		visual.customProjectile = true
+		visual.targetPosition = payload.position
+		visual.targetVelocity = Vector3.zero
+		visual.position = payload.position
+		visual.velocity = Vector3.zero
+		visual.settled = true
+	end
+end
+
+function BombController:_handleProjectileDestroy(payload)
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
+		return
+	end
+
+	self:_destroyProjectileVisual(payload.projectileId)
+end
+
 function BombController:_handleProjectileImpact(payload)
 	if typeof(payload) ~= "table" or typeof(payload.position) ~= "Vector3" then
 		return
@@ -1233,6 +1575,28 @@ function BombController:_handleProjectileImpact(payload)
 
 	local projectileId = payload.projectileId
 	if typeof(projectileId) == "string" then
+		if payload.customProjectile == true then
+			local visual = self._projectileVisuals[projectileId]
+			if visual then
+				local projectilePosition = if typeof(payload.projectilePosition) == "Vector3"
+					then payload.projectilePosition
+					else payload.position
+				local postImpactVelocity = if typeof(payload.postImpactVelocity) == "Vector3"
+					then payload.postImpactVelocity
+					else payload.impactVelocity
+				visual.targetPosition = projectilePosition
+				visual.position = projectilePosition
+				visual.targetVelocity = if typeof(postImpactVelocity) == "Vector3"
+					then postImpactVelocity
+					else visual.targetVelocity
+				if typeof(payload.acceleration) == "Vector3" then
+					visual.acceleration = payload.acceleration
+				end
+			end
+			self:_playImpactEffect(payload.position)
+			return
+		end
+
 		local transferred = self:_transferProjectilePulseToPhysical(projectileId, payload.physicalProjectile)
 		if not transferred then
 			self:_destroyProjectileVisual(projectileId)
@@ -1252,6 +1616,15 @@ function BombController:_playTerrainDebris(payloads)
 	end
 end
 
+local function getPayloadPlayer(payload): Player?
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+
+	local player = payload.player
+	return if typeof(player) == "Instance" and player:IsA("Player") then player else nil
+end
+
 function BombController:_bindEffects()
 	if self._effectConnection then
 		self._effectConnection:Disconnect()
@@ -1261,11 +1634,28 @@ function BombController:_bindEffects()
 	end
 
 	self._effectConnection = self._effectRemote.OnClientEvent:Connect(function(effectName: string, payload)
-		if effectName == "Throw" and typeof(payload) == "table" then
+		local payloadPlayer = getPayloadPlayer(payload)
+		if effectName == "Hold" and payloadPlayer then
+			self:_showHeldBomb(payloadPlayer)
+		elseif effectName == "HoldEnd" and payloadPlayer then
+			self:_hideHeldBomb(payloadPlayer)
+		elseif effectName == "Throw" and typeof(payload) == "table" then
+			if payloadPlayer then
+				self:_hideHeldBomb(payloadPlayer)
+			end
 			self:_playThrowEffect(payload)
+		elseif effectName == "ProjectileSnapshot" and typeof(payload) == "table" then
+			self:_handleProjectileSnapshot(payload)
 		elseif effectName == "Impact" and typeof(payload) == "table" then
 			self:_handleProjectileImpact(payload)
+		elseif effectName == "Settle" and typeof(payload) == "table" then
+			self:_handleProjectileSettle(payload)
+		elseif effectName == "ProjectileDestroy" and typeof(payload) == "table" then
+			self:_handleProjectileDestroy(payload)
 		elseif effectName == "Explode" and typeof(payload) == "table" and typeof(payload.position) == "Vector3" then
+			if payloadPlayer then
+				self:_hideHeldBomb(payloadPlayer)
+			end
 			if typeof(payload.projectileId) == "string" then
 				self:_destroyProjectileVisual(payload.projectileId)
 			end
@@ -1342,12 +1732,18 @@ function BombController:OnStart()
 	if self._characterRemovingConnection then
 		self._characterRemovingConnection:Disconnect()
 	end
+	if self._playerRemovingConnection then
+		self._playerRemovingConnection:Disconnect()
+	end
 
 	self._characterConnection = LocalPlayer.CharacterAdded:Connect(function(character)
 		self:_bindCharacter(character)
 	end)
 	self._characterRemovingConnection = LocalPlayer.CharacterRemoving:Connect(function()
 		self:_cancelHold()
+	end)
+	self._playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
+		self:_hideHeldBomb(player)
 	end)
 	self:_bindCharacter(LocalPlayer.Character)
 end

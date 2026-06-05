@@ -12,6 +12,7 @@ local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesCameraController"
 local SHIFT_LOCK_ACTION_NAME = "BombBattlesShiftLockToggle"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 1
+local CAMERA_SPECTATING_ATTR = "Camera_Spectating"
 local HUD_FOV_BLUR_NAMES = {
 	HUDWindowBlur = true,
 	TemplateUIBlur = true,
@@ -40,6 +41,7 @@ CameraController._skipNextLandingShake = false
 CameraController._lastLandingSerial = 0
 CameraController._landingSettleStartTime = NEVER
 CameraController._landingSettleIntensity = 0
+CameraController._landingSettleDuration = CameraConfig.LandingSettleDuration
 CameraController._currentLandingSettleYOffset = 0
 CameraController._mouseLocked = false
 CameraController._previousMouseBehavior = nil :: Enum.MouseBehavior?
@@ -246,6 +248,7 @@ function CameraController:_resetCameraState(camera: Camera?)
 	self._lastLandingSerial = 0
 	self._landingSettleStartTime = NEVER
 	self._landingSettleIntensity = 0
+	self._landingSettleDuration = CameraConfig.LandingSettleDuration
 	self._currentLandingSettleYOffset = 0
 
 	if camera then
@@ -290,13 +293,34 @@ function CameraController:_updateLandingSettleTrigger(character: Model, now: num
 	self._lastLandingSerial = landingSerial
 	local impactSpeed = readNumberAttribute(character, "Movement_LandingImpactSpeed")
 	local horizontalSpeed = readNumberAttribute(character, "Movement_LandingHorizontalSpeed")
-	local landingSpeed = math.max(impactSpeed, horizontalSpeed)
-	if landingSpeed < CameraConfig.LandingSettleMinSpeed then
+	local verticalRange = math.max(CameraConfig.LandingSettleSpeedForMax - CameraConfig.LandingSettleMinSpeed, 0.001)
+	local horizontalRange = math.max(
+		CameraConfig.LandingSettleHorizontalSpeedForMax - CameraConfig.LandingSettleHorizontalMinSpeed,
+		0.001
+	)
+	local verticalAlpha = math.clamp((impactSpeed - CameraConfig.LandingSettleMinSpeed) / verticalRange, 0, 1)
+	local horizontalAlpha = math.clamp(
+		(horizontalSpeed - CameraConfig.LandingSettleHorizontalMinSpeed) / horizontalRange,
+		0,
+		1
+	)
+	local landingIntensity = math.clamp(
+		(verticalAlpha * CameraConfig.LandingSettleVerticalWeight)
+			+ (horizontalAlpha * CameraConfig.LandingSettleHorizontalWeight),
+		0,
+		1
+	)
+	if landingIntensity <= 0 then
 		return
 	end
 
-	local speedRange = math.max(CameraConfig.LandingSettleSpeedForMax - CameraConfig.LandingSettleMinSpeed, 0.001)
-	self._landingSettleIntensity = math.clamp((landingSpeed - CameraConfig.LandingSettleMinSpeed) / speedRange, 0, 1)
+	local landingMode = character:GetAttribute("Movement_LandingMode")
+	self._landingSettleDuration = CameraConfig.LandingSettleDuration
+	self._landingSettleIntensity = landingIntensity
+	if landingMode == "Runout" then
+		self._landingSettleDuration *= CameraConfig.LandingRunoutSettleDurationScale
+		self._landingSettleIntensity *= CameraConfig.LandingRunoutSettleIntensityScale
+	end
 	self._landingSettleStartTime = now
 end
 
@@ -305,7 +329,7 @@ function CameraController:_getLandingSettleAlpha(now: number): number
 		return 0
 	end
 
-	local duration = math.max(CameraConfig.LandingSettleDuration, 0.001)
+	local duration = math.max(self._landingSettleDuration, 0.001)
 	local elapsed = now - self._landingSettleStartTime
 	if elapsed >= duration then
 		self._landingSettleStartTime = NEVER
@@ -396,6 +420,17 @@ end
 
 function CameraController:_step(dt: number)
 	local camera = workspace.CurrentCamera
+	if LocalPlayer:GetAttribute(CAMERA_SPECTATING_ATTR) == true then
+		if camera then
+			self._currentFOV = camera.FieldOfView
+		end
+		self:_restoreMouse()
+		self._headLockedCamera = nil
+		self._headLockedSubject = nil
+		self._previousCameraSubject = nil
+		return
+	end
+
 	local character = self:_getCharacter()
 	if not camera or not character then
 		self:_resetCameraState(camera)

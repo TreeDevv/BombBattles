@@ -13,12 +13,22 @@ local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 local TEAM_ORDER = { RoundConfig.Teams.Red.name, RoundConfig.Teams.Blue.name }
 local REMOTES_FOLDER_NAME = "Remotes"
 local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
+local REPORT_PREFERRED_INPUT_REMOTE_NAME = "ReportPreferredInput"
+local KILL_FEED_REMOTE_NAME = "KillFeed"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
 local ROUND_RESPAWN_ENDS_AT_ATTR = "RoundRespawnEndsAt"
 local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
 local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
+local ASSIST_WINDOW_SECONDS = 10
+local DEBUG_REPLAY_EVENTS = false
+
+local VALID_PREFERRED_INPUT = {
+	KeyboardAndMouse = true,
+	Touch = true,
+	Gamepad = true,
+}
 
 local GAME_STATE_TOKEN = ReplicaService.NewClassToken(RoundConfig.Scope)
 
@@ -31,6 +41,8 @@ local RoundService = {}
 
 local gameReplica = nil
 local submitMapVoteRemote: RemoteEvent? = nil
+local reportPreferredInputRemote: RemoteEvent? = nil
+local killFeedRemote: RemoteEvent? = nil
 local running = false
 local roundId = 0
 local currentState = RoundStates.WaitingForPlayers
@@ -45,9 +57,14 @@ local roundPlayers: { [Player]: boolean } = {}
 local alivePlayers: { [Player]: boolean } = {}
 local playerTeams: { [Player]: string } = {}
 local characterConnections: { [Player]: { RBXScriptConnection } } = {}
-local lobbyCharacterConnections: { [Player]: RBXScriptConnection } = {}
+local lobbyCharacterConnections: { [Player]: { RBXScriptConnection } } = {}
+local respawnTokens: { [Player]: number } = {}
 local teamCoreInstances: { [string]: { Instance } } = {}
 local coreConnections: { [Instance]: { RBXScriptConnection } } = {}
+local scoreboardStats: { [string]: { damage: number, eliminations: number, assists: number, deaths: number } } = {}
+local scoreboardPlatforms: { [string]: string } = {}
+local recentDamageContributors: { [string]: { [string]: { damagedAt: number, teamName: string?, sourceType: string?, sourceId: string? } } } =
+	{}
 local rng = Random.new()
 
 local function deepCopy(value: any): any
@@ -109,6 +126,8 @@ local function buildInitialState()
 		},
 		voteChoices = {},
 		voteCounts = {},
+		scoreboardStats = {},
+		scoreboardPlatforms = {},
 	}
 end
 
@@ -143,10 +162,324 @@ local function ensureVoteRemote(): RemoteEvent
 	return remote
 end
 
+local function ensureReportPreferredInputRemote(): RemoteEvent
+	local folder = ensureRemotesFolder()
+	local existing = folder:FindFirstChild(REPORT_PREFERRED_INPUT_REMOTE_NAME)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = REPORT_PREFERRED_INPUT_REMOTE_NAME
+	remote.Parent = folder
+	return remote
+end
+
+local function ensureKillFeedRemote(): RemoteEvent
+	local folder = ensureRemotesFolder()
+	local existing = folder:FindFirstChild(KILL_FEED_REMOTE_NAME)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = KILL_FEED_REMOTE_NAME
+	remote.Parent = folder
+	return remote
+end
+
 local function setReplicaValue(path: { any }, value: any)
 	if gameReplica then
 		gameReplica:SetValue(path, value)
 	end
+end
+
+local replayService = nil
+
+local function getReplayService()
+	if replayService then
+		return replayService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local replayModule = services and services:FindFirstChild("ReplayService")
+	if not (replayModule and replayModule:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, replayModule)
+	if ok and typeof(service) == "table" then
+		replayService = service
+		return replayService
+	end
+
+	if DEBUG_REPLAY_EVENTS then
+		warn("[RoundService] ReplayService require failed:", service)
+	end
+	return nil
+end
+
+local function recordReplayEvent(eventType: string, payload)
+	local service = getReplayService()
+	if not (service and type(service.RecordEvent) == "function") then
+		return
+	end
+
+	local ok, err = pcall(function()
+		service.RecordEvent(eventType, payload)
+	end)
+	if DEBUG_REPLAY_EVENTS and not ok then
+		warn("[RoundService] Replay event failed:", eventType, err)
+	end
+end
+
+local function setReplayPerformanceCritical(isCritical: boolean)
+	local service = getReplayService()
+	if not (service and type(service.SetPerformanceCritical) == "function") then
+		return
+	end
+
+	local ok, err = pcall(function()
+		service.SetPerformanceCritical(isCritical)
+	end)
+	if DEBUG_REPLAY_EVENTS and not ok then
+		warn("[RoundService] Replay performance state failed:", err)
+	end
+end
+
+local function resetReplayRoundState()
+	local service = getReplayService()
+	if not service then
+		return
+	end
+
+	local ok, err = pcall(function()
+		if type(service.ResetRound) == "function" then
+			service.ResetRound(roundId)
+		elseif type(service.ResetPOTGRound) == "function" then
+			service.ResetPOTGRound(roundId)
+		end
+	end)
+	if DEBUG_REPLAY_EVENTS and not ok then
+		warn("[RoundService] Replay round reset failed:", err)
+	end
+end
+
+local function setReplayRoundMap(mapId: string, map: Model)
+	local service = getReplayService()
+	if not (service and type(service.SetRoundMap) == "function") then
+		return
+	end
+
+	local ok, err = pcall(function()
+		service.SetRoundMap(mapId, map:GetPivot())
+	end)
+	if DEBUG_REPLAY_EVENTS and not ok then
+		warn("[RoundService] Replay map state failed:", err)
+	end
+end
+
+local function getRoundReplayRecipients(): { Player }
+	local recipients = {}
+	for player in pairs(roundPlayers) do
+		if player.Parent == Players then
+			table.insert(recipients, player)
+		end
+	end
+	return recipients
+end
+
+local function playRoundEndPOTG(): number
+	local service = getReplayService()
+	if not (service and type(service.PlayPOTG) == "function") then
+		return 0
+	end
+
+	local startedAt = os.clock()
+	local ok, err = pcall(function()
+		service.PlayPOTG(getRoundReplayRecipients(), {
+			maxWaitSeconds = RoundConfig.ResetSeconds,
+		})
+	end)
+	if DEBUG_REPLAY_EVENTS and not ok then
+		warn("[RoundService] POTG playback failed:", err)
+	end
+
+	return os.clock() - startedAt
+end
+
+local function getPlayerKey(playerOrUserId: Player | number | string): string
+	if typeof(playerOrUserId) == "Instance" and playerOrUserId:IsA("Player") then
+		return tostring(playerOrUserId.UserId)
+	end
+
+	return tostring(playerOrUserId)
+end
+
+local function getScoreboardStatsFor(playerOrUserId: Player | number | string)
+	local key = getPlayerKey(playerOrUserId)
+	local stats = scoreboardStats[key]
+	if not stats then
+		stats = {
+			damage = 0,
+			eliminations = 0,
+			assists = 0,
+			deaths = 0,
+		}
+		scoreboardStats[key] = stats
+	end
+
+	return stats
+end
+
+local function syncScoreboardStats()
+	setReplicaValue({ "scoreboardStats" }, deepCopy(scoreboardStats))
+end
+
+local function syncScoreboardPlatforms()
+	setReplicaValue({ "scoreboardPlatforms" }, deepCopy(scoreboardPlatforms))
+end
+
+local function resetScoreboardStats()
+	scoreboardStats = {}
+	recentDamageContributors = {}
+	syncScoreboardStats()
+end
+
+local function clearRecentDamageFor(player: Player)
+	recentDamageContributors[getPlayerKey(player)] = nil
+end
+
+local function removePlayerScoreboardState(player: Player)
+	local playerKey = getPlayerKey(player)
+	scoreboardStats[playerKey] = nil
+	scoreboardPlatforms[playerKey] = nil
+	recentDamageContributors[playerKey] = nil
+
+	for _, contributors in pairs(recentDamageContributors) do
+		contributors[playerKey] = nil
+	end
+
+	syncScoreboardStats()
+	syncScoreboardPlatforms()
+end
+
+local function getTrackedTeamName(player: Player): string?
+	local trackedTeam = playerTeams[player]
+	if trackedTeam then
+		return trackedTeam
+	end
+
+	local attributeTeam = player:GetAttribute(ROUND_TEAM_ATTR)
+	return if typeof(attributeTeam) == "string" and attributeTeam ~= "" then attributeTeam else nil
+end
+
+local function isRecentEnemyContributor(attackerKey: string, contributor, victim: Player, currentTime: number): boolean
+	if attackerKey == getPlayerKey(victim) then
+		return false
+	end
+	if typeof(contributor) ~= "table" or typeof(contributor.damagedAt) ~= "number" then
+		return false
+	end
+	if currentTime - contributor.damagedAt > ASSIST_WINDOW_SECONDS then
+		return false
+	end
+
+	local victimTeam = getTrackedTeamName(victim)
+	if not victimTeam then
+		return true
+	end
+
+	return contributor.teamName ~= victimTeam
+end
+
+local function getPlayerByKey(playerKey: string): Player?
+	for _, player in ipairs(Players:GetPlayers()) do
+		if getPlayerKey(player) == playerKey then
+			return player
+		end
+	end
+
+	return nil
+end
+
+local function fireKillFeedElimination(eliminatorKey: string, victim: Player)
+	local killer = getPlayerByKey(eliminatorKey)
+	if not killer then
+		return
+	end
+
+	local killerTeam = getTrackedTeamName(killer)
+	local victimTeam = getTrackedTeamName(victim)
+	if not killerTeam or not victimTeam or killerTeam == victimTeam then
+		return
+	end
+
+	local remote = killFeedRemote
+	if not remote then
+		remote = ensureKillFeedRemote()
+		killFeedRemote = remote
+	end
+
+	remote:FireAllClients({
+		roundId = roundId,
+		killerUserId = killer.UserId,
+		killerName = killer.Name,
+		killerDisplayName = killer.DisplayName,
+		killerTeam = killerTeam,
+		victimUserId = victim.UserId,
+		victimName = victim.Name,
+		victimDisplayName = victim.DisplayName,
+		victimTeam = victimTeam,
+	})
+end
+
+local function creditScoreboardDeath(victim: Player)
+	local victimKey = getPlayerKey(victim)
+	getScoreboardStatsFor(victim).deaths += 1
+
+	local currentTime = workspace:GetServerTimeNow()
+	local contributors = recentDamageContributors[victimKey]
+	local eliminatorKey: string? = nil
+	local eliminatorDamagedAt = -math.huge
+	local eliminatorContributor = nil
+
+	if contributors then
+		for attackerKey, contributor in pairs(contributors) do
+			if isRecentEnemyContributor(attackerKey, contributor, victim, currentTime) and contributor.damagedAt > eliminatorDamagedAt then
+				eliminatorKey = attackerKey
+				eliminatorDamagedAt = contributor.damagedAt
+				eliminatorContributor = contributor
+			end
+		end
+
+		if eliminatorKey then
+			getScoreboardStatsFor(eliminatorKey).eliminations += 1
+			fireKillFeedElimination(eliminatorKey, victim)
+		end
+
+		for attackerKey, contributor in pairs(contributors) do
+			if attackerKey ~= eliminatorKey and isRecentEnemyContributor(attackerKey, contributor, victim, currentTime) then
+				getScoreboardStatsFor(attackerKey).assists += 1
+			end
+		end
+	end
+
+	recordReplayEvent("PlayerKilled", {
+		victimUserId = victim.UserId,
+		killerUserId = if eliminatorKey then tonumber(eliminatorKey) else nil,
+		sourceType = if eliminatorContributor then eliminatorContributor.sourceType else nil,
+		sourceId = if eliminatorContributor then eliminatorContributor.sourceId else nil,
+	})
+
+	clearRecentDamageFor(victim)
+	syncScoreboardStats()
 end
 
 local function setState(state: string, status: string?, duration: number?)
@@ -155,6 +488,7 @@ local function setState(state: string, status: string?, duration: number?)
 	setReplicaValue({ "status" }, status or state)
 	setReplicaValue({ "endsAt" }, if duration and duration > 0 then workspace:GetServerTimeNow() + duration else 0)
 	setReplicaValue({ "minPlayers" }, getRequiredPlayerCount())
+	setReplayPerformanceCritical(state == RoundStates.Active)
 end
 
 local function setVotingOpen(open: boolean)
@@ -318,7 +652,25 @@ local function movePlayerToLobby(player: Player)
 	moveCharacterToSpawn(player, lobbySpawns[rng:NextInteger(1, #lobbySpawns)])
 end
 
+local function bumpRespawnToken(player: Player): number
+	local token = (respawnTokens[player] or 0) + 1
+	respawnTokens[player] = token
+	return token
+end
+
+local function cancelScheduledRespawn(player: Player)
+	bumpRespawnToken(player)
+end
+
+local function destroyPlayerCharacter(player: Player)
+	local character = player.Character
+	if character then
+		character:Destroy()
+	end
+end
+
 local function clearPlayerRoundState(player: Player)
+	cancelScheduledRespawn(player)
 	player:SetAttribute(ROUND_ID_ATTR, nil)
 	player:SetAttribute(ROUND_TEAM_ATTR, nil)
 	player:SetAttribute(ROUND_ALIVE_ATTR, nil)
@@ -460,25 +812,71 @@ local function disconnectCharacterConnections(player: Player)
 end
 
 local function disconnectLobbyCharacterConnection(player: Player)
-	local connection = lobbyCharacterConnections[player]
-	if connection then
-		connection:Disconnect()
+	local connections = lobbyCharacterConnections[player]
+	if connections then
+		for _, connection in ipairs(connections) do
+			connection:Disconnect()
+		end
 		lobbyCharacterConnections[player] = nil
 	end
 end
 
 local function bindLobbyCharacter(player: Player)
 	disconnectLobbyCharacterConnection(player)
+	lobbyCharacterConnections[player] = {}
 
-	lobbyCharacterConnections[player] = player.CharacterAdded:Connect(function()
+	local function track(connection: RBXScriptConnection)
+		local connections = lobbyCharacterConnections[player]
+		if connections then
+			table.insert(connections, connection)
+		else
+			connection:Disconnect()
+		end
+	end
+
+	local function bindNonRoundHumanoid(character: Model)
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if not humanoid then
+			return
+		end
+
+		track(humanoid.Died:Connect(function()
+			if currentState == RoundStates.Active and roundPlayers[player] then
+				return
+			end
+
+			local token = bumpRespawnToken(player)
+			task.delay(RoundConfig.RespawnSeconds, function()
+				if respawnTokens[player] ~= token then
+					return
+				end
+				if player.Parent ~= Players then
+					return
+				end
+				if currentState == RoundStates.Active and roundPlayers[player] then
+					return
+				end
+
+				player:LoadCharacter()
+			end)
+		end))
+	end
+
+	local function onCharacterAdded(character: Model)
 		task.defer(function()
 			if currentState == RoundStates.Active and roundPlayers[player] and alivePlayers[player] then
 				return
 			end
 
+			bindNonRoundHumanoid(character)
 			movePlayerToLobby(player)
 		end)
-	end)
+	end
+
+	track(player.CharacterAdded:Connect(onCharacterAdded))
+	if player.Character then
+		onCharacterAdded(player.Character)
+	end
 end
 
 local function bindCore(core: Instance, map: Instance)
@@ -564,27 +962,46 @@ local function eliminatePlayer(player: Player)
 		return
 	end
 
+	cancelScheduledRespawn(player)
 	alivePlayers[player] = nil
 	player:SetAttribute(ROUND_ALIVE_ATTR, false)
 	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 	syncAliveCounts()
-
-	task.defer(function()
-		if player.Parent == Players then
-			player:LoadCharacter()
-		end
-	end)
+	destroyPlayerCharacter(player)
 end
 
 local function respawnPlayerInRound(player: Player)
+	clearRecentDamageFor(player)
 	player:SetAttribute(ROUND_ALIVE_ATTR, true)
 	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, workspace:GetServerTimeNow() + RoundConfig.RespawnSeconds)
+	destroyPlayerCharacter(player)
+
+	local token = bumpRespawnToken(player)
+	task.delay(RoundConfig.RespawnSeconds, function()
+		if respawnTokens[player] ~= token then
+			return
+		end
+		if player.Parent ~= Players then
+			return
+		end
+		if currentState ~= RoundStates.Active or not roundPlayers[player] or alivePlayers[player] ~= true then
+			return
+		end
+		if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+			return
+		end
+
+		player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
+		player:LoadCharacter()
+	end)
 end
 
 local function handlePlayerDeath(player: Player)
 	if not alivePlayers[player] then
 		return
 	end
+
+	creditScoreboardDeath(player)
 
 	if teamHasRespawns(playerTeams[player]) then
 		respawnPlayerInRound(player)
@@ -788,6 +1205,8 @@ end
 
 local function createNewRound()
 	roundId += 1
+	resetReplayRoundState()
+	resetScoreboardStats()
 	setReplicaValue({ "roundId" }, roundId)
 	setReplicaValue({ "selectedMapId" }, "")
 	setWinner("")
@@ -810,9 +1229,12 @@ local function waitForSecondsOrInvalid(seconds: number, requireMinPlayers: boole
 end
 
 local function endRound(winnerTeam: string)
+	local resetStartedAt = os.clock()
 	setWinner(winnerTeam)
 	setState(RoundStates.RoundEnding, if winnerTeam == "Draw" then "Draw" else winnerTeam .. " wins", RoundConfig.ResetSeconds)
-	task.wait(RoundConfig.ResetSeconds)
+	playRoundEndPOTG()
+	local remainingResetSeconds = math.max(RoundConfig.ResetSeconds - (os.clock() - resetStartedAt), 0)
+	task.wait(remainingResetSeconds)
 end
 
 local function runActiveRound()
@@ -855,6 +1277,7 @@ local function resetRound()
 	DestructionService:Cleanup()
 	clearActiveMap()
 	clearAllRoundTracking()
+	resetScoreboardStats()
 	setReplicaValue({ "selectedMapId" }, "")
 	setVotingOpen(false)
 	syncVoteChoices()
@@ -962,6 +1385,7 @@ local function runRoundLoop()
 			cancelToWaiting("Round cancelled because map setup is incomplete")
 			continue
 		end
+		setReplayRoundMap(selectedMapId, map)
 
 		runActiveRound()
 		resetRound()
@@ -990,15 +1414,82 @@ local function onSubmitMapVote(player: Player, mapId: any)
 	syncVoteChoices()
 end
 
+local function onReportPreferredInput(player: Player, preferredInput: any)
+	RoundService:ReportPreferredInput(player, preferredInput)
+end
+
+function RoundService:RecordPlayerDamage(attacker: Player, target: Player, damage: number, sourceContext)
+	if currentState ~= RoundStates.Active then
+		return
+	end
+	if not (attacker and attacker.Parent == Players and target and target.Parent == Players) then
+		return
+	end
+	if attacker == target or typeof(damage) ~= "number" or damage ~= damage or damage <= 0 then
+		return
+	end
+
+	local attackerStats = getScoreboardStatsFor(attacker)
+	attackerStats.damage += damage
+
+	local targetKey = getPlayerKey(target)
+	local attackerKey = getPlayerKey(attacker)
+	local contributors = recentDamageContributors[targetKey]
+	if not contributors then
+		contributors = {}
+		recentDamageContributors[targetKey] = contributors
+	end
+
+	contributors[attackerKey] = {
+		damagedAt = workspace:GetServerTimeNow(),
+		teamName = getTrackedTeamName(attacker),
+		sourceType = if typeof(sourceContext) == "table" and typeof(sourceContext.sourceType) == "string"
+			then sourceContext.sourceType
+			else nil,
+		sourceId = if typeof(sourceContext) == "table" and typeof(sourceContext.sourceId) == "string"
+			then sourceContext.sourceId
+			else nil,
+	}
+
+	syncScoreboardStats()
+end
+
+function RoundService:ReportPreferredInput(player: Player, preferredInput: any)
+	if not (player and player.Parent == Players) then
+		return
+	end
+	if typeof(preferredInput) ~= "string" or not VALID_PREFERRED_INPUT[preferredInput] then
+		return
+	end
+
+	local playerKey = getPlayerKey(player)
+	if scoreboardPlatforms[playerKey] == preferredInput then
+		return
+	end
+
+	scoreboardPlatforms[playerKey] = preferredInput
+	syncScoreboardPlatforms()
+end
+
 function RoundService:OnStart()
-	Players.RespawnTime = RoundConfig.RespawnSeconds
+	Players.CharacterAutoLoads = false
 	createGameReplica()
 	submitMapVoteRemote = ensureVoteRemote()
 	submitMapVoteRemote.OnServerEvent:Connect(onSubmitMapVote)
+	reportPreferredInputRemote = ensureReportPreferredInputRemote()
+	reportPreferredInputRemote.OnServerEvent:Connect(onReportPreferredInput)
+	killFeedRemote = ensureKillFeedRemote()
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		bindLobbyCharacter(player)
-		movePlayerToLobby(player)
+		if not player.Character then
+			player:LoadCharacter()
+		end
+		task.defer(function()
+			if player.Parent == Players then
+				movePlayerToLobby(player)
+			end
+		end)
 	end
 
 	if not running then
@@ -1011,12 +1502,20 @@ function RoundService:OnPlayerAdded(player: Player)
 	clearPlayerRoundState(player)
 	bindLobbyCharacter(player)
 	task.defer(function()
+		if player.Parent ~= Players then
+			return
+		end
+		if not player.Character then
+			player:LoadCharacter()
+		end
 		movePlayerToLobby(player)
 	end)
 end
 
 function RoundService:OnPlayerRemoving(player: Player)
+	respawnTokens[player] = nil
 	playerVotes[player] = nil
+	removePlayerScoreboardState(player)
 	disconnectCharacterConnections(player)
 	disconnectLobbyCharacterConnection(player)
 
@@ -1057,7 +1556,7 @@ function RoundService:MarkCoreDestroyed(core: Instance): boolean
 	return true
 end
 
-function RoundService:DamageCore(core: Instance, damage: number): boolean
+function RoundService:DamageCore(core: Instance, damage: number, sourceContext): boolean
 	if currentState ~= RoundStates.Active then
 		return false
 	end
@@ -1070,9 +1569,20 @@ function RoundService:DamageCore(core: Instance, damage: number): boolean
 		return false
 	end
 
+	local teamName = trackedCore:GetAttribute("Team")
+	local payload = {
+		teamName = if typeof(teamName) == "string" then teamName else nil,
+		baseId = trackedCore.Name,
+		amount = damage,
+		attackerUserId = if typeof(sourceContext) == "table" then sourceContext.attackerUserId else nil,
+		sourceType = if typeof(sourceContext) == "table" then sourceContext.sourceType else nil,
+		sourceId = if typeof(sourceContext) == "table" then sourceContext.sourceId else nil,
+	}
+
 	local humanoid = trackedCore:FindFirstChildOfClass("Humanoid")
 	if humanoid then
 		humanoid:TakeDamage(damage)
+		recordReplayEvent("BaseDamaged", payload)
 		syncCoreState()
 		return true
 	end
@@ -1082,12 +1592,14 @@ function RoundService:DamageCore(core: Instance, damage: number): boolean
 		health = RoundConfig.Cores.DefaultHealth
 	end
 
+	payload.amount = math.min(damage, math.max(health, 0))
 	health -= damage
 	trackedCore:SetAttribute(CORE_HEALTH_ATTR, math.max(health, 0))
 	if health <= 0 then
 		trackedCore:SetAttribute(CORE_DESTROYED_ATTR, true)
 	end
 
+	recordReplayEvent("BaseDamaged", payload)
 	syncCoreState()
 	return true
 end
@@ -1183,11 +1695,50 @@ function RoundService:AdminDestroyTeamCore(teamName: string): (boolean, string?)
 	return false, "No live " .. teamName .. " core is available"
 end
 
+function RoundService:AdminTestKillFeed(): (boolean, string?)
+	local remote = killFeedRemote
+	if not remote then
+		remote = ensureKillFeedRemote()
+		killFeedRemote = remote
+	end
+
+	remote:FireAllClients({
+		roundId = roundId,
+		killerUserId = 0,
+		killerName = "BlueTester",
+		killerDisplayName = "Blue Tester",
+		killerTeam = RoundConfig.Teams.Blue.name,
+		victimUserId = 0,
+		victimName = "RedTester",
+		victimDisplayName = "Red Tester",
+		victimTeam = RoundConfig.Teams.Red.name,
+	})
+
+	task.delay(0.15, function()
+		if remote.Parent then
+			remote:FireAllClients({
+				roundId = roundId,
+				killerUserId = 0,
+				killerName = "RedTester",
+				killerDisplayName = "Red Tester",
+				killerTeam = RoundConfig.Teams.Red.name,
+				victimUserId = 0,
+				victimName = "BlueTester",
+				victimDisplayName = "Blue Tester",
+				victimTeam = RoundConfig.Teams.Blue.name,
+			})
+		end
+	end)
+
+	return true, "Sent kill feed test"
+end
+
 function RoundService:AdminRespawnPlayer(player: Player): (boolean, string?)
 	if not player or player.Parent ~= Players then
 		return false, "Target player is not in this server"
 	end
 
+	cancelScheduledRespawn(player)
 	if currentState ~= RoundStates.Active or not roundPlayers[player] then
 		player:LoadCharacter()
 		task.defer(function()
@@ -1199,6 +1750,7 @@ function RoundService:AdminRespawnPlayer(player: Player): (boolean, string?)
 	end
 
 	alivePlayers[player] = true
+	clearRecentDamageFor(player)
 	player:SetAttribute(ROUND_ALIVE_ATTR, true)
 	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 	bindCharacter(player)

@@ -455,7 +455,9 @@ function VoxDestruct.octreeMeshSubtraction(
 	debrisSizeMultiplier: number,
 	debrisConfig,
 	generatedVoxelTag: string?,
-	terrainConfig
+	terrainConfig,
+	outputFolder: Instance?,
+	options
 )
 	local sphereCenterWorld = sphereHitbox.Position
 	local sphereRadius = sphereHitbox.Size.X / 2
@@ -500,11 +502,14 @@ function VoxDestruct.octreeMeshSubtraction(
 		Reflectance = target.Reflectance,
 	}
 
-	local meshedFolder = workspace:FindFirstChild("CurrentVoxels")
+	local meshedFolder = outputFolder
 	if not meshedFolder then
-		meshedFolder = Instance.new("Folder")
-		meshedFolder.Name = "CurrentVoxels"
-		meshedFolder.Parent = workspace
+		meshedFolder = workspace:FindFirstChild("CurrentVoxels")
+		if not meshedFolder then
+			meshedFolder = Instance.new("Folder")
+			meshedFolder.Name = "CurrentVoxels"
+			meshedFolder.Parent = workspace
+		end
 	end
 
 	local finalVoxels = {}
@@ -555,7 +560,35 @@ function VoxDestruct.octreeMeshSubtraction(
 
 	local debrisPayload = nil
 	if debris then
-		if debrisConfig and debrisConfig.ClientSimulated == true then
+		if typeof(options) == "table" and options.forceSpawnDebris == true then
+			local maxDebrisParts = if typeof(options.maxDebrisParts) == "number" then math.max(math.floor(options.maxDebrisParts), 0) else math.huge
+			local spawnedDebrisParts = if typeof(options.spawnedDebrisParts) == "number" then math.max(math.floor(options.spawnedDebrisParts), 0) else 0
+			local remainingDebrisParts = math.max(maxDebrisParts - spawnedDebrisParts, 0)
+			if remainingDebrisParts > 0 then
+				debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+				local payloadBlocks = if debrisPayload and typeof(debrisPayload.blocks) == "table" then #debrisPayload.blocks else 0
+				local spawned, spawnAttempts = Debris.spawnPayload(debrisPayload, {
+					parentFolder = options.debrisFolder,
+					maxParts = remainingDebrisParts,
+					lifetimeScale = options.debrisLifetimeScale,
+					useGraphicsQualitySampling = options.useGraphicsQualitySampling,
+					forceVisible = options.forceVisible,
+					minimumParts = options.minimumParts,
+				})
+				local debrisPayloadBlocks = if typeof(options.debrisPayloadBlocks) == "number"
+					then options.debrisPayloadBlocks
+					else 0
+				local debrisSpawnAttempts = if typeof(options.debrisSpawnAttempts) == "number"
+					then options.debrisSpawnAttempts
+					else 0
+				options.debrisPayloadBlocks = debrisPayloadBlocks + payloadBlocks
+				options.debrisSpawnAttempts = debrisSpawnAttempts + (spawnAttempts or 0)
+				if typeof(spawned) == "number" and spawned > 0 then
+					options.spawnedDebrisParts = spawnedDebrisParts + spawned
+				end
+				debrisPayload = nil
+			end
+		elseif debrisConfig and debrisConfig.ClientSimulated == true then
 			debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
 		else
 			Debris.makeDebris(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
@@ -578,7 +611,9 @@ function VoxDestruct.subtractHitbox(
 	debrisConfig,
 	generatedVoxelTag: string?,
 	terrainConfig,
-	include: { Instance }?
+	include: { Instance }?,
+	outputFolder: Instance?,
+	options
 )
 	VoxDestruct.VoxelCache = voxelCache
 
@@ -592,12 +627,14 @@ function VoxDestruct.subtractHitbox(
 	end
 
 	local debrisPayloads = {}
+	local targetsHit = 0
 	local targets = workspace:GetPartBoundsInRadius(sphereHitbox.Position, sphereHitbox.Size.X / 2, overlapParams)
 	for _, object in ipairs(targets) do
 		if not object:IsA("BasePart") or object == sphereHitbox or object.Locked then
 			continue
 		end
 
+		targetsHit += 1
 		local _, debrisPayload = VoxDestruct.octreeMeshSubtraction(
 			object,
 			sphereHitbox,
@@ -609,7 +646,9 @@ function VoxDestruct.subtractHitbox(
 			debrisSizeMultiplier,
 			debrisConfig,
 			generatedVoxelTag,
-			terrainConfig
+			terrainConfig,
+			outputFolder,
+			options
 		)
 		if debrisPayload then
 			table.insert(debrisPayloads, debrisPayload)
@@ -617,6 +656,18 @@ function VoxDestruct.subtractHitbox(
 	end
 
 	sphereHitbox:Destroy()
+	debrisPayloads.targetsHit = targetsHit
+	if typeof(options) == "table" then
+		if typeof(options.spawnedDebrisParts) == "number" then
+			debrisPayloads.debrisPartsSpawned = options.spawnedDebrisParts
+		end
+		if typeof(options.debrisPayloadBlocks) == "number" then
+			debrisPayloads.debrisPayloadBlocks = options.debrisPayloadBlocks
+		end
+		if typeof(options.debrisSpawnAttempts) == "number" then
+			debrisPayloads.debrisSpawnAttempts = options.debrisSpawnAttempts
+		end
+	end
 	return debrisPayloads
 end
 

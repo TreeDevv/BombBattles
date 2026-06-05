@@ -69,7 +69,9 @@ function VoxManager:voxelize(
 	debris: boolean,
 	debrisAmount: number,
 	ignore: { Instance }?,
-	include: { Instance }?
+	include: { Instance }?,
+	outputFolder: Instance?,
+	options
 )
 	assert(sphereHitbox, "Hitbox provided was nil.")
 	if sphereHitbox.Shape ~= Enum.PartType.Ball then
@@ -105,7 +107,9 @@ function VoxManager:voxelize(
 		VoxManager.DebrisConfig,
 		VoxManager.GeneratedVoxelTag,
 		VoxManager.TerrainConfig,
-		include
+		include,
+		outputFolder,
+		options
 	)
 end
 
@@ -118,7 +122,9 @@ function VoxManager:voxelizePosition(
 	debris: boolean,
 	debrisAmount: number,
 	ignore: { Instance }?,
-	include: { Instance }?
+	include: { Instance }?,
+	outputFolder: Instance?,
+	options
 )
 	assert(position, "Please enter a valid position.")
 	if typeof(position) ~= "Vector3" then
@@ -165,7 +171,9 @@ function VoxManager:voxelizePosition(
 		VoxManager.DebrisConfig,
 		VoxManager.GeneratedVoxelTag,
 		VoxManager.TerrainConfig,
-		include
+		include,
+		outputFolder,
+		options
 	)
 end
 
@@ -287,14 +295,7 @@ function VoxManager:setTerrainDebugConfig(config)
 	Voxelizer.setTerrainDebugConfig(VoxManager.TerrainDebugConfig)
 end
 
-function VoxManager:cleanup()
-	Voxelizer.clearTerrainDebugVisuals()
-
-	local voxelizerTerrainCells = Voxelizer.TerrainCells
-	if voxelizerTerrainCells then
-		table.clear(voxelizerTerrainCells)
-	end
-
+function VoxManager:cleanupVoxelCache()
 	if VoxManager.VoxelCache then
 		VoxManager.VoxelCache:Destroy()
 		VoxManager.VoxelCache = nil
@@ -303,6 +304,20 @@ function VoxManager:cleanup()
 		VoxManager.VoxelFolder:Destroy()
 		VoxManager.VoxelFolder = nil
 	end
+end
+
+function VoxManager:resetTerrainState()
+	Voxelizer.clearTerrainDebugVisuals()
+
+	local voxelizerTerrainCells = Voxelizer.TerrainCells
+	if voxelizerTerrainCells then
+		table.clear(voxelizerTerrainCells)
+	end
+end
+
+function VoxManager:cleanup()
+	VoxManager:resetTerrainState()
+	VoxManager:cleanupVoxelCache()
 
 	local currentVoxels = workspace:FindFirstChild("CurrentVoxels")
 	if currentVoxels then

@@ -1,6 +1,8 @@
 return table.freeze({
 	EnabledInStudio = true,
 	AllowedUserIds = {},
+	ReplayDebugEnabled = true,
+	ReplayDebugAllowedUserIds = {},
 	RequestRemoteName = "AdminRequest",
 	RequestCooldownSeconds = 0.15,
 	MaxCoreDamage = 1000,

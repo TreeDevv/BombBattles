@@ -20,7 +20,11 @@ local function getConfigValue(config, name: string)
 	return if typeof(value) == "number" then value else DEFAULT_CONFIG[name]
 end
 
-local function getDebrisFolder(): Folder
+local function getDebrisFolder(parentFolder: Instance?): Folder
+	if parentFolder and parentFolder:IsA("Folder") then
+		return parentFolder
+	end
+
 	local debrisFolder = workspace:FindFirstChild("VoxelDebris")
 	if not debrisFolder then
 		debrisFolder = Instance.new("Folder")
@@ -89,8 +93,11 @@ local function getClientGraphicsQualityLevel(automaticQualityLevel: number): num
 	return getManualGraphicsQualityLevel(savedQualityLevel) or automaticQualityLevel
 end
 
-local function getSamplingDivisor(payload): number
+local function getSamplingDivisor(payload, options): number
 	if not RunService:IsClient() then
+		return 1
+	end
+	if typeof(options) == "table" and options.useGraphicsQualitySampling == false then
 		return 1
 	end
 	if payload.useGraphicsQualitySampling ~= true then
@@ -161,30 +168,50 @@ function Debris.makePayload(
 	}
 end
 
-function Debris.spawnPayload(payload)
+function Debris.spawnPayload(payload, options)
 	if typeof(payload) ~= "table" or typeof(payload.blocks) ~= "table" then
-		return
+		return 0, 0
 	end
 	if typeof(payload.sourceCFrame) ~= "CFrame" or typeof(payload.explosionPosition) ~= "Vector3" then
-		return
+		return 0, 0
 	end
 
-	local debrisFolder = getDebrisFolder()
+	local debrisFolder = getDebrisFolder(if typeof(options) == "table" then options.parentFolder else nil)
 	local originalInfo = getSourceInfoFromPayload(payload)
 	local speedMin = if typeof(payload.speedMin) == "number" then payload.speedMin else DEFAULT_CONFIG.SpeedMin
 	local speedMax = if typeof(payload.speedMax) == "number" then payload.speedMax else DEFAULT_CONFIG.SpeedMax
 	local lifetime = if typeof(payload.lifetime) == "number" then payload.lifetime else DEFAULT_CONFIG.Lifetime
+	if typeof(options) == "table" and typeof(options.lifetimeScale) == "number" then
+		lifetime *= math.clamp(options.lifetimeScale, 0.1, 4)
+	end
+	local maxParts = if typeof(options) == "table" and typeof(options.maxParts) == "number"
+		then math.max(math.floor(options.maxParts), 0)
+		else math.huge
+	local forceVisible = typeof(options) == "table" and options.forceVisible == true
+	local minimumParts = if forceVisible and typeof(options.minimumParts) == "number"
+		then math.max(math.floor(options.minimumParts), 1)
+		elseif forceVisible
+		then 1
+		else 0
+	minimumParts = math.min(minimumParts, maxParts)
 	local seed = if typeof(payload.seed) == "number" then payload.seed else Random.new():NextInteger(1, MAX_RANDOM_SEED)
 	local random = Random.new(seed)
-	local samplingDivisor = getSamplingDivisor(payload)
+	local samplingDivisor = getSamplingDivisor(payload, options)
+	local spawnAttempts = 0
+	local spawned = 0
 
 	for index, block in ipairs(payload.blocks) do
+		if spawned >= maxParts then
+			break
+		end
 		if typeof(block) ~= "table" or typeof(block.center) ~= "Vector3" or typeof(block.size) ~= "Vector3" then
 			continue
 		end
-		if not shouldSpawnBlock(seed, index, samplingDivisor) then
+		local passesSampling = shouldSpawnBlock(seed, index, samplingDivisor)
+		if not passesSampling and not (forceVisible and spawned < minimumParts) then
 			continue
 		end
+		spawnAttempts += 1
 
 		local worldCFrame = payload.sourceCFrame * CFrame.new(block.center)
 		local worldPosition = worldCFrame.Position
@@ -214,7 +241,10 @@ function Debris.spawnPayload(payload)
 		)
 
 		DebrisService:AddItem(debrisPart, lifetime)
+		spawned += 1
 	end
+
+	return spawned, spawnAttempts
 end
 
 function Debris.makeDebris(

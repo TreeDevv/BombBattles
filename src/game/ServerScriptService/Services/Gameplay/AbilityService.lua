@@ -11,6 +11,7 @@ local REMOTES_FOLDER_NAME = AbilityConfig.RemotesFolderName
 local REQUEST_REMOTE_NAME = AbilityConfig.RequestRemoteName
 local EFFECT_REMOTE_NAME = AbilityConfig.EffectRemoteName
 local MESSAGE_TYPES = AbilityConfig.MessageTypes
+local DEBUG_REPLAY_EVENTS = false
 
 local ABILITY_STATE_TOKEN = ReplicaService.NewClassToken(AbilityConfig.Scope)
 
@@ -30,6 +31,51 @@ local behaviorModules: { [string]: any } = {}
 
 local function now(): number
 	return workspace:GetServerTimeNow()
+end
+
+local replayService = nil
+
+local function getReplayService()
+	if replayService then
+		return replayService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local replayModule = services and services:FindFirstChild("ReplayService")
+	if not (replayModule and replayModule:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, replayModule)
+	if ok and typeof(service) == "table" then
+		replayService = service
+		return replayService
+	end
+
+	if DEBUG_REPLAY_EVENTS then
+		warn("[AbilityService] ReplayService require failed:", service)
+	end
+	return nil
+end
+
+local function recordReplayEvent(eventType: string, payload)
+	local service = getReplayService()
+	if not (service and type(service.RecordEvent) == "function") then
+		return
+	end
+
+	local ok, err = pcall(function()
+		service.RecordEvent(eventType, payload)
+	end)
+	if DEBUG_REPLAY_EVENTS and not ok then
+		warn("[AbilityService] Replay event failed:", eventType, err)
+	end
+end
+
+local function getPlayerRootPosition(player: Player): Vector3?
+	local character = player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	return if rootPart and rootPart:IsA("BasePart") then rootPart.Position else nil
 end
 
 local function ensureRemotesFolder(): Folder
@@ -110,7 +156,7 @@ local function getRuntime(player: Player): PlayerRuntime
 	return runtime
 end
 
-local function createReplica(player: Player): any
+local function createReplica(player: Player, loadout: any?): any
 	local runtime = getRuntime(player)
 	if runtime.replica and runtime.replica:IsActive() then
 		return runtime.replica
@@ -119,7 +165,7 @@ local function createReplica(player: Player): any
 	local replica = ReplicaService.NewReplica({
 		ClassToken = ABILITY_STATE_TOKEN,
 		Tags = { Player = player },
-		Data = AbilityConfig.BuildInitialState(),
+		Data = AbilityConfig.BuildInitialState(loadout),
 		Replication = player,
 	})
 
@@ -144,6 +190,15 @@ local function getSlotState(player: Player, slot: string)
 
 	local slots = replica.Data.slots
 	return if typeof(slots) == "table" then slots[slot] else nil
+end
+
+local function getBehavior(abilityId: string, definition)
+	local behaviorId = AbilityConfig.GetBehaviorId(abilityId)
+	if behaviorId == "" and definition and typeof(definition.id) == "string" then
+		behaviorId = definition.id
+	end
+
+	return behaviorModules[behaviorId]
 end
 
 local function isAliveActivePlayer(player: Player): boolean
@@ -261,7 +316,7 @@ local function activate(player: Player, resolved, currentTime: number)
 		return
 	end
 
-	local behavior = behaviorModules[resolved.abilityId]
+	local behavior = getBehavior(resolved.abilityId, resolved.definition)
 	local context = {
 		player = player,
 		slot = resolved.slot,
@@ -324,6 +379,11 @@ local function activate(player: Player, resolved, currentTime: number)
 		startedAt = currentTime,
 		activeEndsAt = if durationSeconds > 0 then currentTime + durationSeconds else 0,
 	})
+	recordReplayEvent("AbilityUsed", {
+		userId = player.UserId,
+		abilityName = resolved.definition.displayName or resolved.abilityId,
+		position = getPlayerRootPosition(player),
+	})
 
 	if typeof(behaviorResult) == "table" and typeof(behaviorResult.effect) == "table" then
 		fireAbilityEffect(behaviorResult.effect.name or resolved.abilityId, {
@@ -350,7 +410,7 @@ local function handleClientMessage(player: Player, request)
 		return
 	end
 
-	local behavior = behaviorModules[resolved.abilityId]
+	local behavior = getBehavior(resolved.abilityId, resolved.definition)
 	if behavior and type(behavior.OnClientMessage) == "function" then
 		local ok, err = pcall(function()
 			behavior.OnClientMessage({
@@ -405,12 +465,12 @@ local function collectHookCandidates(hookName: string, currentTime: number)
 				continue
 			end
 
-			local behavior = behaviorModules[slotState.abilityId]
+			local definition = AbilityConfig.GetDefinition(slotState.abilityId)
+			local behavior = getBehavior(slotState.abilityId, definition)
 			if not (behavior and type(behavior[hookName]) == "function") then
 				continue
 			end
 
-			local definition = AbilityConfig.GetDefinition(slotState.abilityId)
 			table.insert(candidates, {
 				player = player,
 				slot = slot,
@@ -513,6 +573,36 @@ end
 
 function AbilityService:FireEffect(effectName: string, payload)
 	fireAbilityEffect(effectName, payload)
+end
+
+function AbilityService:SetEquippedAbility(player: Player, slot: string, abilityId: string): boolean
+	if not AbilityConfig.IsKnownSlot(slot) then
+		return false
+	end
+
+	local resolvedAbilityId = ""
+	if typeof(abilityId) == "string" and abilityId ~= "" then
+		resolvedAbilityId = AbilityConfig.NormalizeAbilityId(abilityId)
+		local definition = AbilityConfig.GetDefinition(resolvedAbilityId)
+		if not definition or definition.slot ~= slot then
+			return false
+		end
+	end
+
+	local replica = createReplica(player)
+	replica:SetValue({ "slots", slot }, AbilityConfig.BuildSlotState(slot, resolvedAbilityId))
+	return true
+end
+
+function AbilityService:SetLoadout(player: Player, loadout): boolean
+	local replica = createReplica(player, loadout)
+
+	for _, slot in ipairs(AbilityConfig.SlotOrder) do
+		local abilityId = AbilityConfig.GetSlotAbility(loadout, slot)
+		replica:SetValue({ "slots", slot }, AbilityConfig.BuildSlotState(slot, abilityId))
+	end
+
+	return true
 end
 
 function AbilityService:GetPlayerState(player: Player)

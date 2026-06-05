@@ -4,7 +4,7 @@ return {
 	MinPlayers = 2,
 	IntermissionSeconds = 30,
 	RoundSeconds = 180,
-	RespawnSeconds = 5,
+	RespawnSeconds = 7,
 	ResetSeconds = 5,
 	VoteChoiceCount = 3,
 	StudioTesting = {

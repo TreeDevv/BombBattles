@@ -7,6 +7,7 @@ local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local BombService = require(ServerScriptService.Services.BombService)
 local DataService = require(ServerScriptService.Services.DataService)
+local ReplayService = require(ServerScriptService.Services.ReplayService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
 local REMOTES_FOLDER_NAME = "Remotes"
@@ -63,12 +64,40 @@ local function isAllowedUserId(userId: number): boolean
 	return false
 end
 
+local function isDebugAllowedUserId(userId: number): boolean
+	for _, allowedUserId in ipairs(AdminConfig.ReplayDebugAllowedUserIds or {}) do
+		if allowedUserId == userId then
+			return true
+		end
+	end
+
+	return isAllowedUserId(userId)
+end
+
+local function isGameCreator(player: Player): boolean
+	return game.CreatorType == Enum.CreatorType.User and game.CreatorId == player.UserId
+end
+
 local function isAuthorized(player: Player): boolean
 	if AdminConfig.EnabledInStudio and RunService:IsStudio() then
 		return true
 	end
 
 	return isAllowedUserId(player.UserId)
+end
+
+local function isReplayDebugAuthorized(player: Player): (boolean, string?)
+	if AdminConfig.ReplayDebugEnabled ~= true then
+		return false, "Replay debug tools are disabled"
+	end
+	if RunService:IsStudio() then
+		return true, nil
+	end
+	if isGameCreator(player) or isDebugAllowedUserId(player.UserId) then
+		return true, nil
+	end
+
+	return false, "Replay debug tools are restricted"
 end
 
 local function result(ok: boolean, message: string, data: any?): AdminResult
@@ -114,7 +143,42 @@ local function getStatePayload()
 			RoundConfig.Teams.Red.name,
 			RoundConfig.Teams.Blue.name,
 		},
+		replayDebug = {
+			enabled = AdminConfig.ReplayDebugEnabled == true,
+		},
 	}
+end
+
+local function dispatchReplayDebugCommand(adminPlayer: Player, command: string): AdminResult
+	if command == "replay.testSelfKillReplay" then
+		if not RunService:IsStudio() then
+			return result(false, "Self kill replay test is Studio-only", getStatePayload())
+		end
+
+		local ok, debugMessage = ReplayService.DebugSendRecentKillReplay(adminPlayer, 7)
+		return result(ok, debugMessage or "Studio self kill replay failed", getStatePayload())
+	end
+
+	local authorized, message = isReplayDebugAuthorized(adminPlayer)
+	if not authorized then
+		return result(false, message or "Replay debug is unavailable", getStatePayload())
+	end
+
+	if command == "replay.printCounts" then
+		local ok, debugMessage = ReplayService.DebugPrintBufferCounts(adminPlayer)
+		return result(ok, debugMessage or "Replay buffer debug failed", getStatePayload())
+	elseif command == "replay.printPOTG" then
+		local ok, debugMessage = ReplayService.DebugPrintPOTGCandidates(adminPlayer)
+		return result(ok, debugMessage or "POTG debug failed", getStatePayload())
+	elseif command == "replay.testKillReplay" then
+		local ok, debugMessage = ReplayService.DebugSendRecentKillReplay(adminPlayer, 7)
+		return result(ok, debugMessage or "Debug kill replay failed", getStatePayload())
+	elseif command == "replay.testPOTG" then
+		local ok, debugMessage = ReplayService.DebugPlayBestPOTG(adminPlayer)
+		return result(ok, debugMessage or "Debug POTG replay failed", getStatePayload())
+	end
+
+	return result(false, "Unknown replay debug command", getStatePayload())
 end
 
 local function getTargetPlayer(payload): Player?
@@ -202,6 +266,11 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 	elseif command == "round.respawnAll" then
 		local ok, message = RoundService:AdminRespawnAll()
 		return result(ok, message or "", getStatePayload())
+	elseif command == "round.testKillFeed" then
+		local ok, message = RoundService:AdminTestKillFeed()
+		return result(ok, message or "", getStatePayload())
+	elseif string.sub(command, 1, 7) == "replay." then
+		return dispatchReplayDebugCommand(adminPlayer, command)
 	end
 
 	local targetPlayer = getTargetPlayer(payload)

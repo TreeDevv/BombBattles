@@ -27,6 +27,9 @@
         "Audio": {
           "$path": "src/game/ReplicatedStorage/Shared/Presentation/Audio"
         },
+        "Bombs": {
+          "$path": "src/game/ReplicatedStorage/Shared/Bombs"
+        },
         "Camera": {
           "$path": "src/game/ReplicatedStorage/Shared/Presentation/Camera"
         },
@@ -41,6 +44,9 @@
         },
         "Formatting": {
           "$path": "src/game/ReplicatedStorage/Shared/Presentation/Formatting"
+        },
+        "Replay": {
+          "$path": "src/game/ReplicatedStorage/Shared/Replay"
         },
         "UI": {
           "$path": "src/game/ReplicatedStorage/Shared/Presentation/UI"
@@ -62,14 +68,23 @@
         "AbilityService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/AbilityService.lua"
         },
+        "AbilityInventoryService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/AbilityInventoryService.lua"
+        },
         "AbilityBehaviors": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/AbilityBehaviors"
         },
         "BombService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombService.lua"
         },
+        "BombProjectileService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/BombProjectileService.lua"
+        },
         "CharacterAbilityService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/CharacterAbilityService.lua"
+        },
+        "CharacterAnimationService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/CharacterAnimationService.lua"
         },
         "DestructionService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/DestructionService.lua"
@@ -85,6 +100,15 @@
         },
         "PurchaseReceiptService": {
           "$path": "src/game/ServerScriptService/Services/Economy/PurchaseReceiptService.lua"
+        },
+        "POTGService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/POTGService.lua"
+        },
+        "Replay": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/Replay"
+        },
+        "ReplayService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/ReplayService.lua"
         },
         "RoundService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundService.lua"
@@ -128,14 +152,29 @@
           "DataController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/DataController"
           },
-          "HUDWindowController": {
-            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/HUDWindowController.lua"
+          "FrameController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/FrameController.lua"
+          },
+          "ScoreboardController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ScoreboardController.lua"
+          },
+          "SkillsInventoryController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/SkillsInventoryController.lua"
           },
           "BombButtonController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/BombButtonController.lua"
           },
           "BottomButtonsController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/BottomButtonsController.lua"
+          },
+          "SpectateController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/SpectateController.lua"
+          },
+          "KillFeedController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/KillFeedController.lua"
+          },
+          "KillEffectController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/KillEffectController.lua"
           },
           "TopHUDController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/TopHUDController.lua"
@@ -145,6 +184,9 @@
           },
           "MovementController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/MovementController.lua"
+          },
+          "Replay": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/Replay"
           },
           "RoundController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/RoundController.lua"

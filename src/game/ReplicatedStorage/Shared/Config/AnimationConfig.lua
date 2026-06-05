@@ -9,6 +9,8 @@ return table.freeze({
 	DebugLogCooldownSeconds = 0.15,
 	RootUprightGuardEnabled = false,
 	RootUprightGuardWindowSeconds = 0.35,
+	ServerAnimatorAttributeName = "BombBattlesServerAnimator",
+	ReplicationMinimumTrackWeight = 0.01,
 	DebugRiskyTrackEnabled = {
 		Land = true,
 		Slide = true,

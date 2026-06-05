@@ -33,6 +33,11 @@ local AIR_LAUNCH_SOURCE_DEFAULT = "Default"
 local AIR_LAUNCH_SOURCE_NORMAL_JUMP = "NormalJump"
 local AIR_LAUNCH_SOURCE_SLIDE_JUMP = "SlideJump"
 local AIR_LAUNCH_SOURCE_KNOCKBACK = "Knockback"
+local LANDING_MODE_NONE = "None"
+local LANDING_MODE_LOW = "Low"
+local LANDING_MODE_MEDIUM = "Medium"
+local LANDING_MODE_HIGH = "High"
+local LANDING_MODE_RUNOUT = "Runout"
 
 type Controls = {
 	GetMoveVector: (Controls) -> Vector3,
@@ -69,6 +74,7 @@ MovementController._slideStartTime = NEVER
 MovementController._slideBlockedStartTime = NEVER
 MovementController._lastSlideEndTime = NEVER
 MovementController._slideRequestPending = false
+MovementController._lastSlideRequestTime = NEVER
 MovementController._lastSlideDirection = Vector3.zero
 MovementController._lastSlideSpeed = 0
 MovementController._airCarryDirection = Vector3.zero
@@ -79,6 +85,7 @@ MovementController._groundRunoutDirection = Vector3.zero
 MovementController._groundRunoutSpeed = 0
 MovementController._groundRunoutStartTime = NEVER
 MovementController._groundRunoutLandingSpeed = 0
+MovementController._groundRunoutInputDotThreshold = 0
 MovementController._slideEntryBurstDirection = Vector3.zero
 MovementController._slideEntryBurstStartSpeed = 0
 MovementController._slideEntryBurstStartTime = NEVER
@@ -124,10 +131,17 @@ MovementController._observedAirControlLaunchSerial = 0
 MovementController._lastObservedKnockbackUntil = NEVER
 MovementController._maxAirDownwardSpeed = 0
 MovementController._maxAirHorizontalSpeed = 0
+MovementController._maxAirHorizontalVelocity = Vector3.zero
 MovementController._landingImpactSpeed = 0
 MovementController._landingHorizontalSpeed = 0
+MovementController._landingHorizontalVelocity = Vector3.zero
 MovementController._landingSerial = 0
-MovementController._landingBoostUntil = NEVER
+MovementController._landingMode = LANDING_MODE_NONE
+MovementController._landingRecoveryStartTime = NEVER
+MovementController._landingRecoveryUntil = NEVER
+MovementController._landingRecoveryAlpha = 0
+MovementController._landingInputGraceUntil = NEVER
+MovementController._landingRunoutEligible = false
 
 local function getControls(): Controls?
 	local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -837,7 +851,7 @@ function MovementController:_getSlideDirection(targetMoveDirection: Vector3): Ve
 	return Vector3.zero
 end
 
-function MovementController:_setGroundControllerTuning(isSliding: boolean, landingBoostActive: boolean?)
+function MovementController:_setGroundControllerTuning(isSliding: boolean, landingRecoveryAlpha: number?)
 	local groundController = self._groundController
 	if not groundController then
 		return
@@ -848,11 +862,18 @@ function MovementController:_setGroundControllerTuning(isSliding: boolean, landi
 		groundController.DecelerationTime = MovementConfig.SlideGroundDecelerationTime
 		groundController.Friction = MovementConfig.SlideGroundFriction
 		groundController.FrictionWeight = MovementConfig.SlideGroundFrictionWeight
-	elseif landingBoostActive == true then
+	elseif landingRecoveryAlpha ~= nil then
+		local alpha = smoothstep(landingRecoveryAlpha)
+		local frictionScale = MovementConfig.LandingRecoveryStartFrictionScale
+			+ ((MovementConfig.LandingRecoveryEndFrictionScale - MovementConfig.LandingRecoveryStartFrictionScale) * alpha)
+		local decelerationScale = MovementConfig.LandingRecoveryStartDecelerationScale
+			+ (
+				(MovementConfig.LandingRecoveryEndDecelerationScale - MovementConfig.LandingRecoveryStartDecelerationScale)
+				* alpha
+			)
 		groundController.AccelerationTime = MovementConfig.GroundAccelerationTime
-		groundController.DecelerationTime = MovementConfig.GroundDecelerationTime
-			* MovementConfig.AirControl.LandingFrictionBoostDecelerationScale
-		groundController.Friction = MovementConfig.GroundFriction * MovementConfig.AirControl.LandingFrictionBoostMultiplier
+		groundController.DecelerationTime = MovementConfig.GroundDecelerationTime * decelerationScale
+		groundController.Friction = MovementConfig.GroundFriction * frictionScale
 		groundController.FrictionWeight = MovementConfig.GroundFrictionWeight
 	else
 		groundController.AccelerationTime = MovementConfig.GroundAccelerationTime
@@ -997,9 +1018,13 @@ function MovementController:_clearSlidePhase()
 	self._groundRunoutSpeed = 0
 	self._groundRunoutStartTime = NEVER
 	self._groundRunoutLandingSpeed = 0
+	self._groundRunoutInputDotThreshold = 0
 	self:_setGroundControllerTuning(false)
 	self:_clearSlideEntryBurst()
 	self:_clearSlideJumpBurst()
+	if self._landingMode == LANDING_MODE_RUNOUT then
+		self:_clearLandingRecovery()
+	end
 end
 
 function MovementController:_stopGroundSlide(now: number)
@@ -1291,7 +1316,11 @@ function MovementController:_steerRunoutDirection(currentDirection: Vector3, inp
 
 	local inputDirection = inputMoveDirection.Unit
 	local alignment = currentDirection.Unit:Dot(inputDirection)
-	if alignment < MovementConfig.GroundRunoutForwardDotThreshold then
+	local inputDotThreshold = self._groundRunoutInputDotThreshold
+	if inputDotThreshold == 0 then
+		inputDotThreshold = MovementConfig.GroundRunoutForwardDotThreshold
+	end
+	if alignment < inputDotThreshold then
 		return currentDirection.Unit
 	end
 
@@ -1318,10 +1347,14 @@ function MovementController:_canPreserveGroundRunout(inputMoveDirection: Vector3
 		return false
 	end
 
-	return referenceDirection.Unit:Dot(inputMoveDirection.Unit) >= MovementConfig.GroundRunoutForwardDotThreshold
+	local inputDotThreshold = self._groundRunoutInputDotThreshold
+	if inputDotThreshold == 0 then
+		inputDotThreshold = MovementConfig.GroundRunoutForwardDotThreshold
+	end
+	return referenceDirection.Unit:Dot(inputMoveDirection.Unit) >= inputDotThreshold
 end
 
-function MovementController:_startGroundRunout(now: number, direction: Vector3, speed: number)
+function MovementController:_startGroundRunout(now: number, direction: Vector3, speed: number, inputDotThreshold: number?)
 	if direction.Magnitude < MovementConfig.MinMoveMagnitude or speed <= MovementConfig.GroundRunoutExitSpeed then
 		self:_clearSlidePhase()
 		return
@@ -1340,6 +1373,7 @@ function MovementController:_startGroundRunout(now: number, direction: Vector3, 
 	self._groundRunoutSpeed = math.clamp(speed, MovementConfig.GroundRunoutExitSpeed, MovementConfig.SlideJumpMaxSpeed)
 	self._groundRunoutStartTime = now
 	self._groundRunoutLandingSpeed = self._groundRunoutSpeed
+	self._groundRunoutInputDotThreshold = inputDotThreshold or MovementConfig.GroundRunoutForwardDotThreshold
 	self:_setGroundControllerTuning(false)
 end
 
@@ -1626,6 +1660,98 @@ function MovementController:_tryReplayJump(now: number, isGrounded: boolean, inC
 	end
 end
 
+function MovementController:_getLandingMode(horizontalSpeed: number, impactSpeed: number): string
+	if horizontalSpeed >= MovementConfig.LandingHighHorizontalSpeed then
+		return LANDING_MODE_HIGH
+	end
+	if horizontalSpeed >= MovementConfig.LandingMediumHorizontalSpeed
+		or impactSpeed >= MovementConfig.LandingMediumImpactSpeed
+	then
+		return LANDING_MODE_MEDIUM
+	end
+	if horizontalSpeed >= MovementConfig.LandingLowHorizontalSpeed or impactSpeed > 0 then
+		return LANDING_MODE_LOW
+	end
+
+	return LANDING_MODE_NONE
+end
+
+function MovementController:_clearLandingRecovery(modeOverride: string?)
+	self._landingMode = modeOverride or LANDING_MODE_NONE
+	self._landingRecoveryStartTime = NEVER
+	self._landingRecoveryUntil = NEVER
+	self._landingRecoveryAlpha = 0
+	self._landingRunoutEligible = false
+	if self._landingMode ~= LANDING_MODE_RUNOUT then
+		self._landingInputGraceUntil = NEVER
+	end
+end
+
+function MovementController:_beginLandingRecovery(now: number, landingMode: string)
+	self._landingMode = landingMode
+	self._landingRecoveryStartTime = now
+	self._landingRecoveryUntil = now + MovementConfig.LandingRecoveryDuration
+	self._landingRecoveryAlpha = 0
+	self._landingInputGraceUntil = now + MovementConfig.LandingInputGraceTime
+	self._landingRunoutEligible = landingMode == LANDING_MODE_HIGH
+end
+
+function MovementController:_getLandingRecoveryAlpha(now: number, isGrounded: boolean): number?
+	if not isGrounded or self._landingRecoveryStartTime == NEVER or self._landingMode == LANDING_MODE_RUNOUT then
+		self._landingRecoveryAlpha = 0
+		return nil
+	end
+
+	local duration = math.max(MovementConfig.LandingRecoveryDuration, 0.001)
+	local alpha = math.clamp((now - self._landingRecoveryStartTime) / duration, 0, 1)
+	self._landingRecoveryAlpha = alpha
+	if alpha >= 1 then
+		self:_clearLandingRecovery()
+		return nil
+	end
+
+	return alpha
+end
+
+function MovementController:_tryStartLandingRunout(now: number, inputMoveDirection: Vector3, isGrounded: boolean)
+	if not (
+		isGrounded
+		and self._landingRunoutEligible
+		and self._sprintHeld
+		and now <= self._landingInputGraceUntil
+		and inputMoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
+		and not self:_isGroundSlide()
+		and not self:_isAirCarry()
+		and not self:_isGroundRunout()
+	) then
+		return
+	end
+
+	local landingVelocity = self._landingHorizontalVelocity
+	if landingVelocity.Magnitude < MovementConfig.MinMoveMagnitude then
+		return
+	end
+
+	local landingDirection = landingVelocity.Unit
+	local inputDirection = inputMoveDirection.Unit
+	local alignment = landingDirection:Dot(inputDirection)
+	if alignment <= MovementConfig.GroundRunoutOppositeDotThreshold then
+		self._landingRunoutEligible = false
+		return
+	end
+	if alignment < MovementConfig.LandingRunoutSideDot then
+		return
+	end
+
+	local inputDotThreshold = if alignment >= MovementConfig.LandingRunoutForwardDot
+		then MovementConfig.GroundRunoutForwardDotThreshold
+		else MovementConfig.LandingRunoutSideDot
+	self:_startGroundRunout(now, landingDirection, self._landingHorizontalSpeed, inputDotThreshold)
+	self:_clearLandingRecovery(LANDING_MODE_RUNOUT)
+	self._landingInputGraceUntil = NEVER
+	self._slideRequestPending = false
+end
+
 function MovementController:_updateLandingState(now: number, isGrounded: boolean)
 	local rootPart = self._rootPart
 	if not (rootPart and rootPart.Parent) then
@@ -1633,28 +1759,35 @@ function MovementController:_updateLandingState(now: number, isGrounded: boolean
 	end
 
 	local velocity = rootPart.AssemblyLinearVelocity
-	local horizontalSpeed = flattenVelocity(velocity).Magnitude
+	local horizontalVelocity = flattenVelocity(velocity)
+	local horizontalSpeed = horizontalVelocity.Magnitude
 	if isGrounded then
 		if not self._wasGrounded then
 			self._landingImpactSpeed = self._maxAirDownwardSpeed
 			self._landingHorizontalSpeed = math.max(self._maxAirHorizontalSpeed, horizontalSpeed)
+			self._landingHorizontalVelocity = if self._maxAirHorizontalVelocity.Magnitude >= horizontalVelocity.Magnitude
+				then self._maxAirHorizontalVelocity
+				else horizontalVelocity
 			self._landingSerial += 1
 
-			local airControl = MovementConfig.AirControl
-			if self._landingImpactSpeed >= airControl.LandingFrictionBoostMinImpactSpeed
-				or self._landingHorizontalSpeed >= airControl.LandingFrictionBoostMinHorizontalSpeed
-			then
-				self._landingBoostUntil = now + airControl.LandingFrictionBoostDuration
+			local landingMode = self:_getLandingMode(self._landingHorizontalSpeed, self._landingImpactSpeed)
+			if landingMode == LANDING_MODE_NONE then
+				self:_clearLandingRecovery()
 			else
-				self._landingBoostUntil = NEVER
+				self:_beginLandingRecovery(now, landingMode)
 			end
 		end
 
 		self._maxAirDownwardSpeed = 0
 		self._maxAirHorizontalSpeed = 0
+		self._maxAirHorizontalVelocity = Vector3.zero
 	else
 		self._maxAirDownwardSpeed = math.max(self._maxAirDownwardSpeed, math.max(-velocity.Y, 0))
-		self._maxAirHorizontalSpeed = math.max(self._maxAirHorizontalSpeed, horizontalSpeed)
+		if horizontalSpeed >= self._maxAirHorizontalSpeed then
+			self._maxAirHorizontalSpeed = horizontalSpeed
+			self._maxAirHorizontalVelocity = horizontalVelocity
+		end
+		self:_clearLandingRecovery()
 	end
 end
 
@@ -1693,6 +1826,10 @@ function MovementController:_setDebugAttributes(data)
 	character:SetAttribute("Movement_LandingHorizontalSpeed", data.landingHorizontalSpeed)
 	character:SetAttribute("Movement_LandingSerial", data.landingSerial)
 	character:SetAttribute("Movement_LandingBoostActive", data.landingBoostActive)
+	character:SetAttribute("Movement_LandingMode", data.landingMode)
+	character:SetAttribute("Movement_LandingRecoveryAlpha", data.landingRecoveryAlpha)
+	character:SetAttribute("Movement_LandingInputGraceActive", data.landingInputGraceActive)
+	character:SetAttribute("Movement_LandingRunoutEligible", data.landingRunoutEligible)
 	self:_refreshCCLDebug()
 	character:SetAttribute("Movement_CCLActiveController", self._cclActiveController)
 	character:SetAttribute("Movement_CCLAirMoveMaxForce", self._cclAirMoveMaxForce)
@@ -1728,6 +1865,7 @@ function MovementController:_unbindCharacter()
 	self._slideBlockedStartTime = NEVER
 	self._lastSlideEndTime = NEVER
 	self._slideRequestPending = false
+	self._lastSlideRequestTime = NEVER
 	self._lastSlideDirection = Vector3.zero
 	self._lastSlideSpeed = 0
 	self._airCarryDirection = Vector3.zero
@@ -1738,6 +1876,7 @@ function MovementController:_unbindCharacter()
 	self._groundRunoutSpeed = 0
 	self._groundRunoutStartTime = NEVER
 	self._groundRunoutLandingSpeed = 0
+	self._groundRunoutInputDotThreshold = 0
 	self:_clearSlideEntryBurst()
 	self:_clearSlideJumpBurst()
 	self._isGrounded = false
@@ -1759,10 +1898,17 @@ function MovementController:_unbindCharacter()
 	self._airControlForceAirborneUntil = NEVER
 	self._maxAirDownwardSpeed = 0
 	self._maxAirHorizontalSpeed = 0
+	self._maxAirHorizontalVelocity = Vector3.zero
 	self._landingImpactSpeed = 0
 	self._landingHorizontalSpeed = 0
+	self._landingHorizontalVelocity = Vector3.zero
 	self._landingSerial = 0
-	self._landingBoostUntil = NEVER
+	self._landingMode = LANDING_MODE_NONE
+	self._landingRecoveryStartTime = NEVER
+	self._landingRecoveryUntil = NEVER
+	self._landingRecoveryAlpha = 0
+	self._landingInputGraceUntil = NEVER
+	self._landingRunoutEligible = false
 end
 
 function MovementController:_step(dt: number)
@@ -1816,14 +1962,18 @@ function MovementController:_step(dt: number)
 	local sprintIntent = isGrounded and self._sprintHeld and hasInputMove
 
 	if self._slideRequestPending then
-		self._slideRequestPending = false
 		if self:_isGroundRunout() then
 			self:_stopGroundRunout()
 		end
 		if self:_canStartSlide(now, inputMoveDirection, isGrounded, sprintIntent) then
 			self:_startGroundSlide(now, inputMoveDirection)
+			self._slideRequestPending = false
+		elseif now - self._lastSlideRequestTime > MovementConfig.LandingInputGraceTime then
+			self._slideRequestPending = false
 		end
 	end
+
+	self:_tryStartLandingRunout(now, inputMoveDirection, isGrounded)
 
 	self:_updateGroundSlide(now, dt, inputMoveDirection, isGrounded)
 	self:_updateAirCarry(now, dt, inputMoveDirection, isGrounded)
@@ -1832,12 +1982,18 @@ function MovementController:_step(dt: number)
 	local isSliding = self:_isGroundSlide() and isGrounded
 	local isAirCarry = self:_isAirCarry()
 	local isGroundRunout = self:_isGroundRunout()
-	local landingBoostActive = isGrounded
+	local landingRecoveryAlpha = self:_getLandingRecoveryAlpha(now, isGrounded)
+	local landingRecoveryActive = landingRecoveryAlpha ~= nil
 		and not isSliding
 		and not isGroundRunout
 		and not self._airControlActive
-		and now <= self._landingBoostUntil
-	self:_setGroundControllerTuning(isSliding, landingBoostActive)
+	if not landingRecoveryActive then
+		landingRecoveryAlpha = nil
+		if isSliding or isGroundRunout then
+			self._landingRecoveryAlpha = 0
+		end
+	end
+	self:_setGroundControllerTuning(isSliding, landingRecoveryAlpha)
 	local isCrouching = isGrounded
 		and self._crouchHeld
 		and not self._crouchPressConsumedBySlide
@@ -1968,7 +2124,11 @@ function MovementController:_step(dt: number)
 		landingImpactSpeed = self._landingImpactSpeed,
 		landingHorizontalSpeed = self._landingHorizontalSpeed,
 		landingSerial = self._landingSerial,
-		landingBoostActive = landingBoostActive,
+		landingBoostActive = landingRecoveryActive,
+		landingMode = self._landingMode,
+		landingRecoveryAlpha = self._landingRecoveryAlpha,
+		landingInputGraceActive = isGrounded and now <= self._landingInputGraceUntil,
+		landingRunoutEligible = self._landingRunoutEligible,
 	})
 end
 
@@ -1987,6 +2147,9 @@ function MovementController:_handleCrouchAction(_actionName: string, inputState:
 		if not self._crouchHeld then
 			local slideIntent = self._sprintHeld
 			self._slideRequestPending = slideIntent
+			if slideIntent then
+				self._lastSlideRequestTime = os.clock()
+			end
 			self._crouchPressConsumedBySlide = slideIntent
 		end
 		self._crouchHeld = true
@@ -2047,6 +2210,10 @@ function MovementController:_bindCharacter(character: Model)
 	character:SetAttribute("Movement_LandingHorizontalSpeed", 0)
 	character:SetAttribute("Movement_LandingSerial", self._landingSerial)
 	character:SetAttribute("Movement_LandingBoostActive", false)
+	character:SetAttribute("Movement_LandingMode", LANDING_MODE_NONE)
+	character:SetAttribute("Movement_LandingRecoveryAlpha", 0)
+	character:SetAttribute("Movement_LandingInputGraceActive", false)
+	character:SetAttribute("Movement_LandingRunoutEligible", false)
 	character:SetAttribute("Movement_CCLActiveController", self._cclActiveController)
 	character:SetAttribute("Movement_CCLAirMoveMaxForce", self._cclAirMoveMaxForce)
 	character:SetAttribute("Movement_CCLAirMoveSuppressed", false)

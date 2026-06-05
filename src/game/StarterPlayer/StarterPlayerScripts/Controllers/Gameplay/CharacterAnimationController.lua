@@ -110,15 +110,34 @@ local function readCameraShiftLocked(character: Model): boolean
 	return character:GetAttribute("Camera_ShiftLocked") == true
 end
 
-local function getAnimator(humanoid: Humanoid): Animator
-	local animator = humanoid:FindFirstChildOfClass("Animator")
-	if animator then
-		return animator
+local function isServerAnimator(animator: Animator): boolean
+	local attributeName = AnimationConfig.ServerAnimatorAttributeName
+	return typeof(attributeName) ~= "string" or attributeName == "" or animator:GetAttribute(attributeName) == true
+end
+
+local function findServerAnimator(humanoid: Humanoid): Animator?
+	for _, child in ipairs(humanoid:GetChildren()) do
+		if child:IsA("Animator") and isServerAnimator(child) then
+			return child
+		end
 	end
 
-	animator = Instance.new("Animator")
-	animator.Parent = humanoid
-	return animator
+	return nil
+end
+
+local function waitForServerAnimator(humanoid: Humanoid, timeoutSeconds: number): Animator?
+	local deadline = os.clock() + timeoutSeconds
+
+	repeat
+		local animator = findServerAnimator(humanoid)
+		if animator then
+			return animator
+		end
+
+		task.wait()
+	until os.clock() >= deadline or not humanoid.Parent
+
+	return nil
 end
 
 local function disableDefaultAnimate(character: Model)
@@ -180,6 +199,25 @@ local function getTrackWeight(trackName: TrackName): number
 	end
 
 	return 1
+end
+
+local function getReplicationMinimumTrackWeight(): number
+	local weight = AnimationConfig.ReplicationMinimumTrackWeight
+	if typeof(weight) ~= "number" then
+		return 0
+	end
+
+	return math.clamp(weight, 0, 1)
+end
+
+local function getLoopedTrackReplicationWeight(weight: number): number
+	local clampedWeight = math.clamp(weight, 0, 1)
+	local minimumWeight = getReplicationMinimumTrackWeight()
+	if minimumWeight <= 0 then
+		return clampedWeight
+	end
+
+	return math.max(clampedWeight, minimumWeight)
 end
 
 local function isRiskyTrackEnabled(trackName: string): boolean
@@ -256,7 +294,7 @@ end
 
 local function ensureLoopPlaying(track: AnimationTrack)
 	if not track.IsPlaying then
-		track:Play(0, 0, 1)
+		track:Play(0, getLoopedTrackReplicationWeight(0), 1)
 	end
 end
 
@@ -266,7 +304,7 @@ local function setTrackWeight(track: AnimationTrack?, weight: number, fadeTime: 
 	end
 
 	ensureLoopPlaying(track)
-	track:AdjustWeight(math.clamp(weight, 0, 1), fadeTime)
+	track:AdjustWeight(getLoopedTrackReplicationWeight(weight), fadeTime)
 end
 
 function CharacterAnimationController:_stopAllTracks()
@@ -626,7 +664,7 @@ function CharacterAnimationController:_loadTracks(animator: Animator): TrackMap
 		tracks[name] = track
 
 		if LOOPED_TRACKS[name] then
-			track:Play(0, 0, 1)
+			track:Play(0, getLoopedTrackReplicationWeight(0), 1)
 		end
 	end
 
@@ -645,7 +683,11 @@ function CharacterAnimationController:_bindCharacter(character: Model)
 	disableDefaultAnimate(character)
 	self._animateConnection = character.DescendantAdded:Connect(disableIfDefaultAnimate)
 
-	local animator = getAnimator(humanoid)
+	local animator = waitForServerAnimator(humanoid, CHARACTER_LOOKUP_TIMEOUT)
+	if not animator then
+		warn("[CharacterAnimationController] Missing server-created Animator for character:", character:GetFullName())
+		return
+	end
 
 	self._character = character
 	self._rootPart = rootPart

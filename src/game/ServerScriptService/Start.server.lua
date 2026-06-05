@@ -14,7 +14,28 @@ local function shouldLoadService(moduleScript: ModuleScript): boolean
 	return not DISABLED_SERVER_MODULES[moduleScript.Name]
 end
 
+local function callServiceMethod(service, methodName: string)
+	if typeof(service) ~= "table" then
+		return
+	end
+
+	local method = service[methodName]
+	if type(method) ~= "function" then
+		return
+	end
+
+	local ok, err = pcall(function()
+		method(service)
+	end)
+	if not ok then
+		warn(("[Start] %s.%s failed: %s"):format("ReplayService", methodName, tostring(err)))
+	end
+end
+
 local loadedModules = Loader.LoadDescendants(ServerScriptService.Services, shouldLoadService)
+
+callServiceMethod(loadedModules.ReplayService, "Init")
+callServiceMethod(loadedModules.ReplayService, "Start")
 
 Loader.SpawnAll(loadedModules, "OnStart")
 Loader.ConnectFunctions(loadedModules, Players.PlayerAdded, "OnPlayerAdded")

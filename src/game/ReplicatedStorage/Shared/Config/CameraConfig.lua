@@ -2,8 +2,8 @@ return table.freeze({
 	BaseFOV = 70,
 	SprintFOVBonus = 6,
 	AirFOVBonus = 2,
-	SlideJumpFOVBonus = 8,
-	SlideJumpFOVSpeedForMax = 84,
+	SlideJumpFOVBonus = 6,
+	SlideJumpFOVSpeedForMax = 80,
 	FOVResponsiveness = 10,
 
 	ShoulderOffset = Vector3.new(2.25, 0.45, 0),
@@ -45,6 +45,12 @@ return table.freeze({
 	LandingSettleMinSpeed = 55,
 	LandingSettleSpeedForMax = 100,
 	LandingSettleDuration = 0.16,
+	LandingSettleHorizontalMinSpeed = 55,
+	LandingSettleHorizontalSpeedForMax = 100,
+	LandingSettleHorizontalWeight = 0.45,
+	LandingSettleVerticalWeight = 0.55,
+	LandingRunoutSettleDurationScale = 1.25,
+	LandingRunoutSettleIntensityScale = 0.75,
 	LandingSettleMaxFOVDip = 1.25,
 	LandingSettleMaxYOffset = -0.12,
 

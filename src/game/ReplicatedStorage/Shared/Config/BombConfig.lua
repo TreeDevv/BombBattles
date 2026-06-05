@@ -11,7 +11,7 @@ return table.freeze({
 	ProjectileUpwardVelocity = 22,
 	ProjectileGravityScale = 0.52,
 	ProjectileMaxFlightSeconds = 3,
-	SweepRadius = 0.8,
+	SweepRadius = 1.88,
 	VisualSpinRadiansPerSecond = 12,
 	PostImpactVelocityScale = 0.42,
 	PostImpactBounce = 0.28,
@@ -23,6 +23,7 @@ return table.freeze({
 
 	RuntimeBombName = "BasicBomb",
 	RuntimeBombSize = Vector3.new(1.4, 1.4, 1.4),
+	HeldGripOffset = CFrame.new(),
 	ProjectileFolderName = "BombProjectiles",
 	ProjectileLifetimePadding = 0.4,
 

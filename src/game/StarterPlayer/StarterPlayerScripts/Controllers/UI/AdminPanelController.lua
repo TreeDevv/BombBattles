@@ -25,6 +25,7 @@ AdminPanelController._wipeInput = nil :: TextBox?
 AdminPanelController._players = {}
 AdminPanelController._maps = {}
 AdminPanelController._roundState = nil
+AdminPanelController._replayDebugEnabled = false
 AdminPanelController._targetIndex = 1
 AdminPanelController._mapIndex = 1
 AdminPanelController._authorized = false
@@ -196,6 +197,9 @@ function AdminPanelController:_applyState(data)
 	end
 	if typeof(data.round) == "table" then
 		self._roundState = data.round
+	end
+	if typeof(data.replayDebug) == "table" then
+		self._replayDebugEnabled = data.replayDebug.enabled == true
 	end
 
 	self:_updateLabels()
@@ -434,6 +438,9 @@ function AdminPanelController:_buildPanel()
 			mapId = selectedMap and selectedMap.id or nil,
 		})
 	end)
+	self:_addButton(scroller, "Test Kill Feed", function()
+		self:_runCommand("round.testKillFeed", {})
+	end)
 	self:_addButtonRow(scroller, {
 		{ text = "Reset", activated = function() self:_runCommand("round.reset", {}) end },
 		{ text = "Respawn All", activated = function() self:_runCommand("round.respawnAll", {}) end },
@@ -466,6 +473,17 @@ function AdminPanelController:_buildPanel()
 	self:_addButtonRow(scroller, {
 		{ text = "Destroy Red Core", activated = function() self:_runCommand("round.destroyCore", { teamName = "Red" }) end },
 		{ text = "Destroy Blue Core", activated = function() self:_runCommand("round.destroyCore", { teamName = "Blue" }) end },
+	})
+
+	self:_addSection(scroller, "Replay Debug")
+	self:_addLabel(scroller, "Self replay works in Studio; other tools require ReplayDebugEnabled", 22)
+	self:_addButtonRow(scroller, {
+		{ text = "Print Counts", activated = function() self:_runCommand("replay.printCounts", {}) end },
+		{ text = "Print POTG", activated = function() self:_runCommand("replay.printPOTG", {}) end },
+	})
+	self:_addButtonRow(scroller, {
+		{ text = "Self Kill Replay", activated = function() self:_runCommand("replay.testSelfKillReplay", {}) end },
+		{ text = "Test POTG", activated = function() self:_runCommand("replay.testPOTG", {}) end },
 	})
 
 	self:_addSection(scroller, "Player")

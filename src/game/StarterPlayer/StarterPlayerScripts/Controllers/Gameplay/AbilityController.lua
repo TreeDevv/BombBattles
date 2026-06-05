@@ -90,8 +90,13 @@ local function getEquippedAbilityId(slot: string): string
 	return if typeof(slotState) == "table" and typeof(slotState.abilityId) == "string" then slotState.abilityId else ""
 end
 
-local function getClientBehavior(abilityId: string)
-	return AbilityController._behaviors[abilityId]
+local function getClientBehavior(abilityId: string, definition)
+	local behaviorId = AbilityConfig.GetBehaviorId(abilityId)
+	if behaviorId == "" and definition and typeof(definition.id) == "string" then
+		behaviorId = definition.id
+	end
+
+	return AbilityController._behaviors[behaviorId]
 end
 
 local function getServerTime(): number
@@ -187,6 +192,12 @@ function AbilityController:_updateButtons()
 		local remaining = getCooldownRemaining(slotState)
 		local cooldown = if definition and typeof(definition.cooldownSeconds) == "number" then definition.cooldownSeconds else 0
 		local progress = if cooldown > 0 then math.clamp(remaining / cooldown, 0, 1) else 0
+		local icon = button:FindFirstChild("Icon")
+		if icon and (icon:IsA("ImageLabel") or icon:IsA("ImageButton")) then
+			local image = if definition and typeof(definition.icon) == "string" then definition.icon else ""
+			icon.Image = image
+			icon.Visible = image ~= ""
+		end
 
 		button.Active = abilityId ~= "" and remaining <= 0
 		button:SetAttribute("AbilityId", abilityId)
@@ -234,6 +245,10 @@ function AbilityController:_bindEffects()
 
 		local abilityId = payload.abilityId
 		local behavior = if typeof(abilityId) == "string" then self._behaviors[abilityId] else nil
+		if not behavior and typeof(abilityId) == "string" then
+			local definition = AbilityConfig.GetDefinition(abilityId)
+			behavior = getClientBehavior(abilityId, definition)
+		end
 		if behavior and type(behavior.OnEffect) == "function" then
 			local ok, err = pcall(function()
 				behavior.OnEffect({
@@ -301,7 +316,7 @@ function AbilityController:ActivateSlot(slot: string): boolean
 	end
 
 	local definition = AbilityConfig.GetDefinition(abilityId)
-	local behavior = getClientBehavior(abilityId)
+	local behavior = getClientBehavior(abilityId, definition)
 	if behavior and type(behavior.OnActivateRequested) == "function" then
 		local ok, handled = pcall(function()
 			return behavior.OnActivateRequested({

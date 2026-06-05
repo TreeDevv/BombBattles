@@ -6,9 +6,12 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
+local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
+local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
+local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
@@ -22,6 +25,12 @@ local KNOCKBACK_UNTIL_ATTR = "Bomb_KnockbackUntil"
 local KNOCKBACK_MOVEMENT_SUPPRESS_SECONDS = 0.25
 local ATTR = BombConfig.Attributes
 local RESULT_KIND = AbilityResult.Kind
+local DEBUG_REPLAY_EVENTS = false
+local MIN_AIM_HORIZONTAL = 0.08
+local NORMAL_PROJECTILE_PHYSICS = ProjectilePhysics.ResolvePhysicsConfig(
+	BombProjectileConfig.Defaults,
+	BombProjectileConfig.GetBombTypeConfig(BombProjectileConfig.BombType.Normal).physics
+)
 
 type CookState = {
 	holdStartedAt: number,
@@ -56,6 +65,45 @@ local nextProjectileId = 0
 
 local function now(): number
 	return workspace:GetServerTimeNow()
+end
+
+local replayService = nil
+
+local function getReplayService()
+	if replayService then
+		return replayService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local replayModule = services and services:FindFirstChild("ReplayService")
+	if not (replayModule and replayModule:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, replayModule)
+	if ok and typeof(service) == "table" then
+		replayService = service
+		return replayService
+	end
+
+	if DEBUG_REPLAY_EVENTS then
+		warn("[BombService] ReplayService require failed:", service)
+	end
+	return nil
+end
+
+local function recordReplayEvent(eventType: string, payload)
+	local service = getReplayService()
+	if not (service and type(service.RecordEvent) == "function") then
+		return
+	end
+
+	local ok, err = pcall(function()
+		service.RecordEvent(eventType, payload)
+	end)
+	if DEBUG_REPLAY_EVENTS and not ok then
+		warn("[BombService] Replay event failed:", eventType, err)
+	end
 end
 
 local function isStudioBombTeamProtectionBypassEnabled(): boolean
@@ -115,8 +163,18 @@ local function setCookingAttributes(player: Player, cooking: boolean, startedAt:
 	player:SetAttribute(ATTR.CookStartedAt, startedAt or 0)
 end
 
-local function resetPlayerBombs(player: Player)
+local function clearCookState(player: Player)
+	local hadCookState = cookStates[player] ~= nil
 	cookStates[player] = nil
+	if hadCookState then
+		fireEffect("HoldEnd", {
+			player = player,
+		})
+	end
+end
+
+local function resetPlayerBombs(player: Player)
+	clearCookState(player)
 	setBombAttributes(player, BombConfig.MaxBombs, 0)
 	setCookingAttributes(player, false, 0)
 end
@@ -150,21 +208,41 @@ local function getTeamName(player: Player): string?
 	return if typeof(teamName) == "string" and teamName ~= "" then teamName else nil
 end
 
-local function sanitizeAimDirection(direction: any, fallback: Vector3): Vector3
+local function getHorizontalDirection(direction: any): Vector3?
 	if typeof(direction) ~= "Vector3" then
-		return fallback
+		return nil
+	end
+
+	local horizontal = Vector3.new(direction.X, 0, direction.Z)
+	if horizontal.Magnitude <= MIN_AIM_HORIZONTAL then
+		return nil
+	end
+
+	return horizontal.Unit
+end
+
+local function sanitizeAimDirection(direction: any, fallback: Vector3): Vector3
+	local fallbackHorizontal = getHorizontalDirection(fallback) or Vector3.zAxis
+	if typeof(direction) ~= "Vector3" then
+		return fallbackHorizontal
 	end
 	if direction.X ~= direction.X or direction.Y ~= direction.Y or direction.Z ~= direction.Z then
-		return fallback
+		return fallbackHorizontal
 	end
 	if direction.Magnitude < 0.05 or direction.Magnitude > 1.5 then
-		return fallback
+		return fallbackHorizontal
 	end
 
 	local unit = direction.Unit
+	local horizontal = getHorizontalDirection(unit)
+	if not horizontal then
+		horizontal = fallbackHorizontal
+		unit = Vector3.new(horizontal.X, unit.Y, horizontal.Z)
+	end
+
 	unit = Vector3.new(unit.X, math.clamp(unit.Y, BombConfig.MinAimY, BombConfig.MaxAimY), unit.Z)
 	if unit.Magnitude < 0.05 then
-		return fallback
+		return Vector3.new(fallbackHorizontal.X, 0.15, fallbackHorizontal.Z).Unit
 	end
 
 	return unit.Unit
@@ -391,8 +469,10 @@ local function applyOwnerKnockback(owner: Player, origin: Vector3)
 	end
 end
 
-local function damageEnemyPlayers(owner: Player, origin: Vector3)
+local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: string?)
 	local ownerTeam = getTeamName(owner)
+	local hitUserIds = {}
+	local killedUserIds = {}
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player == owner then
@@ -444,15 +524,37 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3)
 			else 1
 
 		if hookResult.skipDamage ~= true and damage > 0 then
+			local healthBefore = humanoid.Health
+			local appliedDamage = math.min(damage, healthBefore)
+			RoundService:RecordPlayerDamage(owner, player, appliedDamage, {
+				sourceType = "Bomb",
+				sourceId = sourceId,
+			})
 			humanoid:TakeDamage(damage)
+			local healthAfter = humanoid.Health
+
+			table.insert(hitUserIds, player.UserId)
+			if healthBefore > 0 and healthAfter <= 0 then
+				table.insert(killedUserIds, player.UserId)
+			end
+			recordReplayEvent("PlayerDamaged", {
+				victimUserId = player.UserId,
+				attackerUserId = owner.UserId,
+				amount = appliedDamage,
+				sourceType = "Bomb",
+				sourceId = sourceId,
+				victimHealthAfter = healthAfter,
+			})
 		end
 		if hookResult.skipKnockback ~= true then
 			applyKnockback(character, rootPart, origin, distance, knockbackMultiplier)
 		end
 	end
+
+	return hitUserIds, killedUserIds
 end
 
-local function damageEnemyAnchors(owner: Player, origin: Vector3)
+local function damageEnemyAnchors(owner: Player, origin: Vector3, sourceId: string?)
 	local ownerTeam = getTeamName(owner)
 	local bypassTeamProtection = isStudioBombTeamProtectionBypassEnabled()
 
@@ -498,7 +600,11 @@ local function damageEnemyAnchors(owner: Player, origin: Vector3)
 				continue
 			end
 
-			RoundService:DamageCore(trackedCore, damage)
+			RoundService:DamageCore(trackedCore, damage, {
+				attackerUserId = owner.UserId,
+				sourceType = "Bomb",
+				sourceId = sourceId,
+			})
 		end
 	end
 end
@@ -553,6 +659,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 	if typeof(explosionResult.owner) == "Instance" and explosionResult.owner:IsA("Player") then
 		owner = explosionResult.owner
 	end
+	local impactTimestamp = workspace:GetServerTimeNow()
 
 	fireEffect("Explode", {
 		player = owner,
@@ -561,25 +668,51 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		source = source,
 		innerRadius = BombConfig.InnerRadius,
 		outerRadius = BombConfig.OuterRadius,
+		terrainRadius = BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius,
 	})
 
-	if not isActivePlayer(owner) then
-		return
+	local hitUserIds = {}
+	local killedUserIds = {}
+
+	if isActivePlayer(owner) then
+		local debrisPayloads = DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius, {
+			sourceType = "Bomb",
+			sourceId = projectileId,
+			bombId = projectileId,
+			ownerUserId = owner.UserId,
+			timestamp = impactTimestamp,
+		})
+		if #debrisPayloads > 0 then
+			fireEffect("TerrainDebris", {
+				payloads = debrisPayloads,
+			})
+		end
+		applyOwnerKnockback(owner, position)
+		hitUserIds, killedUserIds = damageEnemyPlayers(owner, position, projectileId)
+		damageEnemyAnchors(owner, position, projectileId)
 	end
 
-	local debrisPayloads = DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius)
-	if #debrisPayloads > 0 then
-		fireEffect("TerrainDebris", {
-			payloads = debrisPayloads,
-		})
-	end
-	applyOwnerKnockback(owner, position)
-	damageEnemyPlayers(owner, position)
-	damageEnemyAnchors(owner, position)
+	recordReplayEvent("BombExploded", {
+		timestamp = impactTimestamp,
+		bombId = projectileId,
+		sourceId = projectileId,
+		projectileId = projectileId,
+		source = source,
+		sourceType = "Bomb",
+		ownerUserId = owner.UserId,
+		bombType = BombProjectileConfig.BombType.Normal,
+		position = position,
+		innerRadius = BombConfig.InnerRadius,
+		outerRadius = BombConfig.OuterRadius,
+		terrainRadius = BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius,
+		radius = BombConfig.OuterRadius,
+		hitUserIds = hitUserIds,
+		killedUserIds = killedUserIds,
+	})
 end
 
 local function stopCooking(player: Player)
-	cookStates[player] = nil
+	clearCookState(player)
 	setCookingAttributes(player, false, 0)
 end
 
@@ -692,16 +825,10 @@ local function clampVectorMagnitude(vector: Vector3, maxMagnitude: number): Vect
 end
 
 local function getPostImpactVelocity(incomingVelocity: Vector3, normal: Vector3): Vector3
-	if incomingVelocity.Magnitude <= 0.001 then
-		return Vector3.zero
-	end
-
-	local unitNormal = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
-	local normalComponent = unitNormal * incomingVelocity:Dot(unitNormal)
-	local tangentComponent = incomingVelocity - normalComponent
-	local bouncedComponent = -normalComponent * BombConfig.PostImpactBounce
-	local velocity = (tangentComponent + bouncedComponent) * BombConfig.PostImpactVelocityScale
-	return clampVectorMagnitude(velocity, BombConfig.PostImpactMaxSpeed)
+	return clampVectorMagnitude(
+		ProjectilePhysics.GetImpactVelocity(incomingVelocity, normal, NORMAL_PROJECTILE_PHYSICS),
+		BombConfig.PostImpactMaxSpeed
+	)
 end
 
 local function setProjectileAssemblyMotion(projectile: Instance, velocity: Vector3, angularVelocity: Vector3)
@@ -725,6 +852,9 @@ end
 
 local function spawnPhysicalProjectile(state: ProjectileState, position: Vector3, normal: Vector3, incomingVelocity: Vector3): Instance?
 	local projectile, rootPart = preparePhysicalProjectile(state.id, state.owner)
+	projectile:SetAttribute("BombType", BombProjectileConfig.BombType.Normal)
+	projectile:SetAttribute("FuseStartedAt", state.fuseStartedAt)
+	projectile:SetAttribute("FuseEndsAt", state.explodeAt)
 	local unitNormal = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
 	local spawnPosition = position + unitNormal * BombConfig.PostImpactSpawnNormalOffset
 	local spawnCFrame = CFrame.new(spawnPosition)
@@ -742,7 +872,9 @@ local function spawnPhysicalProjectile(state: ProjectileState, position: Vector3
 	if spinAxis.Magnitude <= 0.05 then
 		spinAxis = Vector3.new(0.35, 1, 0.2)
 	end
-	local angularVelocity = spinAxis.Unit * BombConfig.PostImpactAngularSpeed
+	local angularVelocity = if NORMAL_PROJECTILE_PHYSICS.impactResponse == ProjectilePhysics.ImpactResponse.Sandbag
+		then Vector3.zero
+		else spinAxis.Unit * BombConfig.PostImpactAngularSpeed
 	setProjectileAssemblyMotion(projectile, velocity, angularVelocity)
 
 	state.physicalProjectile = projectile
@@ -799,6 +931,21 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 	local fallbackDirection = rootPart.CFrame.LookVector
 	local origin = getThrowOrigin(rootPart)
 	local aimDirection = getAimDirectionFromPayload(targetPayload, fallbackDirection)
+	if BombProjectileService:IsEnabled() then
+		local projectileId = createProjectileId(player)
+		BombProjectileService:Launch({
+			owner = player,
+			projectileId = projectileId,
+			bombType = BombProjectileConfig.BombType.Normal,
+			origin = origin,
+			aimDirection = aimDirection,
+			fuseStartedAt = startedAt,
+			launchedAt = now(),
+			remainingFuse = remainingFuse,
+		})
+		return
+	end
+
 	local trajectory = calculateTrajectory(origin, aimDirection)
 	local launchResult = AbilityService:RunHook("OnBeforeProjectileLaunch", {
 		owner = player,
@@ -838,6 +985,14 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		startedAt = launchTime,
 		fuseStartedAt = startedAt,
 		remainingFuse = remainingFuse,
+	})
+	recordReplayEvent("BombThrown", {
+		bombId = projectileId,
+		ownerUserId = player.UserId,
+		bombType = BombProjectileConfig.BombType.Normal,
+		position = trajectory.origin,
+		velocity = trajectory.initialVelocity,
+		fuseDuration = remainingFuse,
 	})
 
 	task.delay(remainingFuse + BombConfig.ProjectileLifetimePadding, function()
@@ -980,6 +1135,10 @@ local function beginCook(player: Player)
 	}
 	cookStates[player] = state
 	setCookingAttributes(player, false, 0)
+	fireEffect("Hold", {
+		player = player,
+		startedAt = state.holdStartedAt,
+	})
 
 	task.delay(BombConfig.CookDelaySeconds, function()
 		startActiveCook(player, state)
@@ -1084,6 +1243,7 @@ local function disconnectCharacter(player: Player)
 end
 
 local function clearPlayerProjectiles(player: Player)
+	BombProjectileService:ClearPlayerProjectiles(player)
 	for projectileId, state in pairs(activeProjectiles) do
 		if state.owner == player then
 			destroyPhysicalProjectile(state)
@@ -1096,6 +1256,11 @@ function BombService:OnStart()
 	beginRemote = ensureRemote(BEGIN_REMOTE_NAME)
 	releaseRemote = ensureRemote(RELEASE_REMOTE_NAME)
 	effectRemote = ensureRemote(EFFECT_REMOTE_NAME)
+
+	BombProjectileService:SetHandlers({
+		fireEffect = fireEffect,
+		explode = explode,
+	})
 
 	beginRemote.OnServerEvent:Connect(beginCook)
 	releaseRemote.OnServerEvent:Connect(releaseCook)

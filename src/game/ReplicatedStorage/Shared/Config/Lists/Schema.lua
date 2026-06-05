@@ -9,6 +9,19 @@ return {
 		value = 0,
 	},
 
+	OwnedAbilities = {
+		key = "ownedAbilities",
+		value = {},
+	},
+
+	AbilityLoadout = {
+		key = "abilityLoadout",
+		value = {
+			Offensive = "",
+			Defensive = "",
+		},
+	},
+
 	Diagnostics = {
 		key = "diagnostics",
 		value = {},

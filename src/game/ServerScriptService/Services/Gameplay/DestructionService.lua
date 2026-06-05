@@ -1,6 +1,7 @@
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
@@ -14,6 +15,52 @@ local UNSAFE_TAGS = {
 }
 
 local DestructionService = {}
+local replayService = nil
+
+local function getReplayService()
+	if replayService then
+		return replayService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local replayModule = services and services:FindFirstChild("ReplayService")
+	if not (replayModule and replayModule:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, replayModule)
+	if ok and typeof(service) == "table" then
+		replayService = service
+		return replayService
+	end
+	return nil
+end
+
+local function recordMapDestruction(position: Vector3, radius: number, sourceContext, debrisPayloads)
+	local service = getReplayService()
+	if not (service and type(service.RecordMapDestruction) == "function") then
+		return
+	end
+
+	local payload = {
+		position = position,
+		radius = radius,
+	}
+	if typeof(sourceContext) == "table" then
+		payload.timestamp = sourceContext.timestamp
+		payload.sourceType = sourceContext.sourceType
+		payload.sourceId = sourceContext.sourceId
+		payload.bombId = sourceContext.bombId
+		payload.ownerUserId = sourceContext.ownerUserId
+	end
+	if typeof(debrisPayloads) == "table" then
+		payload.debrisPayloads = debrisPayloads
+	end
+
+	pcall(function()
+		service.RecordMapDestruction(payload)
+	end)
+end
 
 local function isStudioBombTeamProtectionBypassEnabled(): boolean
 	if not RunService:IsStudio() then
@@ -98,7 +145,7 @@ function DestructionService:OnStart()
 	VoxManager:setTerrainDebugConfig(DestructionConfig)
 end
 
-function DestructionService:DestroySphere(position: Vector3, radius: number?)
+function DestructionService:DestroySphere(position: Vector3, radius: number?, sourceContext)
 	if typeof(position) ~= "Vector3" then
 		return {}
 	end
@@ -130,6 +177,13 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?)
 	if not ok then
 		warn("[DestructionService] Failed to voxelize explosion:", err)
 		return {}
+	end
+
+	local targetsHit = if typeof(debrisPayloads) == "table" and typeof(debrisPayloads.targetsHit) == "number"
+		then debrisPayloads.targetsHit
+		else #debrisPayloads
+	if targetsHit > 0 then
+		recordMapDestruction(position, destructionRadius, sourceContext, debrisPayloads)
 	end
 
 	return debrisPayloads

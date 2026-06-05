@@ -20,9 +20,11 @@ BottomButtonsController._nativePosition = nil :: UDim2?
 BottomButtonsController._hiddenPosition = nil :: UDim2?
 BottomButtonsController._shown = false
 BottomButtonsController._tween = nil :: Tween?
+BottomButtonsController._spectate = nil :: GuiObject?
+BottomButtonsController._spectateConnection = nil :: RBXScriptConnection?
 
-local function shouldShowButtons(state: string?): boolean
-	return state == RoundStates.Active
+local function shouldShowButtons(state: string?, spectateVisible: boolean): boolean
+	return state == RoundStates.Active and not spectateVisible
 end
 
 local function getHiddenBottomPosition(buttons: GuiObject): UDim2
@@ -41,12 +43,20 @@ function BottomButtonsController:_disconnectAll()
 		connection:Disconnect()
 	end
 	self._connections = {}
+	self:_disconnectHudConnections()
 end
 
 function BottomButtonsController:_cancelTween()
 	if self._tween then
 		self._tween:Cancel()
 		self._tween = nil
+	end
+end
+
+function BottomButtonsController:_disconnectHudConnections()
+	if self._spectateConnection then
+		self._spectateConnection:Disconnect()
+		self._spectateConnection = nil
 	end
 end
 
@@ -85,15 +95,18 @@ end
 
 function BottomButtonsController:_updateVisibility(instant: boolean?)
 	local state = RoundController:GetState()
-	self:_setButtonsVisible(shouldShowButtons(state and state.state), instant)
+	local spectateVisible = self._spectate ~= nil and self._spectate.Visible
+	self:_setButtonsVisible(shouldShowButtons(state and state.state, spectateVisible), instant)
 end
 
 function BottomButtonsController:_bindHud(hud: Instance?)
 	self:_cancelTween()
+	self:_disconnectHudConnections()
 	self._buttons = nil
 	self._nativePosition = nil
 	self._hiddenPosition = nil
 	self._shown = false
+	self._spectate = nil
 
 	if not hud then
 		return
@@ -109,6 +122,14 @@ function BottomButtonsController:_bindHud(hud: Instance?)
 	self._hiddenPosition = getHiddenBottomPosition(buttons)
 	buttons.Position = self._hiddenPosition
 	buttons.Visible = false
+
+	local spectate = hud:FindFirstChild("Spectate")
+	if spectate and spectate:IsA("GuiObject") then
+		self._spectate = spectate
+		self._spectateConnection = spectate:GetPropertyChangedSignal("Visible"):Connect(function()
+			self:_updateVisibility(false)
+		end)
+	end
 
 	self:_updateVisibility(true)
 end

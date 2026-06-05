@@ -11,6 +11,7 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local ROUND_ALIVE_ATTR = "RoundAlive"
 local CAMERA_SPECTATING_ATTR = "Camera_Spectating"
+local KILL_REPLAY_REQUEST_DELAY_SECONDS = 1.25
 local KILL_REPLAY_FALLBACK_SECONDS = 2.75
 local TARGET_CHECK_INTERVAL = 0.2
 local HIDDEN_BOTTOM_MARGIN_SCALE = 0.02
@@ -23,6 +24,7 @@ local CAMERA_FOCUS_HEIGHT = 2.2
 local CAMERA_FOV = 70
 local EMPTY_HEALTH_OFFSET = -0.5
 local FULL_HEALTH_OFFSET = 0.5
+local DEBUG_SPECTATE_REPLAY = RunService:IsStudio()
 
 type HealthBarBinding = {
 	root: Frame,
@@ -66,11 +68,18 @@ SpectateController._localHealthBarTween = nil :: Tween?
 SpectateController._spectating = false
 SpectateController._waitingForKillReplay = false
 SpectateController._deathSerial = 0
+SpectateController._killReplayRequestSerial = 0
 SpectateController._targetSyncSerial = 0
 SpectateController._targetCheckAccumulator = 0
 SpectateController._targetPlayer = nil :: Player?
 SpectateController._transitionTween = nil :: Tween?
 SpectateController._transitionSerial = 0
+
+local function debugSpectateReplay(message: string, ...)
+	if DEBUG_SPECTATE_REPLAY then
+		warn("[SpectateController] " .. message, ...)
+	end
+end
 
 local function getReplayType(payload): string?
 	return if typeof(payload) == "table" and typeof(payload.type) == "string" then payload.type else nil
@@ -407,6 +416,7 @@ function SpectateController:_hideSpectate(instant: boolean?)
 end
 
 function SpectateController:_suspendSpectateForKillReplay()
+	debugSpectateReplay("Suspend spectate for local KillReplay")
 	self._waitingForKillReplay = true
 	self._spectating = false
 	self._targetPlayer = nil
@@ -422,6 +432,7 @@ end
 
 function SpectateController:_handleLocalKillReplayEnded()
 	self._waitingForKillReplay = false
+	debugSpectateReplay("Local KillReplay ended", "spectateAllowed", self:_isSpectateAllowed())
 	if self:_isSpectateAllowed() then
 		self:_showSpectate(true)
 		return
@@ -486,21 +497,78 @@ function SpectateController:_isKillReplayActive(): boolean
 	return typeof(debugInfo) == "table" and debugInfo.replayType == "KillReplay"
 end
 
+function SpectateController:_scheduleKillReplayRequest()
+	local serial = self._deathSerial
+	if self._killReplayRequestSerial == serial then
+		return
+	end
+	self._killReplayRequestSerial = serial
+	debugSpectateReplay("Scheduled KillReplay request", "serial", serial, "delay", KILL_REPLAY_REQUEST_DELAY_SECONDS)
+
+	task.delay(KILL_REPLAY_REQUEST_DELAY_SECONDS, function()
+		if serial ~= self._deathSerial then
+			debugSpectateReplay("KillReplay request skipped; stale serial", "serial", serial, "current", self._deathSerial)
+			return
+		end
+		if not self:_isSpectateAllowed() or self._waitingForKillReplay or self:_isKillReplayActive() then
+			debugSpectateReplay(
+				"KillReplay request skipped",
+				"spectateAllowed",
+				self:_isSpectateAllowed(),
+				"waitingForKillReplay",
+				self._waitingForKillReplay,
+				"killReplayActive",
+				self:_isKillReplayActive()
+			)
+			return
+		end
+		if not (ReplayClient and type(ReplayClient.RequestKillReplay) == "function") then
+			debugSpectateReplay("KillReplay request skipped; ReplayClient request unavailable")
+			return
+		end
+
+		local requested = ReplayClient:RequestKillReplay("DeadNoReplay")
+		debugSpectateReplay("KillReplay request result", requested)
+	end)
+end
+
 function SpectateController:_scheduleFallbackShow()
 	self._deathSerial += 1
 	local serial = self._deathSerial
+	debugSpectateReplay("Scheduled spectate fallback", "serial", serial, "delay", KILL_REPLAY_FALLBACK_SECONDS)
 
 	task.delay(KILL_REPLAY_FALLBACK_SECONDS, function()
 		if serial ~= self._deathSerial then
+			debugSpectateReplay("Fallback skipped; stale serial", "serial", serial, "current", self._deathSerial)
 			return
 		end
 		if self:_isSpectateAllowed() and not self._waitingForKillReplay and not self:_isKillReplayActive() then
+			debugSpectateReplay("Fallback showing spectate")
 			self:_showSpectate(true)
+		else
+			debugSpectateReplay(
+				"Fallback skipped",
+				"spectateAllowed",
+				self:_isSpectateAllowed(),
+				"waitingForKillReplay",
+				self._waitingForKillReplay,
+				"killReplayActive",
+				self:_isKillReplayActive()
+			)
 		end
 	end)
 end
 
 function SpectateController:_handleLocalAliveChanged()
+	debugSpectateReplay(
+		"Local alive changed",
+		"roundAlive",
+		LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR),
+		"killReplayActive",
+		self:_isKillReplayActive(),
+		"spectateAllowed",
+		self:_isSpectateAllowed()
+	)
 	if self:_isKillReplayActive() then
 		self:_suspendSpectateForKillReplay()
 		return
@@ -513,6 +581,7 @@ function SpectateController:_handleLocalAliveChanged()
 		end
 		self:_setLocalHealthBarVisible(true, false)
 		self:_scheduleFallbackShow()
+		self:_scheduleKillReplayRequest()
 		return
 	end
 
@@ -601,19 +670,24 @@ end
 
 function SpectateController:_bindReplaySignals()
 	if not ReplayClient then
+		debugSpectateReplay("ReplayClient unavailable; replay signals not bound")
 		return
 	end
 
 	if ReplayClient.ReplayStarted and type(ReplayClient.ReplayStarted.Connect) == "function" then
 		self:_trackConnection(ReplayClient.ReplayStarted:Connect(function(payload)
+			debugSpectateReplay("ReplayStarted", getReplayType(payload), "victim", tostring(getReplayVictimUserId(payload)))
 			if getReplayType(payload) == "KillReplay" and isLocalKillReplay(payload) then
 				self:_suspendSpectateForKillReplay()
 			end
 		end))
+	else
+		debugSpectateReplay("ReplayStarted signal unavailable")
 	end
 
 	if ReplayClient.ReplayEnded and type(ReplayClient.ReplayEnded.Connect) == "function" then
 		self:_trackConnection(ReplayClient.ReplayEnded:Connect(function(payload)
+			debugSpectateReplay("ReplayEnded", getReplayType(payload), "victim", tostring(getReplayVictimUserId(payload)))
 			if getReplayType(payload) ~= "KillReplay" or not isLocalKillReplay(payload) then
 				return
 			end
@@ -621,6 +695,8 @@ function SpectateController:_bindReplaySignals()
 			self._waitingForKillReplay = false
 			self:_handleLocalKillReplayEnded()
 		end))
+	else
+		debugSpectateReplay("ReplayEnded signal unavailable")
 	end
 end
 

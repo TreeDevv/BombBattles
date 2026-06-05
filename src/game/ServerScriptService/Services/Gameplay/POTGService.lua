@@ -1,6 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local ReplayConstants = require(ReplicatedStorage.Shared.Replay.ReplayConstants)
+local ReplayUtil = require(ReplicatedStorage.Shared.Replay.ReplayUtil)
 
 local POTGService = {}
 
@@ -89,94 +90,13 @@ local function unwrapOptionalSelf(first, second)
 	return first
 end
 
-local function isFiniteNumber(value: any): boolean
-	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
-end
-
-local function getTimestamp(event): number?
-	if typeof(event) ~= "table" then
-		return nil
-	end
-	if isFiniteNumber(event.timestamp) then
-		return event.timestamp
-	end
-	if isFiniteNumber(event.t) then
-		return event.t
-	end
-	return nil
-end
-
-local function getUserId(value: any): number?
-	if not (isFiniteNumber(value) and value > 0) then
-		return nil
-	end
-	return math.floor(value)
-end
-
-local function getSourceId(value: any): string?
-	if typeof(value) == "string" and value ~= "" then
-		return value
-	end
-	if isFiniteNumber(value) then
-		return tostring(value)
-	end
-	return nil
-end
-
-local function getString(value: any): string?
-	return if typeof(value) == "string" and value ~= "" then value else nil
-end
-
-local function getPositionFromEvent(event): Vector3?
-	if typeof(event) ~= "table" then
-		return nil
-	end
-	if typeof(event.position) == "Vector3" then
-		return event.position
-	end
-	if typeof(event.cframe) == "CFrame" then
-		return event.cframe.Position
-	end
-	return nil
-end
-
-local function copyReplayValue(value: any, depth: number): any
-	local valueType = typeof(value)
-	if
-		valueType == "number"
-		or valueType == "string"
-		or valueType == "boolean"
-		or valueType == "Vector3"
-		or valueType == "CFrame"
-	then
-		return value
-	end
-
-	if valueType ~= "table" or depth >= 3 then
-		return nil
-	end
-
-	local copy = {}
-	for key, child in pairs(value) do
-		local keyType = typeof(key)
-		if keyType ~= "string" and keyType ~= "number" then
-			continue
-		end
-
-		local copiedChild = copyReplayValue(child, depth + 1)
-		if copiedChild ~= nil then
-			copy[key] = copiedChild
-		end
-	end
-	return copy
-end
-
-local function copyReplayEvent(event)
-	if typeof(event) ~= "table" then
-		return nil
-	end
-	return copyReplayValue(event, 0)
-end
+local isFiniteNumber = ReplayUtil.IsFiniteNumber
+local getTimestamp = ReplayUtil.GetTimestamp
+local getUserId = ReplayUtil.GetUserId
+local getSourceId = ReplayUtil.GetSourceId
+local getString = ReplayUtil.GetString
+local getPositionFromEvent = ReplayUtil.GetPositionFromEvent
+local copyReplayEvent = ReplayUtil.CopyReplayEvent
 
 local function containsText(value: any, needle: string): boolean
 	if typeof(value) ~= "string" then

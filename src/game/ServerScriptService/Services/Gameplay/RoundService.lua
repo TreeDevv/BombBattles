@@ -8,6 +8,7 @@ local Teams = game:GetService("Teams")
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
+local DataService = require(ServerScriptService.Services.DataService)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 
 local TEAM_ORDER = { RoundConfig.Teams.Red.name, RoundConfig.Teams.Blue.name }
@@ -22,7 +23,9 @@ local ROUND_RESPAWN_ENDS_AT_ATTR = "RoundRespawnEndsAt"
 local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
 local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
 local ASSIST_WINDOW_SECONDS = 10
+local CASH_KEY = "cash"
 local DEBUG_REPLAY_EVENTS = false
+local DEBUG_DEATH_FLOW = RunService:IsStudio()
 
 local VALID_PREFERRED_INPUT = {
 	KeyboardAndMouse = true,
@@ -36,6 +39,9 @@ type MapConfig = {
 	id: string,
 	displayName: string,
 }
+
+local getConfiguredMap: (string) -> MapConfig?
+local getTrackedTeamName: (Player) -> string?
 
 local RoundService = {}
 
@@ -61,11 +67,19 @@ local lobbyCharacterConnections: { [Player]: { RBXScriptConnection } } = {}
 local respawnTokens: { [Player]: number } = {}
 local teamCoreInstances: { [string]: { Instance } } = {}
 local coreConnections: { [Instance]: { RBXScriptConnection } } = {}
-local scoreboardStats: { [string]: { damage: number, eliminations: number, assists: number, deaths: number } } = {}
+local scoreboardStats: { [string]: { damage: number, eliminations: number, assists: number, deaths: number, destruction: number } } =
+	{}
 local scoreboardPlatforms: { [string]: string } = {}
+local rewardedRoundIds: { [number]: boolean } = {}
 local recentDamageContributors: { [string]: { [string]: { damagedAt: number, teamName: string?, sourceType: string?, sourceId: string? } } } =
 	{}
 local rng = Random.new()
+
+local function debugDeathFlow(message: string, ...)
+	if DEBUG_DEATH_FLOW then
+		warn("[DeathFlow] " .. message, ...)
+	end
+end
 
 local function deepCopy(value: any): any
 	if typeof(value) ~= "table" then
@@ -128,6 +142,7 @@ local function buildInitialState()
 		voteCounts = {},
 		scoreboardStats = {},
 		scoreboardPlatforms = {},
+		roundResults = {},
 	}
 end
 
@@ -228,15 +243,69 @@ end
 local function recordReplayEvent(eventType: string, payload)
 	local service = getReplayService()
 	if not (service and type(service.RecordEvent) == "function") then
+		if eventType == "PlayerKilled" then
+			debugDeathFlow("Replay event skipped; ReplayService.RecordEvent unavailable", payload)
+		end
 		return
 	end
 
+	if eventType == "PlayerKilled" then
+		debugDeathFlow("Recording PlayerKilled replay event", payload)
+	end
+
+	local recorded = nil
 	local ok, err = pcall(function()
-		service.RecordEvent(eventType, payload)
+		recorded = service.RecordEvent(eventType, payload)
 	end)
 	if DEBUG_REPLAY_EVENTS and not ok then
 		warn("[RoundService] Replay event failed:", eventType, err)
+	elseif eventType == "PlayerKilled" then
+		debugDeathFlow("ReplayService.RecordEvent returned", "pcall", ok, "recorded", recorded, "err", err)
 	end
+end
+
+local worldTextService = nil
+
+local function getWorldTextService()
+	if worldTextService then
+		return worldTextService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local worldTextModule = services and services:FindFirstChild("WorldTextService")
+	if not (worldTextModule and worldTextModule:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, worldTextModule)
+	if ok and typeof(service) == "table" then
+		worldTextService = service
+		return worldTextService
+	end
+
+	return nil
+end
+
+local function sendWorldText(methodName: string, ...)
+	local service = getWorldTextService()
+	if not service then
+		return
+	end
+
+	local method = service[methodName]
+	if type(method) ~= "function" then
+		return
+	end
+
+	pcall(function(...)
+		method(...)
+	end, ...)
+end
+
+local function getPlayerRootPosition(player: Player): Vector3?
+	local character = player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	return if rootPart and rootPart:IsA("BasePart") then rootPart.Position else nil
 end
 
 local function setReplayPerformanceCritical(isCritical: boolean)
@@ -331,9 +400,15 @@ local function getScoreboardStatsFor(playerOrUserId: Player | number | string)
 			eliminations = 0,
 			assists = 0,
 			deaths = 0,
+			destruction = 0,
 		}
 		scoreboardStats[key] = stats
 	end
+	stats.damage = tonumber(stats.damage) or 0
+	stats.eliminations = tonumber(stats.eliminations) or 0
+	stats.assists = tonumber(stats.assists) or 0
+	stats.deaths = tonumber(stats.deaths) or 0
+	stats.destruction = tonumber(stats.destruction) or 0
 
 	return stats
 end
@@ -350,6 +425,111 @@ local function resetScoreboardStats()
 	scoreboardStats = {}
 	recentDamageContributors = {}
 	syncScoreboardStats()
+end
+
+local function getRewardConfig()
+	return RoundConfig.Rewards or {}
+end
+
+local function getMapDisplayName(mapId: string): string
+	local mapConfig = getConfiguredMap(mapId)
+	if mapConfig and typeof(mapConfig.displayName) == "string" and mapConfig.displayName ~= "" then
+		return mapConfig.displayName
+	end
+
+	return mapId
+end
+
+local function roundNonNegative(value: any): number
+	local numberValue = tonumber(value) or 0
+	if numberValue ~= numberValue or numberValue < 0 then
+		return 0
+	end
+
+	return math.floor(numberValue + 0.5)
+end
+
+local function calculateReward(stats, winnerTeam: string, playerTeam: string?)
+	local rewards = getRewardConfig()
+	local damage = roundNonNegative(stats and stats.damage)
+	local eliminations = roundNonNegative(stats and stats.eliminations)
+	local destruction = roundNonNegative(stats and stats.destruction)
+	local baseCoins = roundNonNegative(rewards.ParticipationCoins)
+
+	if winnerTeam ~= "Draw" and playerTeam == winnerTeam then
+		baseCoins += roundNonNegative(rewards.WinCoins)
+	end
+
+	baseCoins += eliminations * roundNonNegative(rewards.EliminationCoins)
+	baseCoins += math.floor(damage / 100) * roundNonNegative(rewards.DamageCoinsPer100)
+	baseCoins += destruction * roundNonNegative(rewards.DestructionCoinsPerTarget)
+
+	local vipBonusMultiplier = tonumber(rewards.VipBonusMultiplier) or 0
+	local vipBonusCoins = if vipBonusMultiplier > 0 then math.floor(baseCoins * vipBonusMultiplier + 0.5) else 0
+
+	return {
+		baseCoins = baseCoins,
+		vipBonusCoins = vipBonusCoins,
+		totalCoins = baseCoins + vipBonusCoins,
+	}
+end
+
+local function buildRoundResults(winnerTeam: string)
+	local selectedMapId = if gameReplica and typeof(gameReplica.Data.selectedMapId) == "string"
+		then gameReplica.Data.selectedMapId
+		else ""
+	local results = {
+		roundId = roundId,
+		winnerTeam = winnerTeam,
+		selectedMapId = selectedMapId,
+		mapDisplayName = getMapDisplayName(selectedMapId),
+		players = {},
+	}
+
+	for player in pairs(roundPlayers) do
+		if player.Parent == Players then
+			local playerKey = getPlayerKey(player)
+			local playerTeam = getTrackedTeamName(player)
+			local stats = deepCopy(getScoreboardStatsFor(player))
+			local platform = scoreboardPlatforms[playerKey]
+
+			table.insert(results.players, {
+				userId = player.UserId,
+				name = player.Name,
+				displayName = player.DisplayName,
+				teamName = playerTeam or "",
+				platform = if typeof(platform) == "string" then platform else "KeyboardAndMouse",
+				stats = stats,
+				rewards = calculateReward(stats, winnerTeam, playerTeam),
+			})
+		end
+	end
+
+	return results
+end
+
+local function awardRoundResults(results)
+	if rewardedRoundIds[results.roundId] then
+		return
+	end
+	rewardedRoundIds[results.roundId] = true
+
+	for _, playerResult in ipairs(results.players) do
+		local player = Players:GetPlayerByUserId(playerResult.userId)
+		local rewards = playerResult.rewards
+		local totalCoins = if typeof(rewards) == "table" then roundNonNegative(rewards.totalCoins) else 0
+		if player and totalCoins > 0 then
+			DataService:Set(player, CASH_KEY, function(currentValue)
+				return roundNonNegative(currentValue) + totalCoins
+			end)
+		end
+	end
+end
+
+local function publishRoundResults(winnerTeam: string)
+	local results = buildRoundResults(winnerTeam)
+	awardRoundResults(results)
+	setReplicaValue({ "roundResults" }, deepCopy(results))
 end
 
 local function clearRecentDamageFor(player: Player)
@@ -370,7 +550,7 @@ local function removePlayerScoreboardState(player: Player)
 	syncScoreboardPlatforms()
 end
 
-local function getTrackedTeamName(player: Player): string?
+getTrackedTeamName = function(player: Player): string?
 	local trackedTeam = playerTeams[player]
 	if trackedTeam then
 		return trackedTeam
@@ -449,6 +629,7 @@ local function creditScoreboardDeath(victim: Player)
 	local eliminatorKey: string? = nil
 	local eliminatorDamagedAt = -math.huge
 	local eliminatorContributor = nil
+	local eliminatorPlayer: Player? = nil
 
 	if contributors then
 		for attackerKey, contributor in pairs(contributors) do
@@ -461,6 +642,7 @@ local function creditScoreboardDeath(victim: Player)
 
 		if eliminatorKey then
 			getScoreboardStatsFor(eliminatorKey).eliminations += 1
+			eliminatorPlayer = getPlayerByKey(eliminatorKey)
 			fireKillFeedElimination(eliminatorKey, victim)
 		end
 
@@ -471,11 +653,24 @@ local function creditScoreboardDeath(victim: Player)
 		end
 	end
 
-	recordReplayEvent("PlayerKilled", {
+	local playerKilledPayload = {
+		timestamp = currentTime,
+		roundId = roundId,
 		victimUserId = victim.UserId,
 		killerUserId = if eliminatorKey then tonumber(eliminatorKey) else nil,
 		sourceType = if eliminatorContributor then eliminatorContributor.sourceType else nil,
 		sourceId = if eliminatorContributor then eliminatorContributor.sourceId else nil,
+	}
+	local deathPosition = getPlayerRootPosition(victim)
+	if deathPosition then
+		playerKilledPayload.position = deathPosition
+	end
+	debugDeathFlow("PlayerKilled payload built", playerKilledPayload)
+	recordReplayEvent("PlayerKilled", playerKilledPayload)
+	sendWorldText("PlayerKilled", eliminatorPlayer, victim, deathPosition, {
+		roundId = roundId,
+		sourceType = playerKilledPayload.sourceType,
+		sourceId = playerKilledPayload.sourceId,
 	})
 
 	clearRecentDamageFor(victim)
@@ -532,7 +727,7 @@ local function getMapTemplate(mapId: string): Model?
 	return template
 end
 
-local function getConfiguredMap(mapId: string): MapConfig?
+getConfiguredMap = function(mapId: string): MapConfig?
 	for _, mapConfig in ipairs(RoundConfig.Maps) do
 		if mapConfig.id == mapId then
 			return mapConfig
@@ -959,9 +1154,11 @@ end
 
 local function eliminatePlayer(player: Player)
 	if not alivePlayers[player] then
+		debugDeathFlow("eliminatePlayer ignored; player not alive", player.Name)
 		return
 	end
 
+	debugDeathFlow("Eliminating player", player.Name, "team", tostring(playerTeams[player]), "roundId", roundId)
 	cancelScheduledRespawn(player)
 	alivePlayers[player] = nil
 	player:SetAttribute(ROUND_ALIVE_ATTR, false)
@@ -971,26 +1168,46 @@ local function eliminatePlayer(player: Player)
 end
 
 local function respawnPlayerInRound(player: Player)
+	debugDeathFlow("Scheduling round respawn", player.Name, "delay", RoundConfig.RespawnSeconds, "roundId", roundId)
 	clearRecentDamageFor(player)
-	player:SetAttribute(ROUND_ALIVE_ATTR, true)
+	player:SetAttribute(ROUND_ALIVE_ATTR, false)
 	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, workspace:GetServerTimeNow() + RoundConfig.RespawnSeconds)
 	destroyPlayerCharacter(player)
 
 	local token = bumpRespawnToken(player)
 	task.delay(RoundConfig.RespawnSeconds, function()
 		if respawnTokens[player] ~= token then
+			debugDeathFlow("Round respawn skipped; stale token", player.Name, token, respawnTokens[player])
 			return
 		end
 		if player.Parent ~= Players then
+			debugDeathFlow("Round respawn skipped; player left", player.Name)
 			return
 		end
 		if currentState ~= RoundStates.Active or not roundPlayers[player] or alivePlayers[player] ~= true then
+			debugDeathFlow(
+				"Round respawn skipped; state changed",
+				player.Name,
+				"state",
+				currentState,
+				"roundPlayer",
+				roundPlayers[player],
+				"alive",
+				alivePlayers[player]
+			)
 			return
 		end
-		if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+		if player:GetAttribute(ROUND_ALIVE_ATTR) ~= false then
+			debugDeathFlow(
+				"Round respawn skipped; RoundAlive attr changed before respawn",
+				player.Name,
+				player:GetAttribute(ROUND_ALIVE_ATTR)
+			)
 			return
 		end
 
+		debugDeathFlow("Loading round respawn character", player.Name)
+		player:SetAttribute(ROUND_ALIVE_ATTR, true)
 		player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 		player:LoadCharacter()
 	end)
@@ -998,9 +1215,18 @@ end
 
 local function handlePlayerDeath(player: Player)
 	if not alivePlayers[player] then
+		debugDeathFlow("handlePlayerDeath ignored; player not alive", player.Name)
 		return
 	end
 
+	debugDeathFlow(
+		"Handling player death",
+		player.Name,
+		"team",
+		tostring(playerTeams[player]),
+		"hasRespawns",
+		teamHasRespawns(playerTeams[player])
+	)
 	creditScoreboardDeath(player)
 
 	if teamHasRespawns(playerTeams[player]) then
@@ -1022,6 +1248,7 @@ local function bindCharacter(player: Player)
 
 		table.insert(characterConnections[player], humanoid.Died:Connect(function()
 			if currentState == RoundStates.Active then
+				debugDeathFlow("Humanoid.Died", player.Name, "roundId", roundId, "health", humanoid.Health)
 				handlePlayerDeath(player)
 			end
 		end))
@@ -1209,6 +1436,7 @@ local function createNewRound()
 	resetScoreboardStats()
 	setReplicaValue({ "roundId" }, roundId)
 	setReplicaValue({ "selectedMapId" }, "")
+	setReplicaValue({ "roundResults" }, {})
 	setWinner("")
 	syncAliveCounts()
 	syncCoreState()
@@ -1231,6 +1459,7 @@ end
 local function endRound(winnerTeam: string)
 	local resetStartedAt = os.clock()
 	setWinner(winnerTeam)
+	publishRoundResults(winnerTeam)
 	setState(RoundStates.RoundEnding, if winnerTeam == "Draw" then "Draw" else winnerTeam .. " wins", RoundConfig.ResetSeconds)
 	playRoundEndPOTG()
 	local remainingResetSeconds = math.max(RoundConfig.ResetSeconds - (os.clock() - resetStartedAt), 0)
@@ -1279,6 +1508,7 @@ local function resetRound()
 	clearAllRoundTracking()
 	resetScoreboardStats()
 	setReplicaValue({ "selectedMapId" }, "")
+	setReplicaValue({ "roundResults" }, {})
 	setVotingOpen(false)
 	syncVoteChoices()
 	syncAliveCounts()
@@ -1454,6 +1684,27 @@ function RoundService:RecordPlayerDamage(attacker: Player, target: Player, damag
 	syncScoreboardStats()
 end
 
+function RoundService:RecordMapDestruction(sourceContext, targetsHit: number)
+	if currentState ~= RoundStates.Active then
+		return
+	end
+	if typeof(sourceContext) ~= "table" or typeof(sourceContext.ownerUserId) ~= "number" then
+		return
+	end
+	if typeof(targetsHit) ~= "number" or targetsHit <= 0 then
+		return
+	end
+
+	local player = Players:GetPlayerByUserId(sourceContext.ownerUserId)
+	if not (player and player.Parent == Players and roundPlayers[player]) then
+		return
+	end
+
+	local stats = getScoreboardStatsFor(player)
+	stats.destruction += roundNonNegative(targetsHit)
+	syncScoreboardStats()
+end
+
 function RoundService:ReportPreferredInput(player: Player, preferredInput: any)
 	if not (player and player.Parent == Players) then
 		return
@@ -1473,6 +1724,9 @@ end
 
 function RoundService:OnStart()
 	Players.CharacterAutoLoads = false
+	DestructionService:SetScoreRecorder(function(sourceContext, targetsHit)
+		RoundService:RecordMapDestruction(sourceContext, targetsHit)
+	end)
 	createGameReplica()
 	submitMapVoteRemote = ensureVoteRemote()
 	submitMapVoteRemote.OnServerEvent:Connect(onSubmitMapVote)

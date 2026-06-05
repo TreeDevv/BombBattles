@@ -14,6 +14,7 @@ local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debr
 
 local LocalPlayer = Players.LocalPlayer
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
+local CameraController = require(script.Parent:WaitForChild("CameraController"))
 local REMOTES_FOLDER_NAME = "Remotes"
 local BEGIN_REMOTE_NAME = "BeginBombCook"
 local RELEASE_REMOTE_NAME = "ReleaseBombCook"
@@ -38,12 +39,19 @@ local AIR_CONTROL_LAUNCH_SOURCE_ATTR = "AirControl_LaunchSource"
 local AIR_CONTROL_LAUNCH_SERIAL_ATTR = "AirControl_LaunchSerial"
 local AIR_CONTROL_LAUNCHED_AT_ATTR = "AirControl_LaunchedAt"
 local AIR_CONTROL_EXPLOSIVE_MIN_AIR_TIME = 0.4
+local HIT_FLASH_HIGHLIGHT_NAME = "BombHitFlash"
+local HIT_FLASH_COLOR = Color3.fromRGB(255, 55, 55)
+local HIT_FLASH_FILL_TRANSPARENCY = 0.28
+local HIT_FLASH_OUTLINE_TRANSPARENCY = 0.05
+local HIT_FLASH_FADE_SECONDS = 0.26
+local HIT_FLASH_CLEANUP_SECONDS = 0.6
 local MIN_AIM_HORIZONTAL = 0.08
 local ATTR = BombConfig.Attributes
 
 local BombController = {}
 BombController.HoldStarted = Signal.new()
 BombController.HoldReleased = Signal.new()
+BombController.ThrowReleased = Signal.new()
 
 BombController._beginRemote = nil :: RemoteEvent?
 BombController._releaseRemote = nil :: RemoteEvent?
@@ -876,6 +884,8 @@ function BombController:_fireReleaseFromAnimation()
 			self._releaseRemote:FireServer(getAimDirection())
 		end
 	end
+	self.ThrowReleased:Fire()
+	CameraController:PlayBombThrowPunch()
 
 	self:_clearBombAnimationState()
 end
@@ -1282,6 +1292,17 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 	return true
 end
 
+function BombController:_retryTransferProjectilePulseToPhysical(projectileId: string, physicalProjectile: any)
+	task.delay(0.08, function()
+		local visual = self._projectileVisuals[projectileId]
+		if not visual or not visual.ownsInstance then
+			return
+		end
+
+		self:_transferProjectilePulseToPhysical(projectileId, physicalProjectile)
+	end)
+end
+
 function BombController:_createProjectileVisual(projectileId: string)
 	local instance, rootPart = createBombVisualInstance()
 
@@ -1526,6 +1547,13 @@ function BombController:_handleProjectileSnapshot(payload)
 		end
 	end
 
+	if payload.physicalProjectile then
+		if self:_transferProjectilePulseToPhysical(projectileId, payload.physicalProjectile) then
+			return
+		end
+		self:_retryTransferProjectilePulseToPhysical(projectileId, payload.physicalProjectile)
+	end
+
 	visual.customProjectile = true
 	visual.targetPosition = payload.position
 	visual.targetVelocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else Vector3.zero
@@ -1576,6 +1604,14 @@ function BombController:_handleProjectileImpact(payload)
 	local projectileId = payload.projectileId
 	if typeof(projectileId) == "string" then
 		if payload.customProjectile == true then
+			if payload.physicalProjectile then
+				if self:_transferProjectilePulseToPhysical(projectileId, payload.physicalProjectile) then
+					self:_playImpactEffect(payload.position)
+					return
+				end
+				self:_retryTransferProjectilePulseToPhysical(projectileId, payload.physicalProjectile)
+			end
+
 			local visual = self._projectileVisuals[projectileId]
 			if visual then
 				local projectilePosition = if typeof(payload.projectilePosition) == "Vector3"
@@ -1625,6 +1661,66 @@ local function getPayloadPlayer(payload): Player?
 	return if typeof(player) == "Instance" and player:IsA("Player") then player else nil
 end
 
+local function getPlayerByUserId(userId: any): Player?
+	if typeof(userId) ~= "number" then
+		return nil
+	end
+
+	return Players:GetPlayerByUserId(userId)
+end
+
+function BombController:_playHitFlashForPlayer(player: Player)
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local existing = character:FindFirstChild(HIT_FLASH_HIGHLIGHT_NAME)
+	if existing then
+		existing:Destroy()
+	end
+
+	local highlight = Instance.new("Highlight")
+	highlight.Name = HIT_FLASH_HIGHLIGHT_NAME
+	highlight.Adornee = character
+	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+	highlight.FillColor = HIT_FLASH_COLOR
+	highlight.OutlineColor = HIT_FLASH_COLOR
+	highlight.FillTransparency = HIT_FLASH_FILL_TRANSPARENCY
+	highlight.OutlineTransparency = HIT_FLASH_OUTLINE_TRANSPARENCY
+	highlight.Parent = character
+
+	local tween = TweenService:Create(highlight, TweenInfo.new(HIT_FLASH_FADE_SECONDS, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		FillTransparency = 1,
+		OutlineTransparency = 1,
+	})
+	tween.Completed:Connect(function()
+		if highlight.Parent then
+			highlight:Destroy()
+		end
+	end)
+	tween:Play()
+
+	task.delay(HIT_FLASH_CLEANUP_SECONDS, function()
+		if highlight.Parent then
+			highlight:Destroy()
+		end
+	end)
+end
+
+function BombController:_playHitFlashes(hitUserIds)
+	if typeof(hitUserIds) ~= "table" then
+		return
+	end
+
+	for _, userId in ipairs(hitUserIds) do
+		local player = getPlayerByUserId(userId)
+		if player then
+			self:_playHitFlashForPlayer(player)
+		end
+	end
+end
+
 function BombController:_bindEffects()
 	if self._effectConnection then
 		self._effectConnection:Disconnect()
@@ -1662,6 +1758,11 @@ function BombController:_bindEffects()
 			if payload.player == LocalPlayer then
 				applyOwnerClientExplosionLaunch(payload.position)
 			end
+			CameraController:PlayExplosionShake(
+				payload.position,
+				if typeof(payload.outerRadius) == "number" then payload.outerRadius else BombConfig.OuterRadius
+			)
+			self:_playHitFlashes(payload.hitUserIds)
 			self:_playExplosionEffect(payload.position)
 		elseif effectName == "TerrainDebris" and typeof(payload) == "table" then
 			self:_playTerrainDebris(payload.payloads)

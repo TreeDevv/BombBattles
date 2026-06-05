@@ -1,15 +1,35 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local SoundService = game:GetService("SoundService")
-local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
+local EventTextPresenter = require(ReplicatedStorage.Shared.Effects.EventTextPresenter)
 local ReplayMapSimulator = require(script.Parent:WaitForChild("ReplayMapSimulator"))
+local ReplayAssets = require(script.Parent:WaitForChild("ReplayAssets"))
+local ReplayOverlay = require(script.Parent:WaitForChild("ReplayOverlay"))
+local ReplayRemoteBinder = require(script.Parent:WaitForChild("ReplayRemoteBinder"))
+local ReplayCameraController = require(script.Parent:WaitForChild("ReplayCameraController"))
+local ReplayStateBuilder = require(script.Parent:WaitForChild("ReplayStateBuilder"))
+local ReplayVisualFactory = require(script.Parent:WaitForChild("ReplayVisualFactory"))
+local ReplayAvatarFactory = require(script.Parent:WaitForChild("ReplayAvatarFactory"))
+local KillEffectController = nil
 local ReplayAnimationDriver = nil
+
+do
+	local controllersFolder = script.Parent.Parent
+	local killEffectModule = controllersFolder and controllersFolder:FindFirstChild("KillEffectController")
+	if killEffectModule and killEffectModule:IsA("ModuleScript") then
+		local ok, loadedKillEffectController = pcall(require, killEffectModule)
+		if ok then
+			KillEffectController = loadedKillEffectController
+		else
+			warn("[ReplayClient] Failed to require KillEffectController: " .. tostring(loadedKillEffectController))
+		end
+	end
+end
 
 do
 	local driverModule = script.Parent:WaitForChild("ReplayAnimationDriver", 10)
@@ -46,7 +66,6 @@ local MAX_REPLAY_OBJECTS = 720
 local MAX_EVENT_VISUALS = 160
 local MAX_EVENTS_PER_STEP = 12
 local EXPLOSION_VFX_CLEANUP_SECONDS = 8
-local TEXT_MARKER_LIFETIME = 1.1
 local BURST_MARKER_LIFETIME = 0.45
 local CAMERA_SMOOTH_RESPONSIVENESS = 8
 local CAMERA_DEFAULT_FOV = 72
@@ -61,12 +80,14 @@ local ANIMATION_STATE_SEND_RATE = 15
 local ANIMATION_STATE_SEND_INTERVAL = 1 / ANIMATION_STATE_SEND_RATE
 local MAX_ANIMATION_LINEAR_SPEED = 220
 local MAX_AVATAR_TEMPLATE_CACHE = 32
+local REPLAY_AVATAR_PRELOAD_TIMEOUT_SECONDS = 1.5
 local MAX_REPLAY_POSE_JOINTS = 32
 local MIN_REPLAY_CAMERA_FOV = 20
 local MAX_REPLAY_CAMERA_FOV = 120
 local DEBUG_REPLAY_ANIMATION = false
 local DEBUG_REPLAY_POSE_JOINTS = false
 local DEBUG_REPLAY_TIMING = false
+local DEBUG_REPLAY_CLIENT = RunService:IsStudio()
 local DEBUG_REPLAY_TIMING_INTERVAL = 0.5
 local EVENT_PHASE_PRE_IMPACT = "PreImpact"
 local EVENT_PHASE_IMPACT = "Impact"
@@ -79,11 +100,6 @@ local POST_IMPACT_EVENT_TYPES = table.freeze({
 
 local getReplayState
 local getPlayerDisplayName
-local avatarTemplateCache = {}
-local avatarTemplateOrder = {}
-local replayEmitModule = nil
-local replayEmitModuleInitialized = false
-local warnedMissingReplayEmitModule = false
 local replayAnimationDriverFailureLoggedByUserId = {}
 
 local function isFiniteNumber(value: any): boolean
@@ -121,57 +137,8 @@ local function getModelRigType(model: Model?): Enum.HumanoidRigType?
 	return if humanoid then humanoid.RigType else nil
 end
 
-local function isR6ReplayModel(model: Model?): boolean
-	return getModelRigType(model) == Enum.HumanoidRigType.R6
-end
-
-local function destroyIfInvalidReplayAvatar(model: any, userId: number, sourceName: string): Model?
-	if not (model and typeof(model) == "Instance" and model:IsA("Model")) then
-		return nil
-	end
-	if isR6ReplayModel(model) then
-		return model
-	end
-
-	if DEBUG_REPLAY_ANIMATION then
-		warn(
-			("[ReplayClient] Ignoring non-R6 replay avatar user=%s source=%s rigType=%s"):format(
-				tostring(userId),
-				sourceName,
-				tostring(getModelRigType(model))
-			)
-		)
-	end
-	model:Destroy()
-	return nil
-end
-
 local function getReplayConstants()
-	local sharedFolder = ReplicatedStorage:WaitForChild("Shared", 10)
-	if not sharedFolder then
-		warn("[ReplayClient] Missing ReplicatedStorage.Shared")
-		return nil
-	end
-
-	local replayFolder = sharedFolder:WaitForChild("Replay", 10)
-	if not replayFolder then
-		warn("[ReplayClient] Missing ReplicatedStorage.Shared.Replay")
-		return nil
-	end
-
-	local constantsModule = replayFolder:WaitForChild("ReplayConstants", 10)
-	if not (constantsModule and constantsModule:IsA("ModuleScript")) then
-		warn("[ReplayClient] Missing ReplayConstants")
-		return nil
-	end
-
-	local ok, constants = pcall(require, constantsModule)
-	if not ok then
-		warn("[ReplayClient] Failed to require ReplayConstants: " .. tostring(constants))
-		return nil
-	end
-
-	return constants
+	return ReplayAssets.GetReplayConstants()
 end
 
 local function getSnapshotCFrame(snapshot): CFrame?
@@ -188,7 +155,7 @@ local function getSnapshotCFrame(snapshot): CFrame?
 end
 
 local function getUserIdKey(value: any): string?
-	if not (isFiniteNumber(value) and value > 0) then
+	if not isFiniteNumber(value) then
 		return nil
 	end
 	return tostring(math.floor(value))
@@ -367,151 +334,43 @@ local function buildLocalAnimationStatePayload()
 end
 
 local function getReplayAssetsFolder(): Folder?
-	local folder = ReplicatedStorage:FindFirstChild(REPLAY_ASSETS_FOLDER_NAME)
-	return if folder and folder:IsA("Folder") then folder else nil
+	return ReplayAssets.GetReplayAssetsFolder(REPLAY_ASSETS_FOLDER_NAME)
 end
 
 local function getAssetsFolder(): Folder?
-	local folder = ReplicatedStorage:FindFirstChild("Assets")
-	return if folder and folder:IsA("Folder") then folder else nil
+	return ReplayAssets.GetAssetsFolder()
 end
 
 local function getReplayEmitModule()
-	if replayEmitModule then
-		return replayEmitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingReplayEmitModule then
-			warnedMissingReplayEmitModule = true
-			warn("[ReplayClient] Missing ReplicatedStorage.Packages.EmitModule")
-		end
-		return nil
-	end
-
-	local ok, emitModule = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingReplayEmitModule then
-			warnedMissingReplayEmitModule = true
-			warn("[ReplayClient] Failed to require EmitModule: " .. tostring(emitModule))
-		end
-		return nil
-	end
-
-	replayEmitModule = emitModule
-	return emitModule
+	return ReplayAssets.GetEmitModule()
 end
 
 local function ensureReplayEmitModuleInitialized(emitModule): boolean
-	if replayEmitModuleInitialized then
-		return true
-	end
-	if type(emitModule.init) ~= "function" then
-		replayEmitModuleInitialized = true
-		return true
-	end
-
-	local ok, err = pcall(function()
-		emitModule.init()
-	end)
-	if not ok then
-		warn("[ReplayClient] Failed to initialize EmitModule: " .. tostring(err))
-		return false
-	end
-
-	replayEmitModuleInitialized = true
-	return true
+	return ReplayAssets.EnsureEmitModuleInitialized(emitModule)
 end
 
 local function getByPath(root: Instance, path): Instance?
-	if typeof(path) ~= "table" then
-		return nil
-	end
-
-	local current: Instance? = root
-	for _, name in ipairs(path) do
-		if typeof(name) ~= "string" or name == "" or not current then
-			return nil
-		end
-		current = current:FindFirstChild(name)
-	end
-	return current
+	return ReplayAssets.GetByPath(root, path)
 end
 
 local function normalizeLookupName(value: any): string
-	if typeof(value) ~= "string" then
-		return ""
-	end
-	return string.lower((string.gsub(value, "[^%w]", "")))
+	return ReplayAssets.NormalizeLookupName(value)
 end
 
 local function buildLookupNames(...): { string }
-	local names = {}
-	for index = 1, select("#", ...) do
-		local name = select(index, ...)
-		if typeof(name) == "string" and name ~= "" then
-			table.insert(names, name)
-		end
-	end
-	return names
+	return ReplayAssets.BuildLookupNames(...)
 end
 
 local function findChildLoose(parent: Instance?, name: any): Instance?
-	if not parent or typeof(name) ~= "string" or name == "" then
-		return nil
-	end
-
-	local exact = parent:FindFirstChild(name)
-	if exact then
-		return exact
-	end
-
-	local normalized = normalizeLookupName(name)
-	if normalized == "" then
-		return nil
-	end
-
-	for _, child in ipairs(parent:GetChildren()) do
-		if normalizeLookupName(child.Name) == normalized then
-			return child
-		end
-	end
-
-	return nil
+	return ReplayAssets.FindChildLoose(parent, name)
 end
 
 local function isReplayTemplate(instance: Instance?): boolean
-	return instance ~= nil and (instance:IsA("Model") or instance:IsA("BasePart"))
+	return ReplayAssets.IsReplayTemplate(instance)
 end
 
 local function findReplayTemplateInFolder(folder: Instance?, names): Instance?
-	if not folder then
-		return nil
-	end
-
-	for _, name in ipairs(names) do
-		local child = findChildLoose(folder, name)
-		if isReplayTemplate(child) then
-			return child
-		end
-		if child then
-			local defaultChild = findChildLoose(child, "Default")
-			if isReplayTemplate(defaultChild) then
-				return defaultChild
-			end
-
-			for _, nestedName in ipairs(names) do
-				local nestedChild = findChildLoose(child, nestedName)
-				if isReplayTemplate(nestedChild) then
-					return nestedChild
-				end
-			end
-		end
-	end
-
-	return nil
+	return ReplayAssets.FindReplayTemplateInFolder(folder, names)
 end
 
 local function getBaseParts(root: Instance): { BasePart }
@@ -630,34 +489,15 @@ local function areReplayVisualsEnabled(): boolean
 end
 
 local function makePart(name: string, size: Vector3, color: Color3, shape: Enum.PartType?): Part
-	local part = Instance.new("Part")
-	part.Name = name
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.CastShadow = false
-	part.Material = Enum.Material.SmoothPlastic
-	part.Size = size
-	part.Color = color
-	if shape then
-		part.Shape = shape
-	end
-	return part
+	return ReplayVisualFactory.MakePart(name, size, color, shape)
 end
 
 local function setPartVisible(part: BasePart, visible: boolean, transparency: number?)
-	part.LocalTransparencyModifier = 0
-	part.Transparency = if visible then (transparency or 0) else 1
+	ReplayVisualFactory.SetPartVisible(part, visible, transparency)
 end
 
 local function setPartRecordsVisible(records, visible: boolean)
-	for _, record in ipairs(records or {}) do
-		local part = record.part
-		if part and part.Parent then
-			setPartVisible(part, visible, record.transparency)
-		end
-	end
+	ReplayVisualFactory.SetPartRecordsVisible(records, visible)
 end
 
 local function getBombTypeColor(bombType: any): Color3
@@ -833,78 +673,6 @@ local function makeNameplate(parent: Instance, userId: number, teamName: any, co
 	return billboard
 end
 
-local function createAvatarTemplate(userId: number): Model?
-	local player = Players:GetPlayerByUserId(userId)
-	local character = player and player.Character
-	if character and character:IsA("Model") then
-		local cloneOk, clone = pcall(function()
-			local originalArchivable = character.Archivable
-			character.Archivable = true
-			local okClone, cloneResult = pcall(function()
-				return character:Clone()
-			end)
-			character.Archivable = originalArchivable
-			if not okClone then
-				return nil
-			end
-			return cloneResult
-		end)
-		local replayClone = if cloneOk then destroyIfInvalidReplayAvatar(clone, userId, "CharacterClone") else nil
-		if replayClone then
-			return replayClone
-		end
-	end
-
-	local ok, model = pcall(function()
-		local description = Players:GetHumanoidDescriptionFromUserIdAsync(userId)
-		return Players:CreateHumanoidModelFromDescriptionAsync(description, Enum.HumanoidRigType.R6)
-	end)
-
-	local generatedModel = if ok then destroyIfInvalidReplayAvatar(model, userId, "HumanoidDescriptionR6") else nil
-	if generatedModel then
-		return generatedModel
-	end
-
-	local fallbackOk, fallbackModel = pcall(function()
-		return Players:CreateHumanoidModelFromUserIdAsync(userId)
-	end)
-	local fallbackReplayModel = if fallbackOk then destroyIfInvalidReplayAvatar(fallbackModel, userId, "UserIdFallback") else nil
-	if fallbackReplayModel then
-		return fallbackReplayModel
-	end
-
-	return nil
-end
-
-local function getAvatarTemplate(userId: number): Model?
-	local key = tostring(userId)
-	local cached = avatarTemplateCache[key]
-	if cached and cached.Parent == nil then
-		return cached
-	end
-
-	local template = createAvatarTemplate(userId)
-	if not template then
-		return nil
-	end
-
-	template.Name = "ReplayAvatarTemplate_" .. key
-	template.Parent = nil
-	if not avatarTemplateCache[key] then
-		table.insert(avatarTemplateOrder, key)
-	end
-	avatarTemplateCache[key] = template
-	while #avatarTemplateOrder > MAX_AVATAR_TEMPLATE_CACHE do
-		local oldKey = table.remove(avatarTemplateOrder, 1)
-		local oldTemplate = oldKey and avatarTemplateCache[oldKey]
-		avatarTemplateCache[oldKey] = nil
-		if oldTemplate and oldTemplate.Parent == nil then
-			oldTemplate:Destroy()
-		end
-	end
-	return template
-end
-
 local function prepareReplayAvatar(model: Model)
 	local rootPart = model:FindFirstChild("HumanoidRootPart")
 	if not (rootPart and rootPart:IsA("BasePart")) then
@@ -975,25 +743,11 @@ local function buildReplayPoseJoints(model: Model)
 end
 
 local function makeAvatarCharacterVisual(parent: Instance, userId: number, teamName: any, hasPoseSnapshots: boolean?)
-	local template = getAvatarTemplate(userId)
-	if not template then
+	local model = ReplayAvatarFactory.CloneCachedTemplate(userId)
+	if not model then
 		return nil
 	end
-
-	local model = template:Clone()
 	model.Name = "ReplayPlayer_" .. tostring(userId)
-	if not isR6ReplayModel(model) then
-		if DEBUG_REPLAY_ANIMATION then
-			warn(
-				("[ReplayClient] Replay avatar clone is not R6 user=%s rigType=%s"):format(
-					tostring(userId),
-					tostring(getModelRigType(model))
-				)
-			)
-		end
-		model:Destroy()
-		return nil
-	end
 
 	local records, rootPart = prepareReplayAvatar(model)
 	if not (records and rootPart and #records > 0) then
@@ -1430,99 +1184,29 @@ local function hideReplayBombForEvent(state, event)
 end
 
 local function scheduleDestroy(instance: Instance, lifetime: number)
-	task.delay(lifetime, function()
-		if instance.Parent then
-			pcall(function()
-				instance:Destroy()
-			end)
-		end
-	end)
+	ReplayVisualFactory.ScheduleDestroy(instance, lifetime)
 end
 
 local function playTween(instance: Instance, tweenInfo: TweenInfo, goals)
-	local ok, tween = pcall(function()
-		return TweenService:Create(instance, tweenInfo, goals)
-	end)
-	if ok then
-		tween:Play()
-	end
+	ReplayVisualFactory.PlayTween(instance, tweenInfo, goals)
 end
 
 local function createEffectAnchor(parent: Instance, position: Vector3, name: string): Part
-	local anchor = makePart(name, Vector3.new(0.2, 0.2, 0.2), Color3.new(1, 1, 1), nil)
-	anchor.Transparency = 1
-	anchor.CFrame = CFrame.new(position)
-	anchor.Parent = parent
-	return anchor
+	return ReplayVisualFactory.CreateEffectAnchor(parent, position, name)
 end
 
-local function createFloatingText(parent: Instance, position: Vector3, text: string, color: Color3, lifetime: number?)
-	local resolvedLifetime = lifetime or TEXT_MARKER_LIFETIME
-	local anchor = createEffectAnchor(parent, position, "ReplayTextMarker")
-
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "Billboard"
-	billboard.AlwaysOnTop = true
-	billboard.Size = UDim2.fromOffset(190, 46)
-	billboard.StudsOffset = Vector3.new(0, 2.8, 0)
-	billboard.Parent = anchor
-
-	local label = Instance.new("TextLabel")
-	label.Name = "Label"
-	label.BackgroundTransparency = 1
-	label.Size = UDim2.fromScale(1, 1)
-	label.Font = Enum.Font.GothamBold
-	label.Text = text
-	label.TextColor3 = color
-	label.TextSize = 20
-	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
-	label.TextStrokeTransparency = 0.35
-	label.TextTruncate = Enum.TextTruncate.AtEnd
-	label.Parent = billboard
-
-	playTween(anchor, TweenInfo.new(resolvedLifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		CFrame = CFrame.new(position + Vector3.new(0, 2.4, 0)),
+local function playReplayEventText(parent: Instance, event, position: Vector3?)
+	return EventTextPresenter.PlayReplayEvent(parent, event, {
+		position = position,
 	})
-	playTween(label, TweenInfo.new(resolvedLifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-		TextTransparency = 1,
-		TextStrokeTransparency = 1,
-	})
-	scheduleDestroy(anchor, resolvedLifetime + 0.05)
-	return anchor
 end
 
 local function createPulseSphere(parent: Instance, position: Vector3, radius: number, color: Color3, lifetime: number?)
-	local resolvedLifetime = lifetime or BURST_MARKER_LIFETIME
-	local sphere = makePart("ReplayPulseSphere", Vector3.new(0.7, 0.7, 0.7), color, Enum.PartType.Ball)
-	sphere.Material = Enum.Material.Neon
-	sphere.Transparency = 0.35
-	sphere.CFrame = CFrame.new(position)
-	sphere.Parent = parent
-
-	local diameter = math.max(radius, 1) * 2
-	playTween(sphere, TweenInfo.new(resolvedLifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size = Vector3.new(diameter, diameter, diameter),
-		Transparency = 1,
-	})
-	scheduleDestroy(sphere, resolvedLifetime + 0.05)
-	return sphere
+	return ReplayVisualFactory.CreatePulseSphere(parent, position, radius, color, lifetime, BURST_MARKER_LIFETIME)
 end
 
 local function createRingMarker(parent: Instance, position: Vector3, radius: number, color: Color3, lifetime: number?)
-	local resolvedLifetime = lifetime or BURST_MARKER_LIFETIME
-	local ring = makePart("ReplayRingMarker", Vector3.new(0.35, 0.08, 0.35), color, Enum.PartType.Cylinder)
-	ring.Material = Enum.Material.Neon
-	ring.Transparency = 0.22
-	ring.CFrame = CFrame.new(position + Vector3.new(0, 0.08, 0))
-	ring.Parent = parent
-
-	local diameter = math.max(radius, 1) * 2
-	playTween(ring, TweenInfo.new(resolvedLifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-		Size = Vector3.new(diameter, 0.08, diameter),
-		Transparency = 1,
-	})
-	scheduleDestroy(ring, resolvedLifetime + 0.05)
-	return ring
+	return ReplayVisualFactory.CreateRingMarker(parent, position, radius, color, lifetime, BURST_MARKER_LIFETIME)
 end
 
 local function fadeAndDestroyTemplate(clone: Instance, records, lifetime: number)
@@ -1699,19 +1383,7 @@ local function getAbilityTemplate(abilityName: any): Instance?
 end
 
 local function playOptionalEventSound(soundName: string, parent: Instance?)
-	local sound = SoundService:FindFirstChild(soundName, true)
-	if not (sound and sound:IsA("Sound")) then
-		return
-	end
-
-	local clone = sound:Clone()
-	clone.Looped = false
-	clone.TimePosition = 0
-	clone.Parent = parent or SoundService
-	clone:Play()
-
-	local lifetime = math.max(1, tonumber(clone.TimeLength) or 0, (tonumber(clone.TimeLength) or 0) + 0.25)
-	scheduleDestroy(clone, lifetime)
+	ReplayAssets.PlayOptionalEventSound(soundName, parent)
 end
 
 local function preprocessFrames(rawFrames)
@@ -1875,6 +1547,21 @@ local function collectPlayerMeta(frames)
 	return meta
 end
 
+local function preloadAvatarTemplates(playerMeta)
+	local userIds = {}
+	local seen = {}
+	for _, meta in pairs(playerMeta or {}) do
+		local userId = meta and meta.userId
+		local key = getUserIdKey(userId)
+		if key and not seen[key] then
+			seen[key] = true
+			table.insert(userIds, math.floor(userId))
+		end
+	end
+
+	ReplayAvatarFactory.PreloadUserIds(userIds, REPLAY_AVATAR_PRELOAD_TIMEOUT_SECONDS)
+end
+
 local function collectBombMeta(frames)
 	local meta = {}
 	for _, frame in ipairs(frames) do
@@ -2013,88 +1700,29 @@ getPlayerDisplayName = function(userId: any): string
 		return "UNKNOWN"
 	end
 
-	local player = Players:GetPlayerByUserId(math.floor(userId))
+	local resolvedUserId = math.floor(userId)
+	local _, player = pcall(function()
+		return Players:GetPlayerByUserId(resolvedUserId)
+	end)
 	if player then
 		return if player.DisplayName ~= "" then player.DisplayName else player.Name
 	end
+	for _, candidate in ipairs(Players:GetPlayers()) do
+		if candidate.UserId == resolvedUserId then
+			return if candidate.DisplayName ~= "" then candidate.DisplayName else candidate.Name
+		end
+	end
 
-	return tostring(math.floor(userId))
+	return tostring(resolvedUserId)
 end
 
 local function createOverlay(payload)
-	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-	if not playerGui then
-		return nil
-	end
-
-	local existing = playerGui:FindFirstChild(OVERLAY_NAME)
-	if existing and existing:GetAttribute(LOCAL_REPLAY_ATTR) == true then
-		existing:Destroy()
-	end
-
-	local gui = Instance.new("ScreenGui")
-	gui.Name = OVERLAY_NAME
-	gui:SetAttribute(LOCAL_REPLAY_ATTR, true)
-	gui.ResetOnSpawn = false
-	gui.IgnoreGuiInset = true
-	gui.DisplayOrder = 1000
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = playerGui
-
-	local frame = Instance.new("Frame")
-	frame.Name = "Bar"
-	frame.AnchorPoint = Vector2.new(0.5, 0)
-	frame.Position = UDim2.fromScale(0.5, 0)
-	frame.Size = UDim2.new(1, 0, 0, 94)
-	frame.BackgroundColor3 = Color3.fromRGB(12, 12, 14)
-	frame.BackgroundTransparency = 0.18
-	frame.BorderSizePixel = 0
-	frame.Parent = gui
-
-	local title = Instance.new("TextLabel")
-	title.Name = "Title"
-	title.BackgroundTransparency = 1
-	title.Position = UDim2.new(0, 24, 0, 14)
-	title.Size = UDim2.new(1, -48, 0, 36)
-	title.Font = Enum.Font.GothamBold
-	title.Text = if payload.type == "POTGReplay" then "PLAY OF THE GAME" else "KILLED BY: " .. getPlayerDisplayName(payload.killerUserId)
-	title.TextColor3 = Color3.fromRGB(255, 255, 255)
-	title.TextSize = 24
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextTruncate = Enum.TextTruncate.AtEnd
-	title.Parent = frame
-
-	local sourceText = ""
-	if payload.type == "POTGReplay" then
-		sourceText = getPlayerDisplayName(payload.playerUserId)
-		if typeof(payload.reason) == "string" and payload.reason ~= "" then
-			sourceText ..= " / " .. payload.reason
-		end
-		if isFiniteNumber(payload.score) then
-			sourceText ..= " / Score: " .. tostring(math.floor(payload.score + 0.5))
-		end
-	elseif typeof(payload.sourceType) == "string" and payload.sourceType ~= "" then
-		sourceText = payload.sourceType
-		if typeof(payload.sourceId) == "string" and payload.sourceId ~= "" then
-			sourceText ..= " / " .. payload.sourceId
-		end
-	end
-
-	local source = Instance.new("TextLabel")
-	source.Name = "Source"
-	source.BackgroundTransparency = 1
-	source.Position = UDim2.new(0, 24, 0, 52)
-	source.Size = UDim2.new(1, -48, 0, 24)
-	source.Font = Enum.Font.Gotham
-	source.Text = sourceText
-	source.TextColor3 = Color3.fromRGB(220, 226, 235)
-	source.TextSize = 16
-	source.TextXAlignment = Enum.TextXAlignment.Left
-	source.TextTruncate = Enum.TextTruncate.AtEnd
-	source.Visible = sourceText ~= ""
-	source.Parent = frame
-
-	return gui
+	return ReplayOverlay.Create(payload, {
+		overlayName = OVERLAY_NAME,
+		localReplayAttribute = LOCAL_REPLAY_ATTR,
+		getPlayerDisplayName = getPlayerDisplayName,
+		isFiniteNumber = isFiniteNumber,
+	})
 end
 
 local function captureCameraState()
@@ -2260,7 +1888,7 @@ local function playBombThrownEvent(event)
 	local color = getBombTypeColor(event.bombType)
 	createPulseSphere(parent, position, 2.2, color:Lerp(Color3.fromRGB(255, 226, 112), 0.35), 0.32)
 	createRingMarker(parent, position, 2.4, color, 0.42)
-	createFloatingText(parent, position + Vector3.new(0, 0.6, 0), "THROW", Color3.fromRGB(255, 226, 112), 0.7)
+	playReplayEventText(parent, event, position)
 end
 
 local function PlayExplosionEvent(event)
@@ -2294,7 +1922,7 @@ local function PlayExplosionEvent(event)
 	createRingMarker(parent, position, outerRadius, Color3.fromRGB(255, 150, 64), 0.72)
 	createPulseSphere(parent, position, terrainRadius, Color3.fromRGB(255, 96, 54), 0.55)
 	createPulseSphere(parent, position, innerRadius, Color3.fromRGB(255, 218, 83), 0.32)
-	createFloatingText(parent, position + Vector3.new(0, 1.5, 0), "BOOM", Color3.fromRGB(255, 216, 96), 0.85)
+	playReplayEventText(parent, event, position)
 	playOptionalEventSound("Explosion", anchor)
 	scheduleDestroy(anchor, 1.4)
 end
@@ -2315,13 +1943,45 @@ local function PlayDamageEvent(event)
 		return
 	end
 
-	local amountText = if isFiniteNumber(event.amount) then "-" .. tostring(math.floor(event.amount + 0.5)) else "HIT"
 	flashPlayerVisual(visual, Color3.fromRGB(255, 70, 70), 0.16)
-	createFloatingText(parent, position + Vector3.new(0, 1.4, 0), amountText, Color3.fromRGB(255, 92, 92), 0.8)
+	playReplayEventText(parent, event, position)
+end
+
+local function shouldPlayReplayKillEffect(state, event): boolean
+	if typeof(state) ~= "table" or typeof(event) ~= "table" then
+		return false
+	end
+
+	local killerKey = getUserIdKey(event.killerUserId)
+	local victimKey = getUserIdKey(event.victimUserId)
+	if not killerKey or not victimKey or killerKey == victimKey then
+		return false
+	end
+
+	local replayKillerKey = getUserIdKey(state.killerUserId)
+	local featuredPlayerKey = getUserIdKey(state.playerUserId)
+	return killerKey == replayKillerKey or killerKey == featuredPlayerKey
+end
+
+local function playReplayKillEffect(event)
+	if not (KillEffectController and type(KillEffectController.PlayReplayKillEffect) == "function") then
+		return false
+	end
+
+	return KillEffectController:PlayReplayKillEffect({
+		killerUserId = event.killerUserId,
+		victimUserId = event.victimUserId,
+		replayType = if getReplayState() then getReplayState().replayType else nil,
+		reason = "ReplayElimination",
+	})
 end
 
 local function PlayKillEvent(event)
 	local state = getReplayState()
+	if shouldPlayReplayKillEffect(state, event) then
+		playReplayKillEffect(event)
+	end
+
 	local parent = getEffectsParent(state)
 	if not parent then
 		return
@@ -2337,7 +1997,7 @@ local function PlayKillEvent(event)
 
 	createPulseSphere(parent, position + Vector3.new(0, 1.2, 0), 3.2, Color3.fromRGB(255, 48, 72), 0.45)
 	createRingMarker(parent, position, 3.6, Color3.fromRGB(255, 48, 72), 0.55)
-	createFloatingText(parent, position + Vector3.new(0, 2.5, 0), "ELIMINATED", Color3.fromRGB(255, 235, 235), 1.2)
+	playReplayEventText(parent, event, position)
 end
 
 local function playBaseDamageEvent(event)
@@ -2353,7 +2013,6 @@ local function playBaseDamageEvent(event)
 		return
 	end
 
-	local text = if isFiniteNumber(event.amount) then ("BASE -" .. tostring(math.floor(event.amount + 0.5))) else "BASE HIT"
 	local marker = makePart("ReplayBaseDamageMarker", Vector3.new(0.32, 3.2, 0.32), Color3.fromRGB(255, 142, 62), nil)
 	marker.Material = Enum.Material.Neon
 	marker.Transparency = 0.15
@@ -2366,7 +2025,6 @@ local function playBaseDamageEvent(event)
 	scheduleDestroy(marker, 0.55)
 	createRingMarker(parent, position, 4.2, Color3.fromRGB(255, 142, 62), 0.52)
 	createPulseSphere(parent, position, 3.4, Color3.fromRGB(255, 142, 62), 0.4)
-	createFloatingText(parent, position + Vector3.new(0, 1.1, 0), text, Color3.fromRGB(255, 172, 90), 0.95)
 end
 
 local function PlayAbilityEvent(event)
@@ -2393,7 +2051,7 @@ local function PlayAbilityEvent(event)
 	createReplayTemplateEffect(parent, template, position, "ReplayAbility_" .. tostring(abilityId or abilityName), 1.25, abilityColor)
 	createRingMarker(parent, position, 3.0, abilityColor, 0.5)
 	createPulseSphere(parent, position + Vector3.new(0, 1.1, 0), 2.5, abilityColor, 0.35)
-	createFloatingText(parent, position + Vector3.new(0, 2.3, 0), abilityName, Color3.fromRGB(150, 235, 255), 1.0)
+	playReplayEventText(parent, event, position)
 end
 
 local function playReplayEvent(event)
@@ -2498,31 +2156,6 @@ local function getFirstVisiblePlayerPosition(state): Vector3?
 	return nil
 end
 
-local function getHorizontalDirection(vector: Vector3?, fallback: Vector3?): Vector3
-	local resolvedFallback = fallback or Vector3.new(0, 0, 1)
-	if typeof(vector) ~= "Vector3" then
-		return resolvedFallback
-	end
-
-	local flat = Vector3.new(vector.X, 0, vector.Z)
-	if flat.Magnitude > 0.05 then
-		return flat.Unit
-	end
-
-	return resolvedFallback
-end
-
-local function getOffsetSide(direction: Vector3): Vector3
-	return Vector3.new(-direction.Z, 0, direction.X)
-end
-
-local function getSafeLookAt(cameraPosition: Vector3, focusPosition: Vector3): CFrame
-	if (focusPosition - cameraPosition).Magnitude <= 0.05 then
-		cameraPosition += Vector3.new(0, 2, 6)
-	end
-	return CFrame.lookAt(cameraPosition, focusPosition)
-end
-
 local function getReplayPlaybackSpeed(state, replayTime: number): number
 	local killTimestamp = state.killTimestamp
 	if not isFiniteNumber(killTimestamp) then
@@ -2534,180 +2167,6 @@ local function getReplayPlaybackSpeed(state, replayTime: number): number
 	end
 
 	return 1
-end
-
-local ReplayCameraController = {}
-ReplayCameraController.__index = ReplayCameraController
-
-function ReplayCameraController.new(state)
-	return setmetatable({
-		state = state,
-		currentCFrame = nil,
-		currentFocus = nil,
-		currentFieldOfView = nil,
-	}, ReplayCameraController)
-end
-
-function ReplayCameraController:_getPlayerVisual(userId: any)
-	local key = getUserIdKey(userId)
-	return if key then self.state.playerVisuals[key] else nil
-end
-
-function ReplayCameraController:_getSourceBombVisual()
-	local sourceKey = getBombKey(self.state.sourceId)
-	if sourceKey then
-		return self.state.bombVisuals[sourceKey], sourceKey
-	end
-	return nil, nil
-end
-
-function ReplayCameraController:_getPhase(replayTime: number): string
-	local killTimestamp = if isFiniteNumber(self.state.killTimestamp) then self.state.killTimestamp else self.state.endTime
-	if replayTime <= self.state.startTime + KILLCAM_KILLER_INTRO_SECONDS then
-		return "KillerFollow"
-	end
-
-	if replayTime >= killTimestamp - KILLCAM_IMPACT_FOCUS_SECONDS then
-		return "ImpactFocus"
-	end
-
-	local bombVisual = self:_getSourceBombVisual()
-	if bombVisual and getVisualPosition(bombVisual) and replayTime <= killTimestamp - KILLCAM_BOMB_FOLLOW_END_LEAD then
-		return "BombFollow"
-	end
-
-	return "KillerFollow"
-end
-
-function ReplayCameraController:_getFallbackTarget()
-	local victimPosition = getVisualPosition(self:_getPlayerVisual(self.state.victimUserId))
-	local killerPosition = getVisualPosition(self:_getPlayerVisual(self.state.killerUserId))
-	local focus = victimPosition or killerPosition or getFirstVisiblePlayerPosition(self.state) or Vector3.zero
-	if victimPosition and killerPosition then
-		focus = victimPosition:Lerp(killerPosition, 0.42)
-	end
-
-	local direction = Vector3.new(0.65, 0, 1).Unit
-	if victimPosition and killerPosition then
-		direction = getHorizontalDirection(victimPosition - killerPosition, direction)
-	end
-
-	local lookAt = focus + Vector3.new(0, 1.8, 0)
-	local cameraPosition = lookAt - direction * 18 + Vector3.new(0, 8, 0)
-	return getSafeLookAt(cameraPosition, lookAt), lookAt, CAMERA_DEFAULT_FOV
-end
-
-function ReplayCameraController:_getKillerFollowTarget()
-	local killerVisual = self:_getPlayerVisual(self.state.killerUserId)
-	local victimVisual = self:_getPlayerVisual(self.state.victimUserId)
-	local killerPosition = getVisualPosition(killerVisual)
-	local victimPosition = getVisualPosition(victimVisual)
-
-	if not (killerPosition or victimPosition) then
-		return self:_getFallbackTarget()
-	end
-
-	local fallbackDirection = if victimPosition and killerPosition
-		then getHorizontalDirection(victimPosition - killerPosition, Vector3.new(0, 0, 1))
-		else Vector3.new(0, 0, 1)
-	local killerCFrame = getVisualCFrame(killerVisual)
-	local facing = if killerCFrame then getHorizontalDirection(killerCFrame.LookVector, fallbackDirection) else fallbackDirection
-	local focusBase = killerPosition or victimPosition or Vector3.zero
-	local focus = if victimPosition and killerPosition then killerPosition:Lerp(victimPosition, 0.28) else focusBase
-	local side = getOffsetSide(facing)
-	local lookAt = focus + Vector3.new(0, 2.1, 0)
-	local cameraPosition = focusBase - facing * 13 + side * 2 + Vector3.new(0, 6.4, 0)
-
-	return getSafeLookAt(cameraPosition, lookAt), lookAt, CAMERA_DEFAULT_FOV
-end
-
-function ReplayCameraController:_getBombFollowTarget()
-	local bombVisual = self:_getSourceBombVisual()
-	local bombPosition = getVisualPosition(bombVisual)
-	if not bombPosition then
-		return self:_getKillerFollowTarget()
-	end
-
-	local killerPosition = getVisualPosition(self:_getPlayerVisual(self.state.killerUserId))
-	local victimPosition = getVisualPosition(self:_getPlayerVisual(self.state.victimUserId))
-	local impactPosition = self.state.impactPosition
-	local bombCFrame = getVisualCFrame(bombVisual)
-	local direction = if impactPosition
-		then getHorizontalDirection(impactPosition - bombPosition, nil)
-		elseif killerPosition
-		then getHorizontalDirection(bombPosition - killerPosition, nil)
-		elseif bombCFrame
-		then getHorizontalDirection(bombCFrame.LookVector, nil)
-		else Vector3.new(0, 0, 1)
-
-	local side = getOffsetSide(direction)
-	local focus = bombPosition:Lerp(impactPosition or victimPosition or bombPosition, 0.18) + Vector3.new(0, 0.7, 0)
-	local cameraPosition = bombPosition - direction * 8 + side * 1.8 + Vector3.new(0, 3.4, 0)
-
-	return getSafeLookAt(cameraPosition, focus), focus, CAMERA_BOMB_FOV
-end
-
-function ReplayCameraController:_getImpactTarget()
-	local victimPosition = getVisualPosition(self:_getPlayerVisual(self.state.victimUserId))
-	local killerPosition = getVisualPosition(self:_getPlayerVisual(self.state.killerUserId))
-	local impactPosition = self.state.impactPosition
-	local focus = impactPosition or victimPosition or killerPosition or getFirstVisiblePlayerPosition(self.state) or Vector3.zero
-	if impactPosition and victimPosition then
-		focus = impactPosition:Lerp(victimPosition, 0.35)
-	end
-
-	local direction = Vector3.new(0.65, 0, 1).Unit
-	if killerPosition and focus then
-		direction = getHorizontalDirection(focus - killerPosition, direction)
-	elseif victimPosition and impactPosition then
-		direction = getHorizontalDirection(victimPosition - impactPosition, direction)
-	end
-
-	local side = getOffsetSide(direction)
-	local lookAt = focus + Vector3.new(0, 2.0, 0)
-	local cameraPosition = focus - direction * 19 + side * 2.4 + Vector3.new(0, 8.8, 0)
-
-	return getSafeLookAt(cameraPosition, lookAt), lookAt, CAMERA_IMPACT_FOV
-end
-
-function ReplayCameraController:_getTarget(replayTime: number)
-	local phase = self:_getPhase(replayTime)
-	if phase == "BombFollow" then
-		return self:_getBombFollowTarget()
-	elseif phase == "ImpactFocus" then
-		return self:_getImpactTarget()
-	end
-
-	return self:_getKillerFollowTarget()
-end
-
-function ReplayCameraController:Step(deltaTime: number, replayTime: number)
-	local camera = workspace.CurrentCamera
-	if not camera then
-		return
-	end
-
-	camera.CameraType = Enum.CameraType.Scriptable
-
-	local targetCFrame, targetFocus, targetFieldOfView = self:_getTarget(replayTime)
-	if not targetCFrame then
-		return
-	end
-
-	local alpha = 1
-	if self.currentCFrame and isFiniteNumber(deltaTime) and deltaTime > 0 then
-		alpha = math.clamp(1 - math.exp(-CAMERA_SMOOTH_RESPONSIVENESS * math.min(deltaTime, 0.1)), 0, 1)
-	end
-
-	self.currentCFrame = if self.currentCFrame then self.currentCFrame:Lerp(targetCFrame, alpha) else targetCFrame
-	self.currentFocus = if self.currentFocus then self.currentFocus:Lerp(targetFocus, alpha) else targetFocus
-
-	local currentFieldOfView = if isFiniteNumber(self.currentFieldOfView) then self.currentFieldOfView else camera.FieldOfView
-	self.currentFieldOfView = currentFieldOfView + (targetFieldOfView - currentFieldOfView) * alpha
-
-	camera.CFrame = self.currentCFrame
-	camera.Focus = CFrame.new(self.currentFocus)
-	camera.FieldOfView = self.currentFieldOfView
 end
 
 local function updateReplayCamera(state)
@@ -2893,6 +2352,22 @@ local function warnReplayBuildSkipped(reason: string, payload)
 	)
 end
 
+local function debugReplayClient(message: string, ...)
+	if DEBUG_REPLAY_CLIENT then
+		warn("[ReplayClient] " .. message, ...)
+	end
+end
+
+local function getRemoteBinderDeps()
+	return {
+		debugReplayClient = debugReplayClient,
+		getReplayConstants = getReplayConstants,
+		isFiniteNumber = isFiniteNumber,
+		buildLocalAnimationStatePayload = buildLocalAnimationStatePayload,
+		animationStateSendInterval = ANIMATION_STATE_SEND_INTERVAL,
+	}
+end
+
 function ReplayClient:_disconnectAll()
 	for _, connection in ipairs(self._connections) do
 		pcall(function()
@@ -2955,126 +2430,50 @@ function ReplayClient:CancelReplay(reason: string?)
 	self.ReplayEnded:Fire(buildReplaySignalPayloadFromState(state, reason or "Canceled"))
 end
 
-function ReplayClient:_buildReplayState(payload)
-	if not areReplayVisualsEnabled() then
-		warnReplayBuildSkipped("VisualsDisabled", payload)
-		return nil
-	end
-	if typeof(payload) ~= "table" or (payload.type ~= "KillReplay" and payload.type ~= "POTGReplay") then
-		warnReplayBuildSkipped("InvalidPayloadType", payload)
-		return nil
-	end
-	if not (isFiniteNumber(payload.startTime) and isFiniteNumber(payload.endTime)) then
-		warnReplayBuildSkipped("InvalidReplayTime", payload)
-		return nil
-	end
-	if payload.endTime <= payload.startTime then
-		warnReplayBuildSkipped("InvalidReplayWindow", payload)
-		return nil
-	end
-
-	local startTime = payload.startTime
-	local endTime = math.min(payload.endTime, payload.startTime + MAX_REPLAY_DURATION_SECONDS)
-	local duration = math.max(endTime - startTime, 0.1)
-	local scene = createScene()
-	local mapContext = ReplayMapSimulator.Create(scene, payload)
-	local frames = ReplayMapSimulator.TransformFrames(mapContext, preprocessFrames(payload.frames))
-	if #frames == 0 then
-		scene:Destroy()
-		warnReplayBuildSkipped("EmptyFrames", payload)
-		return nil
-	end
-
-	local effectsFolder = Instance.new("Folder")
-	effectsFolder.Name = "ReplayEventVisuals"
-	effectsFolder.Parent = scene
-	local overlay = createOverlay(payload)
-	local cameraState = captureCameraState()
-	local events = ReplayMapSimulator.TransformEvents(mapContext, preprocessEvents(payload.events, startTime, endTime))
-	local destructionEvents = ReplayMapSimulator.NormalizeDestructionEvents(mapContext, payload.destructionEvents, endTime)
-	local nextDestructionIndex = ReplayMapSimulator.ApplyEventsUpTo(mapContext, destructionEvents, startTime - 0.001, 1)
-	local eventPositionsBySourceId = collectExplosionPositions(events)
-	local featuredUserId = if isFiniteNumber(payload.playerUserId) then math.floor(payload.playerUserId) else nil
-	local killerUserId = if isFiniteNumber(payload.killerUserId)
-		then math.floor(payload.killerUserId)
-		elseif payload.type == "POTGReplay"
-		then featuredUserId
-		else nil
-	local victimUserId = if isFiniteNumber(payload.victimUserId) then math.floor(payload.victimUserId) else nil
-	local cameraUserId = if payload.type == "POTGReplay"
-		then featuredUserId or killerUserId or victimUserId
-		else killerUserId or featuredUserId or victimUserId
-	local sourceId = getBombKey(payload.sourceId)
-	local killTimestamp = if payload.type == "POTGReplay" and isFiniteNumber(payload.primaryEventTime)
-		then math.clamp(payload.primaryEventTime, startTime, endTime)
-		else findKillTimestamp(events, victimUserId, startTime, endTime)
-	local impactPosition = findImpactPosition(events, eventPositionsBySourceId, sourceId, victimUserId)
-	local hasRecordedCamera = hasRecordedCameraForUser(frames, cameraUserId)
-
-	local state = {
-		scene = scene,
-		effectsFolder = effectsFolder,
-		overlay = overlay,
-		cameraState = cameraState,
-		mapContext = mapContext,
-		frames = frames,
-		events = events,
-		destructionEvents = destructionEvents,
-		eventPositionsBySourceId = eventPositionsBySourceId,
-		frameIndex = 1,
-		nextEventIndex = 1,
-		firedEventIndices = {},
-		nextDestructionIndex = nextDestructionIndex,
-		startTime = startTime,
-		endTime = endTime,
-		duration = duration,
-		playhead = startTime,
-		wallClockElapsed = 0,
-		killTimestamp = killTimestamp,
-		impactPosition = impactPosition,
-		sourceId = sourceId,
-		sourceType = payload.sourceType,
-		replayType = payload.type,
-		playerUserId = featuredUserId,
-		killerUserId = killerUserId,
-		victimUserId = victimUserId,
-		cameraUserId = cameraUserId,
-		hasRecordedCamera = hasRecordedCamera,
-		playerVisuals = {},
-		bombVisuals = {},
-		explodedBombs = {},
-		cameraController = nil,
-		renderConnection = nil,
-		renderBindingName = nil,
-		objectCount = 0,
-		maxObjects = MAX_REPLAY_OBJECTS,
+local function getStateBuilderDeps()
+	return {
+		ReplayMapSimulator = ReplayMapSimulator,
+		ReplayCameraController = ReplayCameraController,
+		areReplayVisualsEnabled = areReplayVisualsEnabled,
+		warnReplayBuildSkipped = warnReplayBuildSkipped,
+		isFiniteNumber = isFiniteNumber,
+		maxReplayDurationSeconds = MAX_REPLAY_DURATION_SECONDS,
+		maxReplayObjects = MAX_REPLAY_OBJECTS,
+		createScene = createScene,
+		preprocessFrames = preprocessFrames,
+		preprocessEvents = preprocessEvents,
+		collectExplosionPositions = collectExplosionPositions,
+		getBombKey = getBombKey,
+		findKillTimestamp = findKillTimestamp,
+		findImpactPosition = findImpactPosition,
+		hasRecordedCameraForUser = hasRecordedCameraForUser,
+		createOverlay = createOverlay,
+		captureCameraState = captureCameraState,
+		collectPlayerMeta = collectPlayerMeta,
+		preloadAvatarTemplates = preloadAvatarTemplates,
+		collectBombMeta = collectBombMeta,
+		reserveReplayObjects = reserveReplayObjects,
+		makeCharacterVisual = makeCharacterVisual,
+		makeBombVisual = makeBombVisual,
+		cameraControllerDeps = {
+			isFiniteNumber = isFiniteNumber,
+			getUserIdKey = getUserIdKey,
+			getBombKey = getBombKey,
+			getVisualPosition = getVisualPosition,
+			getVisualCFrame = getVisualCFrame,
+			cameraSmoothResponsiveness = CAMERA_SMOOTH_RESPONSIVENESS,
+			cameraDefaultFov = CAMERA_DEFAULT_FOV,
+			cameraBombFov = CAMERA_BOMB_FOV,
+			cameraImpactFov = CAMERA_IMPACT_FOV,
+			killcamKillerIntroSeconds = KILLCAM_KILLER_INTRO_SECONDS,
+			killcamImpactFocusSeconds = KILLCAM_IMPACT_FOCUS_SECONDS,
+			killcamBombFollowEndLead = KILLCAM_BOMB_FOLLOW_END_LEAD,
+		},
 	}
-	self._activeReplay = state
+end
 
-	for key, meta in pairs(collectPlayerMeta(frames)) do
-		if not reserveReplayObjects(24) then
-			break
-		end
-		state.playerVisuals[key] = makeCharacterVisual(scene, meta.userId, meta.teamName, meta.hasPose)
-	end
-
-	for key, meta in pairs(collectBombMeta(frames)) do
-		if not reserveReplayObjects(6) then
-			break
-		end
-		state.bombVisuals[key] = makeBombVisual(scene, key, meta.bombType)
-	end
-
-	if not hasRecordedCamera then
-		state.cameraController = ReplayCameraController.new(state)
-	end
-
-	local camera = workspace.CurrentCamera
-	if camera then
-		camera.CameraType = Enum.CameraType.Scriptable
-	end
-
-	return state
+function ReplayClient:_buildReplayState(payload)
+	return ReplayStateBuilder.Build(self, payload, getStateBuilderDeps())
 end
 
 function ReplayClient:_stepReplay(state, deltaTime: number?)
@@ -3150,6 +2549,7 @@ function ReplayClient:GetActiveReplayDebugInfo()
 end
 
 function ReplayClient:PlayReplay(payload): boolean
+	debugReplayClient("PlayReplay called", getReplayPayloadType(payload), "frames", getPayloadFrameCount(payload))
 	self:CancelReplay("Interrupted")
 
 	local replayType = getReplayPayloadType(payload)
@@ -3162,6 +2562,16 @@ function ReplayClient:PlayReplay(payload): boolean
 		end
 
 		started = true
+		debugReplayClient(
+			"Replay started",
+			state.replayType,
+			"start",
+			state.startTime,
+			"end",
+			state.endTime,
+			"frames",
+			#state.frames
+		)
 		self.ReplayStarted:Fire(buildReplaySignalPayloadFromState(state, "Started"))
 		RunService:UnbindFromRenderStep(REPLAY_RENDER_STEP_NAME)
 		state.renderBindingName = REPLAY_RENDER_STEP_NAME
@@ -3188,6 +2598,7 @@ function ReplayClient:PlayReplay(payload): boolean
 			self.ReplayEnded:Fire(buildReplaySignalPayloadFromPayload(payload, "Failed"))
 		end
 	elseif not started and replayType then
+		debugReplayClient("Replay did not start", replayType)
 		self.ReplayEnded:Fire(buildReplaySignalPayloadFromPayload(payload, "Skipped"))
 	end
 
@@ -3202,140 +2613,44 @@ function ReplayClient:PlayPOTGReplay(payload)
 	self:PlayReplay(payload)
 end
 
+function ReplayClient:RequestKillReplay(reason: string?): boolean
+	return ReplayRemoteBinder.RequestKillReplay(self, reason, getRemoteBinderDeps())
+end
+
 function ReplayClient:_bindRemoteInstance(remoteName: string, remote: Instance): boolean
-	if not (remote and remote:IsA("RemoteEvent")) then
-		return false
-	end
-	if self._boundRemotes[remoteName] == remote then
-		return true
-	end
-	self._boundRemotes[remoteName] = remote
-
-	table.insert(self._connections, remote.OnClientEvent:Connect(function(payload)
-		if remoteName == "ReplayCancel" or payload == "CancelReplay" or (typeof(payload) == "table" and payload.type == "CancelReplay") then
-			self:CancelReplay()
-			return
-		end
-
-		if typeof(payload) == "table" and payload.type == "KillReplay" then
-			local frameCount = if typeof(payload.frames) == "table" then #payload.frames else 0
-			local eventCount = if typeof(payload.events) == "table" then #payload.events else 0
-			local destructionEventCount = if typeof(payload.destructionEvents) == "table" then #payload.destructionEvents else 0
-			print(
-				("[ReplayClient] Received KillReplay start=%.3f end=%.3f frames=%d events=%d destruction=%d killer=%s victim=%s"):format(
-					if typeof(payload.startTime) == "number" then payload.startTime else 0,
-					if typeof(payload.endTime) == "number" then payload.endTime else 0,
-					frameCount,
-					eventCount,
-					destructionEventCount,
-					tostring(payload.killerUserId),
-					tostring(payload.victimUserId)
-				)
-			)
-			self:PlayKillReplay(payload)
-			return
-		end
-
-		if typeof(payload) == "table" and payload.type == "POTGReplay" then
-			local frameCount = if typeof(payload.frames) == "table" then #payload.frames else 0
-			local eventCount = if typeof(payload.events) == "table" then #payload.events else 0
-			local destructionEventCount = if typeof(payload.destructionEvents) == "table" then #payload.destructionEvents else 0
-			print(
-				("[ReplayClient] Received POTGReplay start=%.3f end=%.3f frames=%d events=%d destruction=%d player=%s score=%s reason=%s"):format(
-					if typeof(payload.startTime) == "number" then payload.startTime else 0,
-					if typeof(payload.endTime) == "number" then payload.endTime else 0,
-					frameCount,
-					eventCount,
-					destructionEventCount,
-					tostring(payload.playerUserId),
-					tostring(payload.score),
-					tostring(payload.reason)
-				)
-			)
-			self:PlayPOTGReplay(payload)
-			return
-		end
-
-		print("[ReplayClient] Received " .. remoteName, payload)
-	end))
-
-	return true
+	return ReplayRemoteBinder.BindRemoteInstance(self, remoteName, remote, getRemoteBinderDeps())
 end
 
 function ReplayClient:_bindRemote(remotesFolder: Instance, remoteName: string)
-	local remote = remotesFolder:FindFirstChild(remoteName)
-	if self:_bindRemoteInstance(remoteName, remote) then
-		return
-	end
-
-	warn("[ReplayClient] Waiting for remote: " .. remoteName)
-	table.insert(self._connections, remotesFolder.ChildAdded:Connect(function(child)
-		if child.Name == remoteName then
-			self:_bindRemoteInstance(remoteName, child)
-		end
-	end))
+	ReplayRemoteBinder.BindRemote(self, remotesFolder, remoteName, getRemoteBinderDeps())
 end
 
 function ReplayClient:_startAnimationStatePublisher(remotesFolder: Instance, constants)
-	local remotes = constants and constants.REMOTES
-	local remoteName = remotes and remotes.AnimationState
-	if typeof(remoteName) ~= "string" or remoteName == "" then
-		return
-	end
-
-	local remote = remotesFolder:FindFirstChild(remoteName)
-	if not (remote and remote:IsA("RemoteEvent")) then
-		warn("[ReplayClient] Waiting for animation-state remote: " .. tostring(remoteName))
-		table.insert(self._connections, remotesFolder.ChildAdded:Connect(function(child)
-			if child.Name == remoteName then
-				self:_startAnimationStatePublisher(remotesFolder, constants)
-			end
-		end))
-		return
-	end
-	if self._boundRemotes[remoteName] == remote then
-		return
-	end
-	self._boundRemotes[remoteName] = remote
-
-	local accumulator = 0
-	table.insert(self._connections, RunService.RenderStepped:Connect(function(deltaTime)
-		if self._activeReplay then
-			return
-		end
-		if not isFiniteNumber(deltaTime) or deltaTime <= 0 then
-			return
-		end
-
-		accumulator += deltaTime
-		if accumulator < ANIMATION_STATE_SEND_INTERVAL then
-			return
-		end
-		accumulator = math.min(accumulator - ANIMATION_STATE_SEND_INTERVAL, ANIMATION_STATE_SEND_INTERVAL)
-
-		local payload = buildLocalAnimationStatePayload()
-		if payload then
-			pcall(function()
-				remote:FireServer(payload)
-			end)
-		end
-	end))
+	ReplayRemoteBinder.StartAnimationStatePublisher(self, remotesFolder, constants, getRemoteBinderDeps())
 end
 
 function ReplayClient:OnStart()
+	debugReplayClient("OnStart")
 	self:_disconnectAll()
 	self:CancelReplay()
+	ReplayAvatarFactory.Start({
+		maxCache = MAX_AVATAR_TEMPLATE_CACHE,
+		debug = DEBUG_REPLAY_ANIMATION,
+	})
 
 	local constants = getReplayConstants()
 	if not constants then
+		debugReplayClient("Missing ReplayConstants; remotes not bound")
 		return
 	end
 
 	local function bindRemotes(remotesFolder: Instance)
 		if not (remotesFolder and remotesFolder:IsA("Folder")) then
+			debugReplayClient("Replay remotes folder unavailable", if remotesFolder then remotesFolder.ClassName else "nil")
 			return false
 		end
 
+		debugReplayClient("Binding replay remotes folder", remotesFolder:GetFullName())
 		for _, remoteName in pairs(constants.REMOTES) do
 			if typeof(remoteName) == "string" and remoteName ~= constants.REMOTES.AnimationState then
 				self:_bindRemote(remotesFolder, remoteName)
@@ -3348,13 +2663,16 @@ function ReplayClient:OnStart()
 
 	local remotesFolder = ReplicatedStorage:FindFirstChild(constants.REMOTES_FOLDER_NAME)
 	if bindRemotes(remotesFolder) then
+		debugReplayClient("Replay remotes bound")
 		return
 	end
 
 	warn("[ReplayClient] Waiting for remotes folder: " .. tostring(constants.REMOTES_FOLDER_NAME))
 	table.insert(self._connections, ReplicatedStorage.ChildAdded:Connect(function(child)
 		if child.Name == constants.REMOTES_FOLDER_NAME then
-			bindRemotes(child)
+			if bindRemotes(child) then
+				debugReplayClient("Replay remotes bound after folder appeared")
+			end
 		end
 	end))
 end

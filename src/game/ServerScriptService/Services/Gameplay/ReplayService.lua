@@ -5,6 +5,8 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local ReplayConstants = require(ReplicatedStorage.Shared.Replay.ReplayConstants)
+local ReplayUtil = require(ReplicatedStorage.Shared.Replay.ReplayUtil)
+local ReplayClipPolicy = require(ReplicatedStorage.Shared.Replay.ReplayClipPolicy)
 local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local POTGService = require(ServerScriptService.Services.POTGService)
 local ReplayBuffer = require(script.Parent.Replay.ReplayBuffer)
@@ -17,20 +19,12 @@ local DEBUG_POTG_EVENTS = false
 local DEBUG_POTG_SEND = false
 local REPLAY_ASSETS_FOLDER_NAME = "ReplayAssets"
 local KILL_REPLAY_WINDOW_SECONDS = ReplayConstants.KILL_REPLAY_PRE_SECONDS + ReplayConstants.KILL_REPLAY_POST_SECONDS
-local POTG_REPLAY_WINDOW_SECONDS = ReplayConstants.POTG_PRE_SECONDS + ReplayConstants.POTG_POST_SECONDS
-local MIN_KILL_REPLAY_FRAMES = math.max(2, math.floor(KILL_REPLAY_WINDOW_SECONDS * ReplayConstants.SAMPLE_RATE * 0.25))
-local MIN_KILL_REPLAY_SEND_FRAMES = 2
-local MAX_KILL_REPLAY_FRAMES = math.ceil((KILL_REPLAY_WINDOW_SECONDS + 1) * ReplayConstants.SAMPLE_RATE)
-local MAX_KILL_REPLAY_EVENTS = 160
-local MIN_POTG_REPLAY_FRAMES = math.max(2, math.floor(POTG_REPLAY_WINDOW_SECONDS * ReplayConstants.SAMPLE_RATE * 0.25))
-local MAX_POTG_REPLAY_FRAMES = math.ceil((POTG_REPLAY_WINDOW_SECONDS + 1) * ReplayConstants.SAMPLE_RATE)
-local MAX_POTG_REPLAY_EVENTS = 220
-local MAX_ROUND_DESTRUCTION_EVENTS = 260
-local MAX_KILL_REPLAY_DESTRUCTION_EVENTS = MAX_ROUND_DESTRUCTION_EVENTS
-local MAX_POTG_REPLAY_DESTRUCTION_EVENTS = MAX_ROUND_DESTRUCTION_EVENTS
-local MAX_CLIP_PLAYERS_PER_FRAME = ReplayConstants.MAX_REPLAY_PLAYERS
-local MAX_CLIP_BOMBS_PER_FRAME = math.min(24, ReplayConstants.MAX_REPLAY_BOMBS)
-local MAX_CLIP_SANITIZE_DEPTH = 8
+local KILL_REPLAY_SEND_DELAY_SECONDS = ReplayConstants.KILL_REPLAY_POST_SECONDS + ReplayConstants.SAMPLE_INTERVAL
+local RECENT_KILL_REPLAY_TTL_SECONDS = 10
+local KILL_REPLAY_REQUEST_COOLDOWN_SECONDS = 0.75
+local MIN_KILL_REPLAY_FRAMES = ReplayClipPolicy.MinKillReplayFrames
+local MIN_KILL_REPLAY_SEND_FRAMES = ReplayClipPolicy.MinKillReplaySendFrames
+local MIN_POTG_REPLAY_FRAMES = ReplayClipPolicy.MinPOTGReplayFrames
 local CLIENT_ANIMATION_STATE_MAX_RATE = 20
 local CLIENT_ANIMATION_STATE_STALE_SECONDS = 0.5
 local MAX_REPLAY_ANIMATION_SPEED = 220
@@ -46,19 +40,6 @@ local MAX_DEBRIS_PAYLOADS_PER_DESTRUCTION_EVENT = 8
 local MAX_DEBRIS_BLOCKS_PER_DESTRUCTION_EVENT = 72
 local MAX_RANDOM_SEED = 2147483647
 
-local CRITICAL_REPLAY_EVENTS = table.freeze({
-	PlayerKilled = true,
-	BombExploded = true,
-	PlayerDamaged = true,
-})
-
-local IMPORTANT_REPLAY_EVENTS = table.freeze({
-	BaseDamaged = true,
-	AbilityUsed = true,
-	BombThrown = true,
-	MapDestruction = true,
-})
-
 local initialized = false
 local running = false
 local heartbeatConnection: RBXScriptConnection? = nil
@@ -71,21 +52,16 @@ local lastBombContainerFound = false
 local lastBombServiceSnapshotAvailable = false
 local lastBombSource = "None"
 local animationStateConnection: RBXScriptConnection? = nil
+local killReplayRequestConnection: RBXScriptConnection? = nil
 local latestAnimationStateByUserId = {}
 local clientReplaySamplesByUserId = {}
 local lastAnimationStateAtByUserId = {}
+local recentKillReplayEventsByVictimUserId = {}
+local lastKillReplayRequestAtByUserId = {}
 local lastKillReplayDebug = nil
 local lastPOTGReplayDebug = nil
 local lastClipOptimizationDebug = nil
-local clipOptimizationTotals = {
-	clips = 0,
-	framesTrimmed = 0,
-	playerSnapshotsTrimmed = 0,
-	bombSnapshotsTrimmed = 0,
-	eventsTrimmed = 0,
-	destructionEventsTrimmed = 0,
-	instanceValuesDropped = 0,
-}
+local clipOptimizationTotals = ReplayClipPolicy.CreateOptimizationTotals()
 local currentRoundId = nil
 local currentMapContext = nil
 local roundDestructionEvents = {}
@@ -96,60 +72,19 @@ local potgSentThisRound = false
 local potgSendInProgress = false
 local potgSendToken = 0
 local optimizedReplayPayloads = setmetatable({}, { __mode = "k" })
+local debugKillReplaySend = nil
+local sendKillReplayForEvent = nil
 
-local function isFiniteNumber(value: any): boolean
-	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
-end
-
-local function isFiniteCFrame(value: any): boolean
-	if typeof(value) ~= "CFrame" then
-		return false
-	end
-
-	local components = { value:GetComponents() }
-	for _, component in ipairs(components) do
-		if not isFiniteNumber(component) then
-			return false
-		end
-	end
-	return true
-end
-
-local function isFiniteVector3(value: any): boolean
-	if typeof(value) ~= "Vector3" then
-		return false
-	end
-
-	return isFiniteNumber(value.X) and isFiniteNumber(value.Y) and isFiniteNumber(value.Z)
-end
-
-local function isFiniteColor3(value: any): boolean
-	if typeof(value) ~= "Color3" then
-		return false
-	end
-
-	return isFiniteNumber(value.R) and isFiniteNumber(value.G) and isFiniteNumber(value.B)
-end
+local isFiniteNumber = ReplayUtil.IsFiniteNumber
+local isFiniteCFrame = ReplayUtil.IsFiniteCFrame
+local isFiniteVector3 = ReplayUtil.IsFiniteVector3
+local isFiniteColor3 = ReplayUtil.IsFiniteColor3
 
 local function getTrustedReplayTimestamp(payload): number
-	local currentTime = workspace:GetServerTimeNow()
-	if typeof(payload) == "table" and isFiniteNumber(payload.timestamp) then
-		return math.min(payload.timestamp, currentTime)
-	end
-	return currentTime
+	return ReplayUtil.GetTrustedReplayTimestamp(payload, workspace:GetServerTimeNow())
 end
 
-local function countDictionaryEntries(dictionary): number
-	local count = 0
-	if typeof(dictionary) ~= "table" then
-		return count
-	end
-
-	for _ in pairs(dictionary) do
-		count += 1
-	end
-	return count
-end
+local countDictionaryEntries = ReplayUtil.CountDictionaryEntries
 
 local function countLatestClientReplayField(fieldName: string): number
 	local count = 0
@@ -171,631 +106,95 @@ local function countClientReplaySampleRecords(): number
 	return count
 end
 
-local function copyReplayValue(value: any, depth: number): any
-	local valueType = typeof(value)
-	if
-		valueType == "number"
-		or valueType == "string"
-		or valueType == "boolean"
-		or valueType == "Vector3"
-		or valueType == "CFrame"
-		or valueType == "Color3"
-	then
-		return value
-	end
+local copyReplayEvent = ReplayUtil.CopyReplayEvent
+local getReplayIdKey = ReplayUtil.GetReplayIdKey
+local getUserIdKey = ReplayUtil.GetUserIdKey
 
-	if valueType ~= "table" or depth >= 3 then
-		return nil
-	end
-
-	local copy = {}
-	for key, child in pairs(value) do
-		local keyType = typeof(key)
-		if keyType ~= "string" and keyType ~= "number" then
-			continue
-		end
-
-		local copiedChild = copyReplayValue(child, depth + 1)
-		if copiedChild ~= nil then
-			copy[key] = copiedChild
+local function pruneRecentKillReplayEvents(currentTime: number)
+	for userId, record in pairs(recentKillReplayEventsByVictimUserId) do
+		if typeof(record) ~= "table" or not isFiniteNumber(record.expiresAt) or record.expiresAt <= currentTime then
+			recentKillReplayEventsByVictimUserId[userId] = nil
 		end
 	end
-	return copy
 end
 
-local function copyReplayEvent(event)
-	if typeof(event) ~= "table" then
+local function storeRecentKillReplayEvent(killEvent)
+	if typeof(killEvent) ~= "table" or not isFiniteNumber(killEvent.victimUserId) then
 		return nil
 	end
-	return copyReplayValue(event, 0)
-end
 
-local function getReplayIdKey(value: any): string?
-	local valueType = typeof(value)
-	if valueType == "string" and value ~= "" then
-		return value
-	end
-	if valueType == "number" and value == value then
-		return tostring(value)
-	end
-	return nil
-end
-
-local function getUserIdKey(value: any): string?
-	if not (isFiniteNumber(value) and value > 0) then
+	local eventCopy = copyReplayEvent(killEvent)
+	if typeof(eventCopy) ~= "table" then
 		return nil
 	end
-	return tostring(math.floor(value))
+
+	local currentTime = workspace:GetServerTimeNow()
+	local victimUserId = math.floor(killEvent.victimUserId)
+	recentKillReplayEventsByVictimUserId[victimUserId] = {
+		event = eventCopy,
+		expiresAt = currentTime + RECENT_KILL_REPLAY_TTL_SECONDS,
+	}
+	pruneRecentKillReplayEvents(currentTime)
+	return eventCopy
+end
+
+local function getRecentKillReplayEventForUserId(userId: any)
+	if not isFiniteNumber(userId) then
+		return nil
+	end
+
+	local resolvedUserId = math.floor(userId)
+	local currentTime = workspace:GetServerTimeNow()
+	pruneRecentKillReplayEvents(currentTime)
+
+	local record = recentKillReplayEventsByVictimUserId[resolvedUserId]
+	if typeof(record) ~= "table" or typeof(record.event) ~= "table" then
+		return nil
+	end
+	if isFiniteNumber(currentRoundId) and record.event.roundId ~= currentRoundId then
+		recentKillReplayEventsByVictimUserId[resolvedUserId] = nil
+		return nil
+	end
+	return record.event
+end
+
+local function getRecentKillReplayEventForPlayer(player: Player)
+	if not (typeof(player) == "Instance" and player:IsA("Player") and player.Parent == Players) then
+		return nil
+	end
+	return getRecentKillReplayEventForUserId(player.UserId)
 end
 
 local function getKillClipCaps()
-	return {
-		maxFrames = MAX_KILL_REPLAY_FRAMES,
-		maxPlayersPerFrame = MAX_CLIP_PLAYERS_PER_FRAME,
-		maxBombsPerFrame = MAX_CLIP_BOMBS_PER_FRAME,
-		maxEvents = MAX_KILL_REPLAY_EVENTS,
-		maxDestructionEvents = MAX_KILL_REPLAY_DESTRUCTION_EVENTS,
-	}
+	return ReplayClipPolicy.GetKillClipCaps()
 end
 
 local function getPOTGClipCaps()
-	return {
-		maxFrames = MAX_POTG_REPLAY_FRAMES,
-		maxPlayersPerFrame = MAX_CLIP_PLAYERS_PER_FRAME,
-		maxBombsPerFrame = MAX_CLIP_BOMBS_PER_FRAME,
-		maxEvents = MAX_POTG_REPLAY_EVENTS,
-		maxDestructionEvents = MAX_POTG_REPLAY_DESTRUCTION_EVENTS,
-	}
-end
-
-local function sanitizeReplaySendValue(value: any, depth: number, seen, stats)
-	local valueType = typeof(value)
-	if valueType == "nil" then
-		return nil
-	end
-	if valueType == "boolean" or valueType == "string" then
-		return value
-	end
-	if valueType == "number" then
-		return if isFiniteNumber(value) then value else nil
-	end
-	if valueType == "Vector3" or valueType == "CFrame" or valueType == "Color3" then
-		return value
-	end
-	if valueType == "Instance" then
-		if stats then
-			stats.instanceValuesDropped += 1
-		end
-		return nil
-	end
-	if valueType ~= "table" or depth >= MAX_CLIP_SANITIZE_DEPTH then
-		return nil
-	end
-	if seen[value] then
-		return nil
-	end
-
-	seen[value] = true
-	local copy = {}
-	for key, child in pairs(value) do
-		local keyType = typeof(key)
-		if keyType == "Instance" then
-			if stats then
-				stats.instanceValuesDropped += 1
-			end
-			continue
-		end
-		if keyType ~= "string" and keyType ~= "number" then
-			continue
-		end
-
-		local copiedChild = sanitizeReplaySendValue(child, depth + 1, seen, stats)
-		if copiedChild ~= nil then
-			copy[key] = copiedChild
-		end
-	end
-	seen[value] = nil
-
-	return copy
+	return ReplayClipPolicy.GetPOTGClipCaps()
 end
 
 local function estimateClipPayloadSize(clip)
-	local estimate = {
-		frames = 0,
-		playerSnapshots = 0,
-		bombSnapshots = 0,
-		cameraSnapshots = 0,
-		poseJoints = 0,
-		events = 0,
-		destructionEvents = 0,
-		maxPlayersPerFrame = 0,
-		maxBombsPerFrame = 0,
-	}
-	if typeof(clip) ~= "table" then
-		return estimate
-	end
-
-	local frames = clip.frames
-	if typeof(frames) == "table" then
-		estimate.frames = #frames
-		for _, frame in ipairs(frames) do
-			if typeof(frame) ~= "table" then
-				continue
-			end
-
-			local playerCount = if typeof(frame.players) == "table" then #frame.players else 0
-			local bombCount = if typeof(frame.bombs) == "table" then #frame.bombs else 0
-			estimate.playerSnapshots += playerCount
-			estimate.bombSnapshots += bombCount
-			estimate.maxPlayersPerFrame = math.max(estimate.maxPlayersPerFrame, playerCount)
-			estimate.maxBombsPerFrame = math.max(estimate.maxBombsPerFrame, bombCount)
-
-			if typeof(frame.players) == "table" then
-				for _, snapshot in ipairs(frame.players) do
-					if typeof(snapshot) ~= "table" then
-						continue
-					end
-					if typeof(snapshot.camera) == "table" then
-						estimate.cameraSnapshots += 1
-					end
-					if typeof(snapshot.pose) == "table" and typeof(snapshot.pose.joints) == "table" then
-						estimate.poseJoints += #snapshot.pose.joints
-					end
-				end
-			end
-		end
-	end
-
-	if typeof(clip.events) == "table" then
-		estimate.events = #clip.events
-	end
-	if typeof(clip.destructionEvents) == "table" then
-		estimate.destructionEvents = #clip.destructionEvents
-	end
-
-	return estimate
-end
-
-local function getFrameSampleIndices(frameCount: number, maxFrames: number): { number }
-	local limit = math.max(math.floor(maxFrames), 0)
-	local indices = {}
-	if frameCount <= 0 or limit <= 0 then
-		return indices
-	end
-	if frameCount <= limit then
-		for index = 1, frameCount do
-			table.insert(indices, index)
-		end
-		return indices
-	end
-	if limit == 1 then
-		table.insert(indices, frameCount)
-		return indices
-	end
-
-	local seen = {}
-	for slot = 1, limit do
-		local alpha = (slot - 1) / (limit - 1)
-		local index = math.floor(alpha * (frameCount - 1) + 1.5)
-		index = math.clamp(index, 1, frameCount)
-		if not seen[index] then
-			seen[index] = true
-			table.insert(indices, index)
-		end
-	end
-
-	local fallbackIndex = 1
-	while #indices < limit and fallbackIndex <= frameCount do
-		if not seen[fallbackIndex] then
-			seen[fallbackIndex] = true
-			table.insert(indices, fallbackIndex)
-		end
-		fallbackIndex += 1
-	end
-
-	table.sort(indices)
-	return indices
-end
-
-local function markUserId(target, value: any)
-	local key = getUserIdKey(value)
-	if key then
-		target[key] = true
-	end
-end
-
-local function markBombId(target, value: any)
-	local key = getReplayIdKey(value)
-	if key then
-		target[key] = true
-	end
-end
-
-local function collectClipImportance(payload)
-	local importance = {
-		bombIds = {},
-		userIds = {},
-	}
-	if typeof(payload) ~= "table" then
-		return importance
-	end
-
-	markBombId(importance.bombIds, payload.sourceId)
-	markUserId(importance.userIds, payload.killerUserId)
-	markUserId(importance.userIds, payload.victimUserId)
-	markUserId(importance.userIds, payload.playerUserId)
-
-	if typeof(payload.events) == "table" then
-		for _, event in ipairs(payload.events) do
-			if typeof(event) ~= "table" then
-				continue
-			end
-			markBombId(importance.bombIds, event.bombId)
-			markBombId(importance.bombIds, event.sourceId)
-			markUserId(importance.userIds, event.ownerUserId)
-			markUserId(importance.userIds, event.attackerUserId)
-			markUserId(importance.userIds, event.killerUserId)
-			markUserId(importance.userIds, event.victimUserId)
-			markUserId(importance.userIds, event.userId)
-		end
-	end
-
-	return importance
-end
-
-local function getBombSnapshotPriority(snapshot, importance): number
-	if typeof(snapshot) ~= "table" then
-		return 99
-	end
-
-	local bombKey = getReplayIdKey(snapshot.bombId)
-	if bombKey and importance.bombIds[bombKey] then
-		return 1
-	end
-
-	local ownerKey = getUserIdKey(snapshot.ownerUserId)
-	if ownerKey and importance.userIds[ownerKey] then
-		return 2
-	end
-
-	if snapshot.settled == false then
-		return 3
-	end
-
-	local velocity = snapshot.assemblyLinearVelocity
-	if typeof(velocity) == "Vector3" and velocity.Magnitude > 1 then
-		return 4
-	end
-
-	return 5
-end
-
-local function sanitizePlayerSnapshots(players, caps, stats)
-	local results = {}
-	if typeof(players) ~= "table" then
-		return results
-	end
-
-	local maxPlayers = math.max(math.floor(caps.maxPlayersPerFrame or 0), 0)
-	for index, snapshot in ipairs(players) do
-		if index > maxPlayers then
-			stats.playerSnapshotsTrimmed += 1
-			continue
-		end
-
-		local sanitized = sanitizeReplaySendValue(snapshot, 0, {}, stats)
-		if typeof(sanitized) == "table" then
-			table.insert(results, sanitized)
-		end
-	end
-
-	return results
-end
-
-local function sanitizeBombSnapshots(bombs, caps, importance, stats)
-	local results = {}
-	if typeof(bombs) ~= "table" then
-		return results
-	end
-
-	local maxBombs = math.max(math.floor(caps.maxBombsPerFrame or 0), 0)
-	if maxBombs <= 0 then
-		stats.bombSnapshotsTrimmed += #bombs
-		return results
-	end
-
-	local records = {}
-	for index, snapshot in ipairs(bombs) do
-		table.insert(records, {
-			index = index,
-			priority = getBombSnapshotPriority(snapshot, importance),
-			snapshot = snapshot,
-		})
-	end
-
-	if #records > maxBombs then
-		table.sort(records, function(left, right)
-			if left.priority == right.priority then
-				return left.index < right.index
-			end
-			return left.priority < right.priority
-		end)
-		for index = maxBombs + 1, #records do
-			records[index] = nil
-		end
-		stats.bombSnapshotsTrimmed += #bombs - #records
-	end
-
-	table.sort(records, function(left, right)
-		return left.index < right.index
-	end)
-
-	for _, record in ipairs(records) do
-		local sanitized = sanitizeReplaySendValue(record.snapshot, 0, {}, stats)
-		if typeof(sanitized) == "table" then
-			table.insert(results, sanitized)
-		end
-	end
-
-	return results
-end
-
-local function sanitizeFrameForSend(frame, caps, importance, stats)
-	if typeof(frame) ~= "table" then
-		return nil
-	end
-
-	local sanitized = {}
-	for key, value in pairs(frame) do
-		if key == "players" or key == "bombs" then
-			continue
-		end
-		if typeof(key) ~= "string" and typeof(key) ~= "number" then
-			continue
-		end
-
-		local copiedValue = sanitizeReplaySendValue(value, 0, {}, stats)
-		if copiedValue ~= nil then
-			sanitized[key] = copiedValue
-		end
-	end
-
-	sanitized.players = sanitizePlayerSnapshots(frame.players, caps, stats)
-	sanitized.bombs = sanitizeBombSnapshots(frame.bombs, caps, importance, stats)
-	return sanitized
-end
-
-local function getEventPriority(event): number
-	local eventType = if typeof(event) == "table" then event.eventType else nil
-	if CRITICAL_REPLAY_EVENTS[eventType] then
-		return 1
-	end
-	if IMPORTANT_REPLAY_EVENTS[eventType] then
-		return 2
-	end
-	return 3
-end
-
-local function getEventSortTime(event, fallbackIndex: number): number
-	if typeof(event) == "table" and isFiniteNumber(event.timestamp) then
-		return event.timestamp
-	end
-	return fallbackIndex
-end
-
-local function sanitizeEventsForSend(events, caps, stats)
-	local results = {}
-	if typeof(events) ~= "table" then
-		return results
-	end
-
-	local maxEvents = math.max(math.floor(caps.maxEvents or 0), 0)
-	if maxEvents <= 0 then
-		stats.eventsTrimmed += #events
-		return results
-	end
-
-	local records = {}
-	for index, event in ipairs(events) do
-		local sanitized = sanitizeReplaySendValue(event, 0, {}, stats)
-		if typeof(sanitized) ~= "table" or typeof(sanitized.eventType) ~= "string" then
-			continue
-		end
-
-		table.insert(records, {
-			index = index,
-			priority = getEventPriority(sanitized),
-			sortTime = getEventSortTime(sanitized, index),
-			event = sanitized,
-		})
-	end
-
-	if #records > maxEvents then
-		table.sort(records, function(left, right)
-			if left.priority == right.priority then
-				return left.index < right.index
-			end
-			return left.priority < right.priority
-		end)
-		for index = maxEvents + 1, #records do
-			records[index] = nil
-		end
-		stats.eventsTrimmed += #events - #records
-	end
-
-	table.sort(records, function(left, right)
-		if left.sortTime == right.sortTime then
-			return left.index < right.index
-		end
-		return left.sortTime < right.sortTime
-	end)
-
-	for _, record in ipairs(records) do
-		table.insert(results, record.event)
-	end
-
-	return results
-end
-
-local function sanitizeDestructionEventsForSend(events, caps, stats)
-	local results = {}
-	if typeof(events) ~= "table" then
-		return results
-	end
-
-	local maxEvents = math.max(math.floor(caps.maxDestructionEvents or 0), 0)
-	if maxEvents <= 0 then
-		stats.destructionEventsTrimmed += #events
-		return results
-	end
-
-	local records = {}
-	for index, event in ipairs(events) do
-		local sanitized = sanitizeReplaySendValue(event, 0, {}, stats)
-		if
-			typeof(sanitized) == "table"
-			and isFiniteNumber(sanitized.timestamp)
-			and typeof(sanitized.position) == "Vector3"
-			and isFiniteNumber(sanitized.radius)
-			and sanitized.radius > 0
-		then
-			table.insert(records, {
-				index = index,
-				sortTime = sanitized.timestamp,
-				event = sanitized,
-			})
-		end
-	end
-
-	table.sort(records, function(left, right)
-		if left.sortTime == right.sortTime then
-			return left.index < right.index
-		end
-		return left.sortTime < right.sortTime
-	end)
-
-	local startIndex = 1
-	if #records > maxEvents then
-		local trimCount = #records - maxEvents
-		startIndex = trimCount + 1
-		stats.destructionEventsTrimmed += trimCount
-	end
-
-	for index = startIndex, #records do
-		local record = records[index]
-		table.insert(results, record.event)
-	end
-
-	return results
+	return ReplayClipPolicy.EstimateClipPayloadSize(clip)
 end
 
 local function recordClipOptimization(mode: string, before, after, stats, caps)
-	clipOptimizationTotals.clips += 1
-	clipOptimizationTotals.framesTrimmed += stats.framesTrimmed
-	clipOptimizationTotals.playerSnapshotsTrimmed += stats.playerSnapshotsTrimmed
-	clipOptimizationTotals.bombSnapshotsTrimmed += stats.bombSnapshotsTrimmed
-	clipOptimizationTotals.eventsTrimmed += stats.eventsTrimmed
-	clipOptimizationTotals.destructionEventsTrimmed =
-		(clipOptimizationTotals.destructionEventsTrimmed or 0) + stats.destructionEventsTrimmed
-	clipOptimizationTotals.instanceValuesDropped += stats.instanceValuesDropped
-
-	lastClipOptimizationDebug = {
-		mode = mode,
-		roundId = currentRoundId,
-		before = before,
-		after = after,
-		caps = {
-			maxFrames = caps.maxFrames,
-			maxPlayersPerFrame = caps.maxPlayersPerFrame,
-			maxBombsPerFrame = caps.maxBombsPerFrame,
-			maxEvents = caps.maxEvents,
-			maxDestructionEvents = caps.maxDestructionEvents,
-		},
-		trimmed = {
-			frames = stats.framesTrimmed,
-			playerSnapshots = stats.playerSnapshotsTrimmed,
-			bombSnapshots = stats.bombSnapshotsTrimmed,
-			events = stats.eventsTrimmed,
-			destructionEvents = stats.destructionEventsTrimmed,
-			instanceValuesDropped = stats.instanceValuesDropped,
-		},
-	}
+	ReplayClipPolicy.AccumulateOptimizationTotals(clipOptimizationTotals, stats)
+	lastClipOptimizationDebug =
+		ReplayClipPolicy.BuildOptimizationDebug(mode, currentRoundId, before, after, stats, caps)
 end
 
 local function optimizeClipPayloadForSend(payload, caps, mode: string)
-	if typeof(payload) ~= "table" then
+	local optimized, debug = ReplayClipPolicy.OptimizeClipPayloadForSend(payload, caps, mode)
+	if not optimized then
 		return nil
 	end
-
-	local stats = {
-		framesTrimmed = 0,
-		playerSnapshotsTrimmed = 0,
-		bombSnapshotsTrimmed = 0,
-		eventsTrimmed = 0,
-		destructionEventsTrimmed = 0,
-		instanceValuesDropped = 0,
-	}
-	local before = estimateClipPayloadSize(payload)
-	local importance = collectClipImportance(payload)
-	local optimized = {}
-
-	for key, value in pairs(payload) do
-		if key == "frames" or key == "events" or key == "destructionEvents" then
-			continue
-		end
-		if typeof(key) ~= "string" and typeof(key) ~= "number" then
-			continue
-		end
-
-		local copiedValue = sanitizeReplaySendValue(value, 0, {}, stats)
-		if copiedValue ~= nil then
-			optimized[key] = copiedValue
-		end
-	end
-
-	local frames = if typeof(payload.frames) == "table" then payload.frames else {}
-	local frameIndices = getFrameSampleIndices(#frames, caps.maxFrames)
-	stats.framesTrimmed = math.max(#frames - #frameIndices, 0)
-	optimized.frames = {}
-	for _, frameIndex in ipairs(frameIndices) do
-		local sanitizedFrame = sanitizeFrameForSend(frames[frameIndex], caps, importance, stats)
-		if sanitizedFrame then
-			table.insert(optimized.frames, sanitizedFrame)
-		end
-	end
-
-	optimized.events = sanitizeEventsForSend(payload.events, caps, stats)
-	optimized.destructionEvents = sanitizeDestructionEventsForSend(payload.destructionEvents, caps, stats)
-
-	local after = estimateClipPayloadSize(optimized)
-	recordClipOptimization(mode, before, after, stats, caps)
+	recordClipOptimization(mode, debug.before, debug.after, debug.stats, debug.caps)
 	optimizedReplayPayloads[optimized] = true
 	return optimized
 end
 
 local function isClipWithinCaps(clip, minFrames: number, caps): boolean
-	if typeof(clip) ~= "table" then
-		return false
-	end
-
-	local estimate = estimateClipPayloadSize(clip)
-	if estimate.frames < minFrames or estimate.frames > caps.maxFrames then
-		return false
-	end
-	if estimate.maxPlayersPerFrame > caps.maxPlayersPerFrame then
-		return false
-	end
-	if estimate.maxBombsPerFrame > caps.maxBombsPerFrame then
-		return false
-	end
-	if estimate.events > caps.maxEvents then
-		return false
-	end
-	if estimate.destructionEvents > (caps.maxDestructionEvents or 0) then
-		return false
-	end
-
-	return true
+	return ReplayClipPolicy.IsClipWithinCaps(clip, minFrames, caps)
 end
 
 local function ensureRemotesFolder(): Folder
@@ -1203,6 +602,59 @@ local function bindAnimationStateRemote(remote: RemoteEvent)
 	animationStateConnection = remote.OnServerEvent:Connect(receiveClientAnimationState)
 end
 
+local function handleKillReplayRequest(player: Player, payload)
+	if not (typeof(player) == "Instance" and player:IsA("Player") and player.Parent == Players) then
+		return
+	end
+
+	local currentTime = workspace:GetServerTimeNow()
+	local lastRequestAt = lastKillReplayRequestAtByUserId[player.UserId]
+	if isFiniteNumber(lastRequestAt) and currentTime - lastRequestAt < KILL_REPLAY_REQUEST_COOLDOWN_SECONDS then
+		if DEBUG_KILL_REPLAY_SEND then
+			warn("[ReplayService] KillReplay request throttled", player.Name)
+		end
+		return
+	end
+	lastKillReplayRequestAtByUserId[player.UserId] = currentTime
+
+	local reason = if typeof(payload) == "table" and typeof(payload.reason) == "string" then payload.reason else "ClientRequest"
+	local killEvent = getRecentKillReplayEventForPlayer(player)
+	if not killEvent then
+		debugKillReplaySend("request-no-recent-kill-event", {
+			victimUserId = player.UserId,
+		})
+		if DEBUG_KILL_REPLAY_SEND then
+			warn(("[ReplayService] KillReplay request no recent event player=%s reason=%s"):format(player.Name, reason))
+		end
+		return
+	end
+
+	if DEBUG_KILL_REPLAY_SEND then
+		warn(
+			("[ReplayService] KillReplay request resend player=%s reason=%s timestamp=%s"):format(
+				player.Name,
+				reason,
+				tostring(killEvent.timestamp)
+			)
+		)
+	end
+
+	if type(sendKillReplayForEvent) ~= "function" then
+		debugKillReplaySend("request-send-unavailable", killEvent)
+		return
+	end
+	sendKillReplayForEvent(killEvent)
+end
+
+local function bindKillReplayRequestRemote(remote: RemoteEvent)
+	if killReplayRequestConnection then
+		killReplayRequestConnection:Disconnect()
+		killReplayRequestConnection = nil
+	end
+
+	killReplayRequestConnection = remote.OnServerEvent:Connect(handleKillReplayRequest)
+end
+
 local function getPlayerSnapshot(player: Player, timestamp: number)
 	local character = player.Character
 	if not character then
@@ -1407,6 +859,12 @@ local function ensureRemotes()
 		local remote = ensureRemote(remotesFolder, animationStateRemoteName)
 		bindAnimationStateRemote(remote)
 	end
+
+	local killReplayRequestRemoteName = ReplayConstants.REMOTES.KillReplayRequest
+	if typeof(killReplayRequestRemoteName) == "string" and killReplayRequestRemoteName ~= "" then
+		local remote = ensureRemote(remotesFolder, killReplayRequestRemoteName)
+		bindKillReplayRequestRemote(remote)
+	end
 end
 
 local function unwrapOptionalSelf(first, second, third)
@@ -1417,11 +875,25 @@ local function unwrapOptionalSelf(first, second, third)
 end
 
 local function getUserIdPlayer(userId: any): Player?
-	if not (isFiniteNumber(userId) and userId > 0) then
+	if not isFiniteNumber(userId) then
 		return nil
 	end
 
-	return Players:GetPlayerByUserId(math.floor(userId))
+	local resolvedUserId = math.floor(userId)
+	local ok, player = pcall(function()
+		return Players:GetPlayerByUserId(resolvedUserId)
+	end)
+	if ok and player then
+		return player
+	end
+
+	for _, candidate in ipairs(Players:GetPlayers()) do
+		if candidate.UserId == resolvedUserId then
+			return candidate
+		end
+	end
+
+	return nil
 end
 
 local function isClipReasonable(clip): boolean
@@ -1436,7 +908,7 @@ local function isPOTGClipReasonable(clip): boolean
 	return isClipWithinCaps(clip, MIN_POTG_REPLAY_FRAMES, getPOTGClipCaps())
 end
 
-local function debugKillReplaySend(status: string, payload)
+debugKillReplaySend = function(status: string, payload)
 	local estimate = estimateClipPayloadSize(payload)
 	local summary = {
 		status = status,
@@ -1447,6 +919,9 @@ local function debugKillReplaySend(status: string, payload)
 		bombSnapshots = estimate.bombSnapshots,
 		events = estimate.events,
 		destructionEvents = estimate.destructionEvents,
+		primaryEventTime = if typeof(payload) == "table" and isFiniteNumber(payload.primaryEventTime)
+			then payload.primaryEventTime
+			else nil,
 		killerUserId = if typeof(payload) == "table" then payload.killerUserId else nil,
 		victimUserId = if typeof(payload) == "table" then payload.victimUserId else nil,
 		optimization = lastClipOptimizationDebug,
@@ -1458,9 +933,10 @@ local function debugKillReplaySend(status: string, payload)
 	end
 
 	warn(
-		("[ReplayService] KillReplay %s start=%.3f end=%.3f frames=%d events=%d killer=%s victim=%s"):format(
+		("[ReplayService] KillReplay %s start=%.3f kill=%s end=%.3f frames=%d events=%d killer=%s victim=%s"):format(
 			status,
 			summary.startTime,
+			if summary.primaryEventTime then ("%.3f"):format(summary.primaryEventTime) else "nil",
 			summary.endTime,
 			estimate.frames,
 			estimate.events,
@@ -1738,7 +1214,7 @@ local function buildKillReplayPayload(killEvent)
 
 	local deathTime = killEvent.timestamp
 	local startTime = deathTime - ReplayConstants.KILL_REPLAY_PRE_SECONDS
-	local endTime = deathTime
+	local endTime = deathTime + ReplayConstants.KILL_REPLAY_POST_SECONDS
 	local clip = ensureBuffer():GetClip(startTime, endTime)
 
 	return optimizeClipPayloadForSend(addMapFieldsToPayload({
@@ -1747,6 +1223,7 @@ local function buildKillReplayPayload(killEvent)
 		victimUserId = killEvent.victimUserId,
 		sourceType = killEvent.sourceType,
 		sourceId = killEvent.sourceId,
+		primaryEventTime = deathTime,
 		startTime = clip.startTime,
 		endTime = clip.endTime,
 		frames = clip.frames,
@@ -1754,7 +1231,20 @@ local function buildKillReplayPayload(killEvent)
 	}, clip.endTime), getKillClipCaps(), "KillReplay")
 end
 
-local function sendKillReplayForEvent(killEvent)
+sendKillReplayForEvent = function(killEvent)
+	if DEBUG_KILL_REPLAY_SEND then
+		warn(
+			("[ReplayService] KillReplay send requested victim=%s killer=%s timestamp=%s pre=%.2f post=%.2f delay=%.3f"):format(
+				tostring(if typeof(killEvent) == "table" then killEvent.victimUserId else nil),
+				tostring(if typeof(killEvent) == "table" then killEvent.killerUserId else nil),
+				tostring(if typeof(killEvent) == "table" then killEvent.timestamp else nil),
+				ReplayConstants.KILL_REPLAY_PRE_SECONDS,
+				ReplayConstants.KILL_REPLAY_POST_SECONDS,
+				KILL_REPLAY_SEND_DELAY_SECONDS
+			)
+		)
+	end
+
 	local payload = buildKillReplayPayload(killEvent)
 	if not payload then
 		debugKillReplaySend("skipped-invalid-payload", killEvent)
@@ -1779,6 +1269,15 @@ local function sendKillReplayForEvent(killEvent)
 		return false
 	end
 
+	if DEBUG_KILL_REPLAY_SEND then
+		warn(
+			("[ReplayService] KillReplay FireClient attempt victim=%s frames=%d events=%d"):format(
+				victimPlayer.Name,
+				estimateClipPayloadSize(payload).frames,
+				estimateClipPayloadSize(payload).events
+			)
+		)
+	end
 	local sent = ReplayService.PlayKillReplay(victimPlayer, payload)
 	debugKillReplaySend(if sent then "sent" else "skipped-remote", payload)
 	return sent
@@ -1786,10 +1285,36 @@ end
 
 local function scheduleKillReplay(killEvent)
 	if typeof(killEvent) ~= "table" then
+		debugKillReplaySend("skipped-invalid-event", killEvent)
 		return
 	end
 
-	sendKillReplayForEvent(killEvent)
+	if DEBUG_KILL_REPLAY_SEND then
+		warn(
+			("[ReplayService] Scheduling delayed KillReplay delay=%.3f victim=%s killer=%s timestamp=%s"):format(
+				KILL_REPLAY_SEND_DELAY_SECONDS,
+				tostring(killEvent.victimUserId),
+				tostring(killEvent.killerUserId),
+				tostring(killEvent.timestamp)
+			)
+		)
+	end
+	local victimUserId = killEvent.victimUserId
+	local killTimestamp = killEvent.timestamp
+	task.delay(KILL_REPLAY_SEND_DELAY_SECONDS, function()
+		local eventToSend = getRecentKillReplayEventForUserId(victimUserId) or killEvent
+		if
+			typeof(eventToSend) == "table"
+			and isFiniteNumber(killTimestamp)
+			and isFiniteNumber(eventToSend.timestamp)
+			and math.abs(eventToSend.timestamp - killTimestamp) > 0.001
+		then
+			debugKillReplaySend("skipped-stale-stored-event", killEvent)
+			return
+		end
+
+		sendKillReplayForEvent(eventToSend)
+	end)
 end
 
 local function waitForPOTGPostWindow(candidate, maxWaitSeconds: number?)
@@ -1817,7 +1342,7 @@ local function buildPOTGReplayPayload(candidate)
 	if not (isFiniteNumber(candidate.startTime) and isFiniteNumber(candidate.endTime)) then
 		return nil
 	end
-	if not (isFiniteNumber(candidate.playerUserId) and candidate.playerUserId > 0) then
+	if not isFiniteNumber(candidate.playerUserId) then
 		return nil
 	end
 
@@ -1884,6 +1409,8 @@ local function resetReplayRoundStorage(roundId: any)
 	table.clear(latestAnimationStateByUserId)
 	table.clear(clientReplaySamplesByUserId)
 	table.clear(lastAnimationStateAtByUserId)
+	table.clear(recentKillReplayEventsByVictimUserId)
+	table.clear(lastKillReplayRequestAtByUserId)
 	accumulator = 0
 	sampleCount = 0
 	lastSampleTime = 0
@@ -1964,6 +1491,8 @@ function ReplayService.OnPlayerRemoving(_self, player: Player)
 		latestAnimationStateByUserId[player.UserId] = nil
 		clientReplaySamplesByUserId[player.UserId] = nil
 		lastAnimationStateAtByUserId[player.UserId] = nil
+		recentKillReplayEventsByVictimUserId[player.UserId] = nil
+		lastKillReplayRequestAtByUserId[player.UserId] = nil
 	end
 end
 
@@ -1991,7 +1520,22 @@ function ReplayService.RecordEvent(first, second, third)
 		end
 	end
 
-	local recorded = ensureBuffer():AddEvent(event)
+	local buffer = ensureBuffer()
+	local recorded = buffer:AddEvent(event)
+	if eventType == "PlayerKilled" and DEBUG_KILL_REPLAY_SEND then
+		local counts = buffer:GetDebugCounts()
+		warn(
+			("[ReplayService] RecordEvent PlayerKilled recorded=%s victim=%s killer=%s timestamp=%s bufferFrames=%d bufferEvents=%d newest=%s"):format(
+				tostring(recorded),
+				tostring(event.victimUserId),
+				tostring(event.killerUserId),
+				tostring(event.timestamp),
+				counts.frames,
+				counts.events,
+				tostring(counts.newestTimestamp)
+			)
+		)
+	end
 	if recorded then
 		local potgEvent = copyReplayEvent(event)
 		if potgEvent then
@@ -2004,7 +1548,11 @@ function ReplayService.RecordEvent(first, second, third)
 		end
 
 		if eventType == "PlayerKilled" then
-			scheduleKillReplay(event)
+			local storedKillEvent = storeRecentKillReplayEvent(event)
+			if not storedKillEvent then
+				debugKillReplaySend("skipped-store-recent-kill", event)
+			end
+			scheduleKillReplay(storedKillEvent or event)
 		end
 	end
 
@@ -2249,9 +1797,11 @@ end
 function ReplayService.PlayKillReplay(first, second, third)
 	local player, clip = unwrapOptionalSelf(first, second, third)
 	if not (typeof(player) == "Instance" and player:IsA("Player") and player.Parent == Players) then
+		debugKillReplaySend("skipped-invalid-player", clip)
 		return false
 	end
 	if typeof(clip) ~= "table" then
+		debugKillReplaySend("skipped-invalid-clip", clip)
 		return false
 	end
 
@@ -2273,6 +1823,7 @@ function ReplayService.PlayKillReplay(first, second, third)
 		return false
 	end
 
+	debugKillReplaySend("fireclient", clip)
 	local ok, err = pcall(function()
 		remote:FireClient(player, clip)
 	end)

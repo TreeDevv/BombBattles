@@ -115,6 +115,9 @@
         },
         "TestService": {
           "$path": "src/game/ServerScriptService/Services/Core/TestService.lua"
+        },
+        "WorldTextService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/WorldTextService.lua"
         }
       }
     },
@@ -158,6 +161,9 @@
           "ScoreboardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ScoreboardController.lua"
           },
+          "ResultsScreenController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ResultsScreenController.lua"
+          },
           "SkillsInventoryController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/SkillsInventoryController.lua"
           },
@@ -175,6 +181,9 @@
           },
           "KillEffectController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/KillEffectController.lua"
+          },
+          "WorldTextController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/WorldTextController.lua"
           },
           "TopHUDController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/TopHUDController.lua"

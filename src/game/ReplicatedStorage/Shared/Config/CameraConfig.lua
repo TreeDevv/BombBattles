@@ -5,6 +5,8 @@ return table.freeze({
 	SlideJumpFOVBonus = 6,
 	SlideJumpFOVSpeedForMax = 80,
 	FOVResponsiveness = 10,
+	ThrowFOVBonus = 4,
+	ThrowFOVDuration = 0.24,
 
 	ShoulderOffset = Vector3.new(2.25, 0.45, 0),
 	ShoulderResponsiveness = 14,
@@ -53,6 +55,17 @@ return table.freeze({
 	LandingRunoutSettleIntensityScale = 0.75,
 	LandingSettleMaxFOVDip = 1.25,
 	LandingSettleMaxYOffset = -0.12,
+
+	BombExplosionShakeMagnitude = 2.6,
+	BombExplosionShakeRoughness = 13,
+	BombExplosionShakeFadeOutTime = 0.36,
+	BombExplosionShakePositionInfluence = Vector3.new(0.22, 0.2, 0.22),
+	BombExplosionShakeRotationInfluence = Vector3.new(1.7, 1.1, 1.2),
+	ThrowShakeMagnitude = 1.15,
+	ThrowShakeRoughness = 12,
+	ThrowShakeFadeOutTime = 0.18,
+	ThrowShakePositionInfluence = Vector3.new(0.04, 0.05, 0),
+	ThrowShakeRotationInfluence = Vector3.new(0.25, 0.08, 0.45),
 
 	FallLagDelay = 0.35,
 	FallLagFullTime = 1.1,

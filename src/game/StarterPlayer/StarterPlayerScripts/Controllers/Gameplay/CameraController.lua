@@ -43,6 +43,7 @@ CameraController._landingSettleStartTime = NEVER
 CameraController._landingSettleIntensity = 0
 CameraController._landingSettleDuration = CameraConfig.LandingSettleDuration
 CameraController._currentLandingSettleYOffset = 0
+CameraController._throwFOVStartTime = NEVER
 CameraController._mouseLocked = false
 CameraController._previousMouseBehavior = nil :: Enum.MouseBehavior?
 CameraController._previousMouseIconEnabled = nil :: boolean?
@@ -124,7 +125,7 @@ local function isFirstPerson(camera: Camera): boolean
 	return distance <= CameraConfig.FirstPersonDistanceThreshold
 end
 
-local function isHudFOVActive(camera: Camera): boolean
+local function isHudFOVActive(camera: Camera, extraFOVAllowance: number?): boolean
 	for _, child in Lighting:GetChildren() do
 		if child:IsA("BlurEffect") and HUD_FOV_BLUR_NAMES[child.Name] and child.Size > 0.1 then
 			return true
@@ -135,7 +136,16 @@ local function isHudFOVActive(camera: Camera): boolean
 		+ CameraConfig.SprintFOVBonus
 		+ CameraConfig.AirFOVBonus
 		+ CameraConfig.SlideJumpFOVBonus
+		+ (extraFOVAllowance or 0)
 	return camera.FieldOfView > maxMovementFOV + 0.5
+end
+
+local function getUnlockedMouseBehavior(previousMouseBehavior: Enum.MouseBehavior?): Enum.MouseBehavior
+	if previousMouseBehavior ~= nil and previousMouseBehavior ~= Enum.MouseBehavior.LockCenter then
+		return previousMouseBehavior
+	end
+
+	return Enum.MouseBehavior.Default
 end
 
 function CameraController:_lockMouse()
@@ -166,17 +176,12 @@ function CameraController:_setShiftLocked(shiftLocked: boolean)
 end
 
 function CameraController:_restoreMouse()
-	if not self._mouseLocked then
+	if not self._mouseLocked and UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
 		return
 	end
 
-	if self._previousMouseBehavior then
-		UserInputService.MouseBehavior = self._previousMouseBehavior
-	end
-
-	if self._previousMouseIconEnabled ~= nil then
-		UserInputService.MouseIconEnabled = self._previousMouseIconEnabled
-	end
+	UserInputService.MouseBehavior = getUnlockedMouseBehavior(self._previousMouseBehavior)
+	UserInputService.MouseIconEnabled = if self._previousMouseIconEnabled ~= nil then self._previousMouseIconEnabled else true
 
 	self._mouseLocked = false
 	self._previousMouseBehavior = nil
@@ -250,6 +255,7 @@ function CameraController:_resetCameraState(camera: Camera?)
 	self._landingSettleIntensity = 0
 	self._landingSettleDuration = CameraConfig.LandingSettleDuration
 	self._currentLandingSettleYOffset = 0
+	self._throwFOVStartTime = NEVER
 
 	if camera then
 		self._currentFOV = camera.FieldOfView
@@ -281,6 +287,65 @@ function CameraController:_playLandingBump(airborneTime: number)
 		if isHeavyLanding
 			then CameraConfig.LandingHeavyShakeRotationInfluence
 			else CameraConfig.LandingSmallShakeRotationInfluence
+	)
+end
+
+function CameraController:_getThrowFOVBonus(now: number): number
+	local duration = math.max(CameraConfig.ThrowFOVDuration, 0.001)
+	local elapsed = now - self._throwFOVStartTime
+	if self._throwFOVStartTime == NEVER or elapsed >= duration then
+		self._throwFOVStartTime = NEVER
+		return 0
+	end
+
+	return CameraConfig.ThrowFOVBonus * (1 - smoothstep(elapsed / duration))
+end
+
+function CameraController:PlayBombThrowPunch()
+	self._throwFOVStartTime = os.clock()
+	self:_getCameraShaker():ShakeOnce(
+		CameraConfig.ThrowShakeMagnitude,
+		CameraConfig.ThrowShakeRoughness,
+		0,
+		CameraConfig.ThrowShakeFadeOutTime,
+		CameraConfig.ThrowShakePositionInfluence,
+		CameraConfig.ThrowShakeRotationInfluence
+	)
+end
+
+function CameraController:PlayExplosionShake(origin: Vector3, radius: number?)
+	if typeof(origin) ~= "Vector3" then
+		return
+	end
+
+	local maxRadius = math.max(tonumber(radius) or 0, 0)
+	if maxRadius <= 0 then
+		return
+	end
+
+	local character = self:_getCharacter()
+	local rootPart = if character then getRootPart(character) else nil
+	if not rootPart then
+		return
+	end
+
+	local distance = (rootPart.Position - origin).Magnitude
+	if distance > maxRadius then
+		return
+	end
+
+	local strength = smoothstep(1 - math.clamp(distance / maxRadius, 0, 1))
+	if strength <= 0 then
+		return
+	end
+
+	self:_getCameraShaker():ShakeOnce(
+		CameraConfig.BombExplosionShakeMagnitude * strength,
+		CameraConfig.BombExplosionShakeRoughness,
+		0,
+		CameraConfig.BombExplosionShakeFadeOutTime,
+		CameraConfig.BombExplosionShakePositionInfluence * strength,
+		CameraConfig.BombExplosionShakeRotationInfluence * strength
 	)
 end
 
@@ -475,6 +540,7 @@ function CameraController:_step(dt: number)
 	local landingSettleAlpha = self:_getLandingSettleAlpha(now)
 	local airborneTime = self:_updateFallState(now, isGrounded, velocityY)
 	self:_updateFallLag(dt, isAirborne, airborneTime, velocityY)
+	local throwFOVBonus = self:_getThrowFOVBonus(now)
 
 	local targetFOV = CameraConfig.BaseFOV
 	if isSprinting then
@@ -498,8 +564,9 @@ function CameraController:_step(dt: number)
 		targetFOV += CameraConfig.SlideJumpFOVBonus * slideJumpAlpha
 	end
 	targetFOV -= CameraConfig.LandingSettleMaxFOVDip * landingSettleAlpha
+	targetFOV += throwFOVBonus
 
-	if CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera) then
+	if CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera, throwFOVBonus) then
 		self._currentFOV = camera.FieldOfView
 	else
 		self._currentFOV = smoothNumber(self._currentFOV, targetFOV, CameraConfig.FOVResponsiveness, dt)

@@ -34,6 +34,9 @@ type ProjectileState = {
 	settled: boolean,
 	hasImpacted: boolean,
 	grounded: boolean,
+	groundRollDirection: Vector3,
+	physicalProjectile: Instance?,
+	physicalRoot: BasePart?,
 	destroyed: boolean,
 	nextSnapshotAt: number,
 	lastImpactAt: number,
@@ -135,6 +138,194 @@ local function readFiniteVector(value: any, fallback: Vector3): Vector3
 	return if ProjectilePhysics.IsFiniteVector(value) then value else fallback
 end
 
+local function getHorizontalDirection(direction: any): Vector3?
+	if typeof(direction) ~= "Vector3" then
+		return nil
+	end
+
+	local horizontal = Vector3.new(direction.X, 0, direction.Z)
+	if horizontal.Magnitude <= 0.05 then
+		return nil
+	end
+
+	return horizontal.Unit
+end
+
+local function getOwnerFacingDirection(owner: Player): Vector3?
+	local character = owner.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if rootPart and rootPart:IsA("BasePart") then
+		return getHorizontalDirection(rootPart.CFrame.LookVector)
+	end
+
+	return nil
+end
+
+local function resolveGroundRollDirection(owner: Player, aimDirection: Vector3): Vector3
+	return getHorizontalDirection(aimDirection) or getOwnerFacingDirection(owner) or Vector3.zAxis
+end
+
+local function getBombAsset(): Instance?
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local bombs = assets and assets:FindFirstChild("Bombs")
+	if not bombs then
+		return nil
+	end
+
+	return bombs:FindFirstChild(BombConfig.RuntimeBombName) or bombs:FindFirstChildWhichIsA("Model") or bombs:FindFirstChildWhichIsA("BasePart")
+end
+
+local function getFirstBasePart(instance: Instance): BasePart?
+	if instance:IsA("BasePart") then
+		return instance
+	end
+
+	return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function getProjectileFolder(): Folder
+	local existing = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = BombConfig.ProjectileFolderName
+	folder.Parent = workspace
+	return folder
+end
+
+local function preparePhysicalProjectile(projectileId: string, owner: Player, bombType: string): (Instance, BasePart)
+	local asset = getBombAsset()
+	local projectile: Instance
+	local rootPart: BasePart?
+
+	if asset then
+		projectile = asset:Clone()
+		rootPart = getFirstBasePart(projectile)
+	else
+		local part = Instance.new("Part")
+		part.Name = BombConfig.RuntimeBombName
+		part.Shape = Enum.PartType.Ball
+		part.Size = BombConfig.RuntimeBombSize
+		part.Material = Enum.Material.Neon
+		part.Color = Color3.fromRGB(45, 45, 45)
+		projectile = part
+		rootPart = part
+	end
+
+	projectile.Name = "BombProjectile_" .. projectileId
+	if projectile:IsA("Model") and rootPart then
+		projectile.PrimaryPart = rootPart
+	end
+
+	for _, descendant in ipairs(projectile:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			local isRootPart = descendant == rootPart
+			descendant.Anchored = false
+			descendant.CanCollide = isRootPart
+			descendant.CanQuery = isRootPart
+			descendant.CanTouch = false
+			descendant.Massless = not isRootPart
+		end
+	end
+	if projectile:IsA("BasePart") then
+		projectile.Anchored = false
+		projectile.CanCollide = true
+		projectile.CanQuery = true
+		projectile.CanTouch = false
+	end
+
+	assert(rootPart, "Bomb projectile requires a BasePart")
+	projectile:SetAttribute("ProjectileId", projectileId)
+	projectile:SetAttribute("OwnerUserId", owner.UserId)
+	projectile:SetAttribute("BombType", bombType)
+	return projectile, rootPart
+end
+
+local function setPhysicalMotion(projectile: Instance, velocity: Vector3, angularVelocity: Vector3)
+	for _, descendant in ipairs(projectile:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.AssemblyLinearVelocity = velocity
+			descendant.AssemblyAngularVelocity = angularVelocity
+			pcall(function()
+				descendant:SetNetworkOwner(nil)
+			end)
+		end
+	end
+	if projectile:IsA("BasePart") then
+		projectile.AssemblyLinearVelocity = velocity
+		projectile.AssemblyAngularVelocity = angularVelocity
+		pcall(function()
+			projectile:SetNetworkOwner(nil)
+		end)
+	end
+end
+
+local function destroyPhysicalProjectile(state: ProjectileState?)
+	if not state then
+		return
+	end
+
+	local projectile = state.physicalProjectile
+	state.physicalProjectile = nil
+	state.physicalRoot = nil
+	if projectile and projectile.Parent then
+		projectile:Destroy()
+	end
+end
+
+local function getPhysicalPosition(state: ProjectileState): Vector3
+	local rootPart = state.physicalRoot
+	if rootPart and rootPart.Parent then
+		return rootPart.Position
+	end
+
+	return state.position
+end
+
+local function getPhysicalVelocity(state: ProjectileState): Vector3
+	local rootPart = state.physicalRoot
+	if rootPart and rootPart.Parent then
+		return rootPart.AssemblyLinearVelocity
+	end
+
+	return state.velocity
+end
+
+local function spawnPhysicalProjectile(state: ProjectileState): Instance?
+	if state.physicalProjectile and state.physicalProjectile.Parent then
+		return state.physicalProjectile
+	end
+
+	local projectile, rootPart = preparePhysicalProjectile(state.id, state.owner, state.bombType)
+	projectile:SetAttribute("FuseStartedAt", state.fuseStartedAt)
+	projectile:SetAttribute("FuseEndsAt", state.explodeAt)
+
+	local cframe = CFrame.new(state.position)
+	if projectile:IsA("Model") then
+		projectile:PivotTo(cframe)
+	else
+		projectile.CFrame = cframe
+	end
+	projectile.Parent = getProjectileFolder()
+
+	local velocity = state.velocity
+	local radius = math.max(state.physics.radius, 0.1)
+	local angularAxis = Vector3.yAxis:Cross(velocity)
+	local angularVelocity = if angularAxis.Magnitude > 0.05 then angularAxis.Unit * (velocity.Magnitude / radius) else Vector3.zero
+	setPhysicalMotion(projectile, velocity, angularVelocity)
+
+	state.physicalProjectile = projectile
+	state.physicalRoot = rootPart
+	state.position = rootPart.Position
+	state.velocity = rootPart.AssemblyLinearVelocity
+	return projectile
+end
+
 local function readNumber(value: any, fallback: number, minimum: number?, maximum: number?): number
 	local numberValue = if typeof(value) == "number" and value == value then value else fallback
 	if typeof(minimum) == "number" then
@@ -213,6 +404,7 @@ local function fireSnapshot(state: ProjectileState, currentTime: number, force: 
 		settled = state.settled,
 		grounded = state.grounded,
 		radius = state.physics.radius,
+		physicalProjectile = state.physicalProjectile,
 	})
 end
 
@@ -265,6 +457,7 @@ local function fireImpact(
 		acceleration = getAcceleration(state.physics, state.hasImpacted),
 		hitInstance = hit.Instance,
 		settled = state.settled,
+		physicalProjectile = state.physicalProjectile,
 	})
 end
 
@@ -308,9 +501,13 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 			sandbagHorizontalScale = result.sandbagHorizontalScale,
 			sandbagMaxHorizontalSpeed = result.sandbagMaxHorizontalSpeed,
 			sandbagDownwardVelocity = result.sandbagDownwardVelocity,
+			groundedFrictionPerSecond = result.groundedFrictionPerSecond,
+			minRollSpeed = result.minRollSpeed,
+			minGroundImpactRollSpeed = result.minGroundImpactRollSpeed,
 		},
 	}
 	state.physics = ProjectilePhysics.ResolvePhysicsConfig(state.physics, modifier.physics)
+	destroyPhysicalProjectile(state)
 	state.position = origin
 	state.lastPosition = origin
 	state.velocity = ProjectilePhysics.GetLaunchVelocity(aimDirection, state.physics)
@@ -318,6 +515,7 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 	state.settled = false
 	state.hasImpacted = false
 	state.grounded = false
+	state.groundRollDirection = resolveGroundRollDirection(state.owner, aimDirection)
 
 	local remainingFuse = math.max(state.explodeAt - currentTime, 0)
 	fireEffect("Throw", {
@@ -375,6 +573,8 @@ end
 local function explodeProjectile(state: ProjectileState)
 	activeProjectiles[state.id] = nil
 	state.destroyed = true
+	state.position = getPhysicalPosition(state)
+	destroyPhysicalProjectile(state)
 	explode(state.owner, state.position, "Projectile", state.id)
 end
 
@@ -388,6 +588,19 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	end
 	if currentTime >= state.explodeAt then
 		explodeProjectile(state)
+		return
+	end
+
+	if state.physicalProjectile then
+		state.position = getPhysicalPosition(state)
+		state.velocity = getPhysicalVelocity(state)
+		if not handleStepHook(state, state.position + state.velocity * fixedDt, currentTime) then
+			return
+		end
+		if state.destroyed or not state.physicalProjectile then
+			return
+		end
+		fireSnapshot(state, currentTime, false)
 		return
 	end
 
@@ -418,6 +631,9 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		state.hasImpacted = result.hasImpacted == true
 		state.grounded = result.grounded == true
 		if result.hit and result.hitPosition and result.hitNormal and result.incomingVelocity then
+			if state.grounded then
+				spawnPhysicalProjectile(state)
+			end
 			fireImpact(state, result.hit, result.hitPosition, result.hitNormal, result.incomingVelocity)
 			if state.destroyed then
 				return
@@ -524,6 +740,7 @@ function BombProjectileService:Launch(request): boolean
 	end
 
 	local initialVelocity = ProjectilePhysics.GetLaunchVelocity(aimDirection, physics)
+	local groundRollDirection = resolveGroundRollDirection(owner, aimDirection)
 	local state: ProjectileState = {
 		id = projectileId,
 		owner = owner,
@@ -541,6 +758,9 @@ function BombProjectileService:Launch(request): boolean
 		settled = false,
 		hasImpacted = false,
 		grounded = false,
+		groundRollDirection = groundRollDirection,
+		physicalProjectile = nil,
+		physicalRoot = nil,
 		destroyed = false,
 		nextSnapshotAt = launchTime,
 		lastImpactAt = 0,
@@ -584,6 +804,8 @@ function BombProjectileService:DestroyProjectile(projectileId: string, reason: s
 
 	activeProjectiles[projectileId] = nil
 	state.destroyed = true
+	state.position = getPhysicalPosition(state)
+	destroyPhysicalProjectile(state)
 	fireEffect("ProjectileDestroy", {
 		player = state.owner,
 		projectileId = state.id,
@@ -620,12 +842,15 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 		local radius = if typeof(state.physics.radius) == "number" then state.physics.radius else nil
 		local sizeScale = if radius and typeof(defaultRadius) == "number" and defaultRadius > 0 then radius / defaultRadius else nil
 
+		local position = if state.physicalProjectile then getPhysicalPosition(state) else state.position
+		local velocity = if state.physicalProjectile then getPhysicalVelocity(state) else state.velocity
+
 		table.insert(snapshots, {
 			bombId = state.id,
 			ownerUserId = ownerUserId,
 			bombType = state.bombType,
-			cframe = CFrame.new(state.position),
-			assemblyLinearVelocity = state.velocity,
+			cframe = CFrame.new(position),
+			assemblyLinearVelocity = velocity,
 			radius = radius,
 			sizeScale = sizeScale,
 			fuseStartedAt = state.fuseStartedAt,

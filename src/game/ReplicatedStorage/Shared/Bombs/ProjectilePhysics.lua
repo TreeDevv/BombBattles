@@ -30,6 +30,7 @@ export type PhysicsConfig = {
 	surfaceOffset: number,
 	groundedFrictionPerSecond: number,
 	minRollSpeed: number,
+	minGroundImpactRollSpeed: number,
 	maxCollisionsPerStep: number,
 }
 
@@ -39,6 +40,7 @@ export type ProjectileState = {
 	settled: boolean?,
 	hasImpacted: boolean?,
 	grounded: boolean?,
+	groundRollDirection: Vector3?,
 }
 
 export type StepResult = {
@@ -124,6 +126,7 @@ function ProjectilePhysics.ResolvePhysicsConfig(defaults, override): PhysicsConf
 		surfaceOffset = readNumber(override, "surfaceOffset", readNumber(defaults, "surfaceOffset", 0.035, 0, 4), 0, 4),
 		groundedFrictionPerSecond = readNumber(override, "groundedFrictionPerSecond", readNumber(defaults, "groundedFrictionPerSecond", 1.1, 0, 100), 0, 100),
 		minRollSpeed = readNumber(override, "minRollSpeed", readNumber(defaults, "minRollSpeed", 1.25, 0, 10000), 0, 10000),
+		minGroundImpactRollSpeed = readNumber(override, "minGroundImpactRollSpeed", readNumber(defaults, "minGroundImpactRollSpeed", 0, 0, 10000), 0, 10000),
 		maxCollisionsPerStep = math.floor(readNumber(override, "maxCollisionsPerStep", readNumber(defaults, "maxCollisionsPerStep", 3, 1, 12), 1, 12)),
 	}
 end
@@ -203,6 +206,39 @@ end
 
 local function projectOntoPlane(vector: Vector3, normal: Vector3): Vector3
 	return vector - normal * vector:Dot(normal)
+end
+
+local function getPlaneDirection(direction: Vector3?, normal: Vector3): Vector3?
+	if not isFiniteVector(direction) then
+		return nil
+	end
+
+	local planeDirection = projectOntoPlane(direction :: Vector3, normal)
+	if planeDirection.Magnitude <= EPSILON then
+		return nil
+	end
+
+	return planeDirection.Unit
+end
+
+local function ensureGroundImpactRollVelocity(velocity: Vector3, normal: Vector3, physics: PhysicsConfig, rollDirection: Vector3?): Vector3
+	if normal.Y < physics.floorNormalY or physics.minGroundImpactRollSpeed <= 0 then
+		return velocity
+	end
+
+	local floorVelocity = projectOntoPlane(velocity, normal)
+	if floorVelocity.Magnitude >= physics.minGroundImpactRollSpeed then
+		return floorVelocity
+	end
+
+	local direction = getPlaneDirection(rollDirection, normal)
+		or getPlaneDirection(floorVelocity, normal)
+		or getPlaneDirection(Vector3.zAxis, normal)
+	if not direction then
+		return floorVelocity
+	end
+
+	return direction * physics.minGroundImpactRollSpeed
 end
 
 local function applyGroundedFriction(velocity: Vector3, dt: number, physics: PhysicsConfig): Vector3
@@ -403,6 +439,7 @@ function ProjectilePhysics.Step(state: ProjectileState, dt: number, physics: Phy
 	local settled = false
 	local hasImpacted = state.hasImpacted == true
 	local grounded = state.grounded == true
+	local groundRollDirection = state.groundRollDirection
 
 	if grounded then
 		local groundedResult = stepGrounded(position, velocity, remainingDt, physics, params)
@@ -430,6 +467,9 @@ function ProjectilePhysics.Step(state: ProjectileState, dt: number, physics: Phy
 			local recoveredPosition, recoveryHit, recoveryNormal = recoverFloorContact(nextPosition, physics, params)
 			if recoveryHit and recoveryNormal then
 				local impactVelocity = ProjectilePhysics.GetImpactVelocity(nextVelocity, recoveryNormal, physics)
+				if recoveryNormal.Y >= physics.floorNormalY then
+					impactVelocity = ensureGroundImpactRollVelocity(impactVelocity, recoveryNormal, physics, groundRollDirection)
+				end
 
 				lastHit = recoveryHit
 				lastHitPosition = recoveredPosition
@@ -463,6 +503,9 @@ function ProjectilePhysics.Step(state: ProjectileState, dt: number, physics: Phy
 		local normal = getNormal(hit.Normal)
 		local centerAtHit = position + movement.Unit * math.max(hit.Distance, 0)
 		local impactVelocity = ProjectilePhysics.GetImpactVelocity(incomingVelocity, normal, physics)
+		if normal.Y >= physics.floorNormalY then
+			impactVelocity = ensureGroundImpactRollVelocity(impactVelocity, normal, physics, groundRollDirection)
+		end
 
 		lastHit = hit
 		lastHitPosition = centerAtHit

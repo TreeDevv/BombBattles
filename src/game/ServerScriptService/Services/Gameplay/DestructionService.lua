@@ -16,6 +16,7 @@ local UNSAFE_TAGS = {
 
 local DestructionService = {}
 local replayService = nil
+local scoreRecorder = nil
 
 local function getReplayService()
 	if replayService then
@@ -145,6 +146,21 @@ function DestructionService:OnStart()
 	VoxManager:setTerrainDebugConfig(DestructionConfig)
 end
 
+function DestructionService:SetScoreRecorder(recorder)
+	scoreRecorder = if type(recorder) == "function" then recorder else nil
+end
+
+local function recordDestructionScore(sourceContext, targetsHit: number)
+	if not scoreRecorder then
+		return
+	end
+
+	local ok, err = pcall(scoreRecorder, sourceContext, targetsHit)
+	if not ok then
+		warn("[DestructionService] Failed to record destruction score:", err)
+	end
+end
+
 function DestructionService:DestroySphere(position: Vector3, radius: number?, sourceContext)
 	if typeof(position) ~= "Vector3" then
 		return {}
@@ -183,6 +199,7 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 		then debrisPayloads.targetsHit
 		else #debrisPayloads
 	if targetsHit > 0 then
+		recordDestructionScore(sourceContext, targetsHit)
 		recordMapDestruction(position, destructionRadius, sourceContext, debrisPayloads)
 	end
 

@@ -63,6 +63,10 @@ local function parseCells(value: any): Vector2
 	return DEFAULT_CELLS
 end
 
+local function isReplayUserId(value: any): boolean
+	return typeof(value) == "number" and value == value and math.abs(value) < math.huge and value > 0
+end
+
 local function findLegacyTemplate(): GuiObject?
 	local legacyGui = PlayerGui:FindFirstChild(LEGACY_SCREEN_GUI_NAME)
 	local current: Instance? = legacyGui
@@ -197,7 +201,7 @@ function KillEffectController:_shouldAcceptPayload(payload): boolean
 	return true
 end
 
-function KillEffectController:_playEffect()
+function KillEffectController:_playEffect(): boolean
 	local hud = self._hud
 	local template = self._template
 	if not (hud and hud.Parent and template and template.Parent) then
@@ -206,7 +210,7 @@ function KillEffectController:_playEffect()
 		template = self._template
 	end
 	if not (hud and hud.Parent and template and template.Parent) then
-		return
+		return false
 	end
 
 	self._nextEffectId += 1
@@ -255,6 +259,21 @@ function KillEffectController:_playEffect()
 			self:_destroyEffect(effect)
 		end)
 	end)
+	return true
+end
+
+function KillEffectController:PlayReplayKillEffect(payload): boolean
+	if typeof(payload) ~= "table" then
+		return false
+	end
+	if not isReplayUserId(payload.killerUserId) or not isReplayUserId(payload.victimUserId) then
+		return false
+	end
+	if payload.killerUserId == payload.victimUserId then
+		return false
+	end
+
+	return self:_playEffect()
 end
 
 function KillEffectController:_bindRemote()

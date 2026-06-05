@@ -37,6 +37,7 @@ local BOUNCY_PHYSICS = table.freeze({
 	surfaceOffset = 0.035,
 	groundedFrictionPerSecond = 0.35,
 	minRollSpeed = 2.5,
+	minGroundImpactRollSpeed = 0,
 	maxCollisionsPerStep = 3,
 })
 
@@ -60,8 +61,9 @@ local NORMAL_PHYSICS = table.freeze({
 	sandbagMaxHorizontalSpeed = 22,
 	sandbagDownwardVelocity = 18,
 	surfaceOffset = 0.035,
-	groundedFrictionPerSecond = 1.1,
+	groundedFrictionPerSecond = 0.8,
 	minRollSpeed = 1.25,
+	minGroundImpactRollSpeed = 14,
 	maxCollisionsPerStep = 3,
 })
 
@@ -87,6 +89,7 @@ BombProjectileConfig.Defaults = table.freeze({
 	surfaceOffset = BOUNCY_PHYSICS.surfaceOffset,
 	groundedFrictionPerSecond = BOUNCY_PHYSICS.groundedFrictionPerSecond,
 	minRollSpeed = BOUNCY_PHYSICS.minRollSpeed,
+	minGroundImpactRollSpeed = BOUNCY_PHYSICS.minGroundImpactRollSpeed,
 	maxCollisionsPerStep = BOUNCY_PHYSICS.maxCollisionsPerStep,
 	fuseSeconds = BombConfig.FuseSeconds,
 	visualSpinRadiansPerSecond = BombConfig.VisualSpinRadiansPerSecond,

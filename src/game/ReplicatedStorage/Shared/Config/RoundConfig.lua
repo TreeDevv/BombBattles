@@ -37,6 +37,15 @@ return {
 		DefaultHealth = 100,
 	},
 
+	Rewards = {
+		ParticipationCoins = 25,
+		WinCoins = 25,
+		EliminationCoins = 10,
+		DamageCoinsPer100 = 3,
+		DestructionCoinsPerTarget = 2,
+		VipBonusMultiplier = 0,
+	},
+
 	MapsFolderPath = { "Assets", "Maps" },
 	ActiveMapName = "Map",
 

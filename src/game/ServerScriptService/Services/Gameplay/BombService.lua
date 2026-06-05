@@ -106,6 +106,44 @@ local function recordReplayEvent(eventType: string, payload)
 	end
 end
 
+local worldTextService = nil
+
+local function getWorldTextService()
+	if worldTextService then
+		return worldTextService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local worldTextModule = services and services:FindFirstChild("WorldTextService")
+	if not (worldTextModule and worldTextModule:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, worldTextModule)
+	if ok and typeof(service) == "table" then
+		worldTextService = service
+		return worldTextService
+	end
+
+	return nil
+end
+
+local function sendWorldText(methodName: string, ...)
+	local service = getWorldTextService()
+	if not service then
+		return
+	end
+
+	local method = service[methodName]
+	if type(method) ~= "function" then
+		return
+	end
+
+	pcall(function(...)
+		method(...)
+	end, ...)
+end
+
 local function isStudioBombTeamProtectionBypassEnabled(): boolean
 	if not RunService:IsStudio() then
 		return false
@@ -147,6 +185,22 @@ local function ensureRemote(name: string): RemoteEvent
 end
 
 local function fireEffect(effectName: string, payload)
+	if effectName == "Throw" and typeof(payload) == "table" then
+		local position = if typeof(payload.position) == "Vector3"
+			then payload.position
+			elseif typeof(payload.origin) == "Vector3"
+			then payload.origin
+			else nil
+		local player = payload.player
+		if position and typeof(player) == "Instance" and player:IsA("Player") then
+			sendWorldText("BombThrown", player, position, {
+				projectileId = payload.projectileId,
+				bombType = payload.bombType,
+				sourceType = "Bomb",
+			})
+		end
+	end
+
 	if effectRemote then
 		effectRemote:FireAllClients(effectName, payload)
 	end
@@ -310,10 +364,12 @@ local function preparePhysicalProjectile(projectileId: string, owner: Player): (
 
 	for _, descendant in ipairs(projectile:GetDescendants()) do
 		if descendant:IsA("BasePart") then
+			local isRootPart = descendant == rootPart
 			descendant.Anchored = false
-			descendant.CanCollide = true
-			descendant.CanQuery = true
+			descendant.CanCollide = isRootPart
+			descendant.CanQuery = isRootPart
 			descendant.CanTouch = false
+			descendant.Massless = not isRootPart
 		end
 	end
 	if projectile:IsA("BasePart") then
@@ -545,6 +601,11 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: stri
 				sourceId = sourceId,
 				victimHealthAfter = healthAfter,
 			})
+			sendWorldText("PlayerDamaged", owner, player, appliedDamage, rootPart.Position, {
+				sourceType = "Bomb",
+				sourceId = sourceId,
+				victimHealthAfter = healthAfter,
+			})
 		end
 		if hookResult.skipKnockback ~= true then
 			applyKnockback(character, rootPart, origin, distance, knockbackMultiplier)
@@ -661,6 +722,23 @@ local function explode(owner: Player, position: Vector3, source: string, project
 	end
 	local impactTimestamp = workspace:GetServerTimeNow()
 
+	local hitUserIds = {}
+	local killedUserIds = {}
+	local debrisPayloads = {}
+
+	if isActivePlayer(owner) then
+		debrisPayloads = DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius, {
+			sourceType = "Bomb",
+			sourceId = projectileId,
+			bombId = projectileId,
+			ownerUserId = owner.UserId,
+			timestamp = impactTimestamp,
+		})
+		applyOwnerKnockback(owner, position)
+		hitUserIds, killedUserIds = damageEnemyPlayers(owner, position, projectileId)
+		damageEnemyAnchors(owner, position, projectileId)
+	end
+
 	fireEffect("Explode", {
 		player = owner,
 		projectileId = projectileId,
@@ -669,27 +747,18 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		innerRadius = BombConfig.InnerRadius,
 		outerRadius = BombConfig.OuterRadius,
 		terrainRadius = BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius,
+		hitUserIds = hitUserIds,
 	})
-
-	local hitUserIds = {}
-	local killedUserIds = {}
-
-	if isActivePlayer(owner) then
-		local debrisPayloads = DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius, {
-			sourceType = "Bomb",
-			sourceId = projectileId,
-			bombId = projectileId,
-			ownerUserId = owner.UserId,
-			timestamp = impactTimestamp,
+	sendWorldText("BombExploded", owner, position, {
+		projectileId = projectileId,
+		source = source,
+		sourceType = "Bomb",
+		bombType = BombProjectileConfig.BombType.Normal,
+	})
+	if #debrisPayloads > 0 then
+		fireEffect("TerrainDebris", {
+			payloads = debrisPayloads,
 		})
-		if #debrisPayloads > 0 then
-			fireEffect("TerrainDebris", {
-				payloads = debrisPayloads,
-			})
-		end
-		applyOwnerKnockback(owner, position)
-		hitUserIds, killedUserIds = damageEnemyPlayers(owner, position, projectileId)
-		damageEnemyAnchors(owner, position, projectileId)
 	end
 
 	recordReplayEvent("BombExploded", {

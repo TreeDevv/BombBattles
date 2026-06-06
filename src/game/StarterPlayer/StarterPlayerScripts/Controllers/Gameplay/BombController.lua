@@ -21,6 +21,8 @@ local RELEASE_REMOTE_NAME = "ReleaseBombCook"
 local EFFECT_REMOTE_NAME = "BombEffect"
 local BOMB_ACTION_NAME = "BombBattlesPrimaryBomb"
 local PREVIEW_FOLDER_NAME = "BombPreview"
+local TRAJECTORY_VFX_PATH = { "Assets", "VFX", "Trajectory", "TrajectoryLine" }
+local TRAJECTORY_PREVIEW_NAME = "BombTrajectoryPreview"
 local PROJECTILE_VISUAL_FOLDER_NAME = "BombProjectileVisuals"
 local EXPLOSION_VFX_FOLDER_NAME = "BombExplosionVFX"
 local HELD_BOMB_VISUAL_NAME = "BombHeldVisual"
@@ -46,7 +48,18 @@ local HIT_FLASH_OUTLINE_TRANSPARENCY = 0.05
 local HIT_FLASH_FADE_SECONDS = 0.26
 local HIT_FLASH_CLEANUP_SECONDS = 0.6
 local MIN_AIM_HORIZONTAL = 0.08
+local BEAM_CURVE_EPSILON = 1e-4
 local ATTR = BombConfig.Attributes
+
+type TrajectoryPreview = {
+	model: Model,
+	startPart: BasePart,
+	endPart: BasePart,
+	startAttachment: Attachment,
+	endAttachment: Attachment,
+	beams: { Beam },
+	emitters: { ParticleEmitter },
+}
 
 local BombController = {}
 BombController.HoldStarted = Signal.new()
@@ -74,7 +87,8 @@ BombController._animationObjects = {} :: { Animation }
 BombController._animationConnections = {} :: { RBXScriptConnection }
 BombController._releaseMarkerConnection = nil :: RBXScriptConnection?
 BombController._previewFolder = nil :: Folder?
-BombController._previewPoints = {} :: { BasePart }
+BombController._trajectoryPreview = nil :: TrajectoryPreview?
+BombController._warnedMissingTrajectoryPreview = false
 BombController._holding = false
 BombController._previewing = false
 BombController._releasePending = false
@@ -480,19 +494,139 @@ local function getTrackSummary(track: AnimationTrack?): string
 	)
 end
 
-local function createPreviewPoint(index: number): BasePart
-	local part = Instance.new("Part")
-	part.Name = "Point" .. index
-	part.Shape = Enum.PartType.Ball
-	part.Size = Vector3.new(BombConfig.PreviewPointSize, BombConfig.PreviewPointSize, BombConfig.PreviewPointSize)
-	part.Material = Enum.Material.Neon
-	part.Color = BombConfig.PreviewColor
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.Transparency = 0.25
-	return part
+local function getTrajectoryLineAsset(): Model?
+	local current: Instance? = ReplicatedStorage
+	for _, childName in ipairs(TRAJECTORY_VFX_PATH) do
+		current = current and current:FindFirstChild(childName)
+		if not current then
+			return nil
+		end
+	end
+
+	return if current and current:IsA("Model") then current else nil
+end
+
+local function getNamedBasePart(parent: Instance, childName: string): BasePart?
+	local child = parent:FindFirstChild(childName)
+	return if child and child:IsA("BasePart") then child else nil
+end
+
+local function getNamedAttachment(parent: Instance, childName: string): Attachment?
+	local child = parent:FindFirstChild(childName)
+	return if child and child:IsA("Attachment") then child else nil
+end
+
+local function collectTrajectoryPreviewDescendants(model: Model): ({ Beam }, { ParticleEmitter })
+	local beams: { Beam } = {}
+	local emitters: { ParticleEmitter } = {}
+
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("Beam") then
+			table.insert(beams, descendant)
+		elseif descendant:IsA("ParticleEmitter") then
+			table.insert(emitters, descendant)
+		end
+	end
+
+	return beams, emitters
+end
+
+local function setTrajectoryPreviewEnabled(preview: TrajectoryPreview, enabled: boolean)
+	for _, beam in ipairs(preview.beams) do
+		beam.Enabled = enabled
+	end
+	for _, emitter in ipairs(preview.emitters) do
+		emitter.Enabled = enabled
+	end
+end
+
+local function tintTrajectoryPreview(preview: TrajectoryPreview, color: Color3)
+	local colorSequence = ColorSequence.new(color)
+	for _, beam in ipairs(preview.beams) do
+		beam.Color = colorSequence
+	end
+	for _, emitter in ipairs(preview.emitters) do
+		emitter.Color = colorSequence
+	end
+end
+
+local function getUnitOrFallback(vector: Vector3, fallback: Vector3): Vector3
+	if vector.Magnitude > BEAM_CURVE_EPSILON then
+		return vector.Unit
+	end
+	if fallback.Magnitude > BEAM_CURVE_EPSILON then
+		return fallback.Unit
+	end
+	return Vector3.xAxis
+end
+
+local function cframeFromRightVector(position: Vector3, rightVector: Vector3): CFrame
+	local right = getUnitOrFallback(rightVector, Vector3.xAxis)
+	local upReference = if math.abs(right:Dot(Vector3.yAxis)) < 0.95 then Vector3.yAxis else Vector3.zAxis
+	local back = right:Cross(upReference)
+	if back.Magnitude <= BEAM_CURVE_EPSILON then
+		back = Vector3.zAxis
+	else
+		back = back.Unit
+	end
+	local up = back:Cross(right).Unit
+
+	return CFrame.fromMatrix(position, right, up, back)
+end
+
+local function createPreviewSweepParams(): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local character = LocalPlayer.Character
+	params.FilterDescendantsInstances = if character then { character } else {}
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+	return params
+end
+
+local function sweepPreviewSegment(fromPosition: Vector3, toPosition: Vector3, params: RaycastParams): RaycastResult?
+	local direction = toPosition - fromPosition
+	if direction.Magnitude <= 0.001 then
+		return nil
+	end
+
+	local spherecastOk, spherecastResult = pcall(function()
+		return workspace:Spherecast(fromPosition, BombConfig.SweepRadius, direction, params)
+	end)
+	if spherecastOk then
+		return spherecastResult
+	end
+
+	return workspace:Raycast(fromPosition, direction, params)
+end
+
+local function findPreviewTrajectoryHit(path: BombTrajectory.Path, maxPreviewTime: number): (RaycastResult?, number)
+	local stepSeconds = if typeof(BombConfig.PreviewStepSeconds) == "number"
+		then math.max(BombConfig.PreviewStepSeconds, 1 / 60)
+		else 0.08
+	local segmentCount = math.max(1, math.ceil(maxPreviewTime / stepSeconds))
+	local params = createPreviewSweepParams()
+
+	local previousElapsed = 0
+	local previousPosition = BombTrajectory.Evaluate(path, 0)
+
+	for index = 1, segmentCount do
+		local elapsed = maxPreviewTime * (index / segmentCount)
+		local position = BombTrajectory.Evaluate(path, elapsed / path.duration)
+		local hit = sweepPreviewSegment(previousPosition, position, params)
+		if hit then
+			local segmentLength = (position - previousPosition).Magnitude
+			local segmentAlpha = if segmentLength > 0.001
+				then math.clamp(hit.Distance / segmentLength, 0, 1)
+				else 0
+			return hit, previousElapsed + (elapsed - previousElapsed) * segmentAlpha
+		end
+
+		previousElapsed = elapsed
+		previousPosition = position
+	end
+
+	return nil, maxPreviewTime
 end
 
 function BombController:_getPreviewFolder(): Folder
@@ -507,21 +641,85 @@ function BombController:_getPreviewFolder(): Folder
 	return folder
 end
 
-function BombController:_ensurePreviewPoints()
-	local folder = self:_getPreviewFolder()
-
-	for index = #self._previewPoints + 1, BombConfig.PreviewPoints do
-		local point = createPreviewPoint(index)
-		point.Parent = folder
-		self._previewPoints[index] = point
+function BombController:_warnMissingTrajectoryPreview(reason: string)
+	if self._warnedMissingTrajectoryPreview then
+		return
 	end
+
+	self._warnedMissingTrajectoryPreview = true
+	warn("[BombController] Missing or malformed trajectory preview VFX: " .. reason)
 end
 
-function BombController:_setPreviewVisible(visible: boolean)
-	self:_ensurePreviewPoints()
-	for _, point in ipairs(self._previewPoints) do
-		point.Transparency = if visible then point.Transparency else 1
+function BombController:_ensureTrajectoryPreview(): TrajectoryPreview?
+	if self._trajectoryPreview and self._trajectoryPreview.model.Parent then
+		return self._trajectoryPreview
 	end
+
+	self._trajectoryPreview = nil
+
+	local template = getTrajectoryLineAsset()
+	if not template then
+		self:_warnMissingTrajectoryPreview("ReplicatedStorage.Assets.VFX.Trajectory.TrajectoryLine was not found")
+		return nil
+	end
+
+	local clone = template:Clone()
+	clone.Name = TRAJECTORY_PREVIEW_NAME
+
+	local startPart = getNamedBasePart(clone, "Start")
+	local endPart = getNamedBasePart(clone, "End")
+	if not (startPart and endPart) then
+		clone:Destroy()
+		self:_warnMissingTrajectoryPreview("expected Start and End BasePart children")
+		return nil
+	end
+
+	local startAttachment = getNamedAttachment(startPart, "Start")
+	local endAttachment = getNamedAttachment(endPart, "End")
+	if not (startAttachment and endAttachment) then
+		clone:Destroy()
+		self:_warnMissingTrajectoryPreview("expected Start.Start and End.End attachments")
+		return nil
+	end
+
+	local beams, emitters = collectTrajectoryPreviewDescendants(clone)
+	if #beams == 0 then
+		clone:Destroy()
+		self:_warnMissingTrajectoryPreview("expected at least one Beam descendant")
+		return nil
+	end
+
+	for _, part in ipairs({ startPart, endPart }) do
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Transparency = 1
+	end
+
+	startAttachment.CFrame = CFrame.new()
+	endAttachment.CFrame = CFrame.new()
+
+	for _, beam in ipairs(beams) do
+		beam.Attachment0 = endAttachment
+		beam.Attachment1 = startAttachment
+	end
+
+	local preview: TrajectoryPreview = {
+		model = clone,
+		startPart = startPart,
+		endPart = endPart,
+		startAttachment = startAttachment,
+		endAttachment = endAttachment,
+		beams = beams,
+		emitters = emitters,
+	}
+
+	setTrajectoryPreviewEnabled(preview, false)
+	clone.Parent = self:_getPreviewFolder()
+	self._trajectoryPreview = preview
+
+	return preview
 end
 
 function BombController:_destroyHeldBomb(player: Player)
@@ -650,7 +848,7 @@ function BombController:_startPreview()
 	end
 
 	self._previewing = true
-	self:_ensurePreviewPoints()
+	self:_ensureTrajectoryPreview()
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function()
 		self:_updatePreview()
@@ -664,8 +862,8 @@ function BombController:_stopPreview()
 
 	self._previewing = false
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
-	for _, point in ipairs(self._previewPoints) do
-		point.Transparency = 1
+	if self._trajectoryPreview then
+		setTrajectoryPreviewEnabled(self._trajectoryPreview, false)
 	end
 end
 
@@ -975,21 +1173,40 @@ function BombController:_updatePreview()
 		return
 	end
 
-	self:_ensurePreviewPoints()
-
 	local origin = getThrowOrigin(rootPart)
 	local trajectory = calculateTrajectory(origin, getMouseAimDirection())
 	local maxPreviewTime = math.min(remaining, trajectory.duration, BombConfig.PreviewMaxSeconds)
+	if maxPreviewTime <= 0 then
+		self:_stopPreview()
+		return
+	end
+
+	local preview = self:_ensureTrajectoryPreview()
+	if not preview then
+		return
+	end
+
 	local dangerAlpha = 1 - math.clamp(remaining / BombConfig.FuseSeconds, 0, 1)
 	local color = BombConfig.PreviewColor:Lerp(BombConfig.PreviewDangerColor, dangerAlpha)
+	local hit, endElapsed = findPreviewTrajectoryHit(trajectory, maxPreviewTime)
+	local endAlpha = math.clamp(endElapsed / trajectory.duration, 0, 1)
+	local endPosition = if hit then hit.Position else BombTrajectory.Evaluate(trajectory, endAlpha)
+	local startVelocity = BombTrajectory.GetVelocity(trajectory, 0)
+	local endVelocity = BombTrajectory.GetVelocity(trajectory, endAlpha)
+	local reversePathDirection = origin - endPosition
 
-	for index, point in ipairs(self._previewPoints) do
-		local alpha = index / #self._previewPoints
-		local t = math.min(alpha * maxPreviewTime, remaining)
-		point.Position = BombTrajectory.Evaluate(trajectory, t / trajectory.duration)
-		point.Color = color
-		point.Transparency = 0.2 + alpha * 0.45
+	preview.startPart.CFrame = cframeFromRightVector(origin, getUnitOrFallback(-startVelocity, reversePathDirection))
+	preview.endPart.CFrame = cframeFromRightVector(endPosition, getUnitOrFallback(-endVelocity, reversePathDirection))
+
+	local startCurveSize = startVelocity.Magnitude * endElapsed / 3
+	local endCurveSize = endVelocity.Magnitude * endElapsed / 3
+	for _, beam in ipairs(preview.beams) do
+		beam.CurveSize0 = endCurveSize
+		beam.CurveSize1 = startCurveSize
 	end
+
+	tintTrajectoryPreview(preview, color)
+	setTrajectoryPreviewEnabled(preview, true)
 end
 
 function BombController:_requestBegin()

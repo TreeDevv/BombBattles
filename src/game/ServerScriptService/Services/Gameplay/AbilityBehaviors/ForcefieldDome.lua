@@ -1,12 +1,24 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 
-local ForcefieldDome = {}
+type AbilityActivationResult = AbilityTypes.AbilityActivationResult
+type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityHookResult = AbilityTypes.AbilityHookResult
+type ServerActivateContext = AbilityTypes.ServerActivateContext
+type ServerHookContext = AbilityTypes.ServerHookContext
+type DomeRecord = {
+	rootPart: BasePart,
+	activeEndsAt: number,
+	serial: number,
+}
+
+local ForcefieldDome = {} :: AbilityTypes.ServerBehavior
 
 local RESULT_KIND = AbilityResult.Kind
-local ACTIVE_DOMES: { [Player]: { rootPart: BasePart, activeEndsAt: number, serial: number } } = {}
+local ACTIVE_DOMES: { [Player]: DomeRecord } = {}
 local REPEL_TIMES: { [string]: number } = {}
 
 local function getCharacterRoot(player: Player): BasePart?
@@ -23,11 +35,11 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function getRadius(definition): number
+local function getRadius(definition: AbilityDefinition?): number
 	return math.max(tonumber(definition and definition.radius) or 15, 1)
 end
 
-local function getActiveDome(player: Player, currentTime: number)
+local function getActiveDome(player: Player, currentTime: number): DomeRecord?
 	local dome = ACTIVE_DOMES[player]
 	if not dome or currentTime >= dome.activeEndsAt then
 		ACTIVE_DOMES[player] = nil
@@ -83,7 +95,7 @@ local function isProjectileTouchingDome(context, center: Vector3, radius: number
 	return (closestPoint - center).Magnitude <= radius + sweepRadius, closestPoint
 end
 
-function ForcefieldDome.CanActivate(context): boolean
+function ForcefieldDome.CanActivate(context: ServerActivateContext): boolean
 	if getActiveDome(context.player, context.now) then
 		return false
 	end
@@ -91,7 +103,7 @@ function ForcefieldDome.CanActivate(context): boolean
 	return getCharacterRoot(context.player) ~= nil
 end
 
-function ForcefieldDome.OnActivate(context)
+function ForcefieldDome.OnActivate(context: ServerActivateContext): AbilityActivationResult
 	local rootPart = getCharacterRoot(context.player)
 	if not rootPart then
 		return false
@@ -128,7 +140,7 @@ function ForcefieldDome.OnActivate(context)
 	}
 end
 
-function ForcefieldDome.OnBeforeExplosion(context)
+function ForcefieldDome.OnBeforeExplosion(context: ServerHookContext): AbilityHookResult
 	local dome = getActiveDome(context.player, context.now)
 	local payload = context.context
 	if not (dome and typeof(payload) == "table" and typeof(payload.position) == "Vector3") then
@@ -148,7 +160,7 @@ function ForcefieldDome.OnBeforeExplosion(context)
 	return AbilityResult.Continue()
 end
 
-function ForcefieldDome.OnBeforePlayerBombDamage(context)
+function ForcefieldDome.OnBeforePlayerBombDamage(context: ServerHookContext): AbilityHookResult
 	local dome = getActiveDome(context.player, context.now)
 	local payload = context.context
 	if not (dome and typeof(payload) == "table" and payload.target == context.player) then
@@ -162,7 +174,7 @@ function ForcefieldDome.OnBeforePlayerBombDamage(context)
 	}
 end
 
-function ForcefieldDome.OnBeforeOwnerBombKnockback(context)
+function ForcefieldDome.OnBeforeOwnerBombKnockback(context: ServerHookContext): AbilityHookResult
 	local dome = getActiveDome(context.player, context.now)
 	local payload = context.context
 	if not (dome and typeof(payload) == "table" and payload.owner == context.player) then
@@ -175,7 +187,7 @@ function ForcefieldDome.OnBeforeOwnerBombKnockback(context)
 	}
 end
 
-function ForcefieldDome.OnProjectileStep(context)
+function ForcefieldDome.OnProjectileStep(context: ServerHookContext): AbilityHookResult
 	local dome = getActiveDome(context.player, context.now)
 	local payload = context.context
 	if not (dome and typeof(payload) == "table" and typeof(payload.projectileId) == "string") then

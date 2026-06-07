@@ -6,9 +6,32 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
-local WallBuilder = {}
+type AbilityControllerLike = AbilityTypes.AbilityControllerLike
+type AbilityDefinition = AbilityTypes.AbilityDefinition
+type ClientActivateRequestedContext = AbilityTypes.ClientActivateRequestedContext
+type ClientEffectContext = AbilityTypes.ClientEffectContext
+type FloorPlacement = {
+	position: Vector3,
+	facing: Vector3,
+	floor: Instance,
+}
+type PreviewState = {
+	active: boolean,
+	controller: AbilityControllerLike?,
+	slot: string,
+	abilityId: string,
+	definition: AbilityDefinition?,
+	ghost: Instance?,
+	inputConnection: RBXScriptConnection?,
+	valid: boolean,
+	floorPosition: Vector3?,
+	facing: Vector3?,
+}
+
+local WallBuilder = {} :: AbilityTypes.ClientBehavior
 
 local PREVIEW_FOLDER_NAME = "WallBuilderPreview"
 local RENDER_STEP_NAME = "BombBattlesWallBuilderPreview"
@@ -22,7 +45,7 @@ local UNSAFE_TAGS = {
 	RoundConfig.Tags.LobbySpawn,
 }
 
-local preview = {
+local preview: PreviewState = {
 	active = false,
 	controller = nil,
 	slot = "",
@@ -35,7 +58,7 @@ local preview = {
 	facing = nil :: Vector3?,
 }
 
-local function getByPath(root: Instance, path): Instance?
+local function getByPath(root: Instance, path: { string }): Instance?
 	local current: Instance? = root
 	for _, name in ipairs(path) do
 		if not current then
@@ -46,7 +69,7 @@ local function getByPath(root: Instance, path): Instance?
 	return current
 end
 
-local function getTemplate(definition): Instance?
+local function getTemplate(definition: AbilityDefinition?): Instance?
 	local path = definition and definition.assetPath
 	if typeof(path) ~= "table" then
 		return nil
@@ -145,7 +168,7 @@ local function getRootPart(): BasePart?
 	return nil
 end
 
-local function findFloor(rootPart: BasePart, definition)
+local function findFloor(rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
 	local distance = definition.placementDistance or 8
 	local rayUp = definition.floorRaycastUp or 8
 	local rayDown = definition.floorRaycastDown or 32
@@ -340,7 +363,7 @@ local function handleCommitAction(_actionName: string, inputState: Enum.UserInpu
 	return Enum.ContextActionResult.Sink
 end
 
-local function startPreview(context): boolean
+local function startPreview(context: ClientActivateRequestedContext): boolean
 	if context.controller:GetCooldownRemaining(context.slot) > 0 then
 		return true
 	end
@@ -394,7 +417,7 @@ local function startPreview(context): boolean
 	return true
 end
 
-function WallBuilder.OnActivateRequested(context): boolean
+function WallBuilder.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	if preview.active and preview.slot == context.slot and preview.abilityId == context.abilityId then
 		cancelPreview()
 		return true
@@ -403,7 +426,7 @@ function WallBuilder.OnActivateRequested(context): boolean
 	return startPreview(context)
 end
 
-function WallBuilder.OnEffect(_context)
+function WallBuilder.OnEffect(_context: ClientEffectContext)
 end
 
 return WallBuilder

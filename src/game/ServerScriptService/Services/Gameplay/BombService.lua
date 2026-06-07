@@ -5,13 +5,16 @@ local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
+local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
 local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
+local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
@@ -35,11 +38,13 @@ local NORMAL_PROJECTILE_PHYSICS = ProjectilePhysics.ResolvePhysicsConfig(
 type CookState = {
 	holdStartedAt: number,
 	cookStartedAt: number?,
+	skinId: string,
 }
 
 type ProjectileState = {
 	id: string,
 	owner: Player,
+	skinId: string,
 	path: any,
 	launchedAt: number,
 	fuseStartedAt: number,
@@ -306,23 +311,6 @@ local function getThrowOrigin(rootPart: BasePart): Vector3
 	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
 end
 
-local function getBombAsset(): Instance?
-	local assets = ReplicatedStorage:FindFirstChild("Assets")
-	local bombs = assets and assets:FindFirstChild("Bombs")
-	if not bombs then
-		return nil
-	end
-
-	return bombs:FindFirstChild(BombConfig.RuntimeBombName) or bombs:FindFirstChildWhichIsA("Model") or bombs:FindFirstChildWhichIsA("BasePart")
-end
-
-local function getFirstBasePart(instance: Instance): BasePart?
-	if instance:IsA("BasePart") then
-		return instance
-	end
-	return instance:FindFirstChildWhichIsA("BasePart", true)
-end
-
 local function getProjectileFolder(): Folder
 	local existing = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
 	if existing and existing:IsA("Folder") then
@@ -338,50 +326,30 @@ local function getProjectileFolder(): Folder
 	return folder
 end
 
-local function preparePhysicalProjectile(projectileId: string, owner: Player): (Instance, BasePart)
-	local asset = getBombAsset()
-	local projectile: Instance
-	local rootPart: BasePart?
-
-	if asset then
-		projectile = asset:Clone()
-		rootPart = getFirstBasePart(projectile)
-	else
-		local part = Instance.new("Part")
-		part.Name = BombConfig.RuntimeBombName
-		part.Shape = Enum.PartType.Ball
-		part.Size = BombConfig.RuntimeBombSize
-		part.Material = Enum.Material.Neon
-		part.Color = Color3.fromRGB(45, 45, 45)
-		projectile = part
-		rootPart = part
-	end
-
+local function preparePhysicalProjectile(projectileId: string, owner: Player, skinId: string): (Instance, BasePart)
+	local projectile, rootPart = BombVisualUtil.CreateBombVisual(skinId, "BombProjectile_" .. projectileId, {
+		anchored = false,
+		canCollide = true,
+		canQuery = true,
+		massless = false,
+		effectState = {
+			vfx = true,
+			fuseSpark = true,
+			trail = true,
+		},
+		visualScale = BombConfig.ProjectileVisualScale,
+	})
 	projectile.Name = "BombProjectile_" .. projectileId
-	if projectile:IsA("Model") and rootPart then
+	if projectile:IsA("Model") then
 		projectile.PrimaryPart = rootPart
 	end
 
-	for _, descendant in ipairs(projectile:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			local isRootPart = descendant == rootPart
-			descendant.Anchored = false
-			descendant.CanCollide = isRootPart
-			descendant.CanQuery = isRootPart
-			descendant.CanTouch = false
-			descendant.Massless = not isRootPart
-		end
-	end
-	if projectile:IsA("BasePart") then
-		projectile.Anchored = false
-		projectile.CanCollide = true
-		projectile.CanQuery = true
-		projectile.CanTouch = false
-	end
-
-	assert(rootPart, "Bomb projectile requires a BasePart")
 	projectile:SetAttribute("ProjectileId", projectileId)
 	projectile:SetAttribute("OwnerUserId", owner.UserId)
+	projectile:SetAttribute("BombSkinId", skinId)
+	rootPart:SetAttribute("ProjectileId", projectileId)
+	rootPart:SetAttribute("OwnerUserId", owner.UserId)
+	rootPart:SetAttribute("BombSkinId", skinId)
 	return projectile, rootPart
 end
 
@@ -701,14 +669,19 @@ local function getProjectilePhysicsVelocity(state: ProjectileState): Vector3
 	return Vector3.zero
 end
 
-local function explode(owner: Player, position: Vector3, source: string, projectileId: string?)
+local function explode(owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?)
 	if projectileId then
 		local state = activeProjectiles[projectileId]
 		if state then
+			bombSkinId = state.skinId
 			position = getProjectilePhysicsPosition(state)
 			destroyPhysicalProjectile(state)
 		end
 		activeProjectiles[projectileId] = nil
+	end
+	bombSkinId = BombSkinConfig.NormalizeSkinId(bombSkinId)
+	if bombSkinId == "" then
+		bombSkinId = BombSkinConfig.DefaultSkinId
 	end
 
 	local explosionResult = AbilityService:RunHook("OnBeforeExplosion", {
@@ -751,6 +724,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 	fireEffect("Explode", {
 		player = owner,
 		projectileId = projectileId,
+		bombSkinId = bombSkinId,
 		position = position,
 		source = source,
 		innerRadius = BombConfig.InnerRadius,
@@ -763,6 +737,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		source = source,
 		sourceType = "Bomb",
 		bombType = BombProjectileConfig.BombType.Normal,
+		bombSkinId = bombSkinId,
 	})
 	if #debrisPayloads > 0 then
 		fireEffect("TerrainDebris", {
@@ -779,6 +754,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		sourceType = "Bomb",
 		ownerUserId = owner.UserId,
 		bombType = BombProjectileConfig.BombType.Normal,
+		bombSkinId = bombSkinId,
 		position = position,
 		innerRadius = BombConfig.InnerRadius,
 		outerRadius = BombConfig.OuterRadius,
@@ -797,6 +773,8 @@ end
 local consumeBomb
 
 local function explodeInHand(player: Player, source: string)
+	local state = cookStates[player]
+	local skinId = state and state.skinId or BombSkinService:GetEquippedSkinId(player)
 	if not consumeBomb(player) then
 		stopCooking(player)
 		return
@@ -805,7 +783,7 @@ local function explodeInHand(player: Player, source: string)
 	local _, _, rootPart = getCharacterParts(player)
 	local position = if rootPart then rootPart.Position else Vector3.zero
 	stopCooking(player)
-	explode(player, position, source, nil)
+	explode(player, position, source, nil, skinId)
 end
 
 local function scheduleInHandExplosion(player: Player, state: CookState, cookStartedAt: number)
@@ -850,6 +828,7 @@ local function startActiveCook(player: Player, state: CookState)
 		player = player,
 		startedAt = cookStartedAt,
 		fuseSeconds = BombConfig.FuseSeconds,
+		bombSkinId = state.skinId,
 	})
 
 	scheduleInHandExplosion(player, state, cookStartedAt)
@@ -1002,8 +981,9 @@ local function dampGroundedPhysicalProjectile(state: ProjectileState, dt: number
 end
 
 local function spawnPhysicalProjectile(state: ProjectileState, position: Vector3, normal: Vector3, incomingVelocity: Vector3): Instance?
-	local projectile, rootPart = preparePhysicalProjectile(state.id, state.owner)
+	local projectile, rootPart = preparePhysicalProjectile(state.id, state.owner, state.skinId)
 	projectile:SetAttribute("BombType", BombProjectileConfig.BombType.Normal)
+	projectile:SetAttribute("BombSkinId", state.skinId)
 	projectile:SetAttribute("FuseStartedAt", state.fuseStartedAt)
 	projectile:SetAttribute("FuseEndsAt", state.explodeAt)
 	local unitNormal = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
@@ -1071,6 +1051,7 @@ local function fireProjectileImpact(state: ProjectileState, position: Vector3, n
 	fireEffect("Impact", {
 		player = state.owner,
 		projectileId = state.id,
+		bombSkinId = state.skinId,
 		position = position,
 		impactNormal = normal,
 		impactVelocity = incomingVelocity,
@@ -1078,7 +1059,7 @@ local function fireProjectileImpact(state: ProjectileState, position: Vector3, n
 	})
 end
 
-local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any, startedAt: number, remainingFuse: number)
+local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any, startedAt: number, remainingFuse: number, skinId: string)
 	local fallbackDirection = rootPart.CFrame.LookVector
 	local origin = getThrowOrigin(rootPart)
 	local aimDirection = getAimDirectionFromPayload(targetPayload, fallbackDirection)
@@ -1088,6 +1069,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 			owner = player,
 			projectileId = projectileId,
 			bombType = BombProjectileConfig.BombType.Normal,
+			skinId = skinId,
 			origin = origin,
 			aimDirection = aimDirection,
 			fuseStartedAt = startedAt,
@@ -1104,6 +1086,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		aimDirection = aimDirection,
 		trajectory = trajectory,
 		remainingFuse = remainingFuse,
+		bombSkinId = skinId,
 	})
 	if shouldSuppressBombEffect(launchResult) then
 		return
@@ -1114,6 +1097,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 	local state: ProjectileState = {
 		id = projectileId,
 		owner = player,
+		skinId = skinId,
 		path = trajectory,
 		launchedAt = launchTime,
 		fuseStartedAt = startedAt,
@@ -1129,6 +1113,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 	fireEffect("Throw", {
 		player = player,
 		projectileId = projectileId,
+		bombSkinId = skinId,
 		origin = trajectory.origin,
 		initialVelocity = trajectory.initialVelocity,
 		acceleration = trajectory.acceleration,
@@ -1141,6 +1126,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		bombId = projectileId,
 		ownerUserId = player.UserId,
 		bombType = BombProjectileConfig.BombType.Normal,
+		bombSkinId = skinId,
 		position = trajectory.origin,
 		velocity = trajectory.initialVelocity,
 		fuseDuration = remainingFuse,
@@ -1176,6 +1162,7 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 	fireEffect("Throw", {
 		player = state.owner,
 		projectileId = state.id,
+		bombSkinId = state.skinId,
 		origin = trajectory.origin,
 		initialVelocity = trajectory.initialVelocity,
 		acceleration = trajectory.acceleration,
@@ -1250,7 +1237,7 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 				state.lastPosition = state.position
 			end
 
-			explode(state.owner, state.position, "Projectile", projectileId)
+			explode(state.owner, state.position, "Projectile", projectileId, state.skinId)
 			continue
 		end
 		if state.landed then
@@ -1283,14 +1270,17 @@ local function beginCook(player: Player)
 		return
 	end
 
+	local skinId = BombSkinService:GetEquippedSkinId(player)
 	local state = {
 		holdStartedAt = now(),
+		skinId = skinId,
 	}
 	cookStates[player] = state
 	setCookingAttributes(player, false, 0)
 	fireEffect("Hold", {
 		player = player,
 		startedAt = state.holdStartedAt,
+		bombSkinId = skinId,
 	})
 
 	task.delay(BombConfig.CookDelaySeconds, function()
@@ -1341,7 +1331,7 @@ local function releaseCook(player: Player, targetPayload: any)
 	end
 
 	stopCooking(player)
-	throwBomb(player, rootPart, targetPayload, throwStartedAt, remainingFuse)
+	throwBomb(player, rootPart, targetPayload, throwStartedAt, remainingFuse, state.skinId)
 end
 
 local function updateRecharge(player: Player, currentTime: number)

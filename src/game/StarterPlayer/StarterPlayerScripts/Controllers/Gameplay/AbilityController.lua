@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local ReplicaController = require(ReplicatedStorage.Packages.ReplicaController)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 
@@ -31,6 +32,12 @@ local SLOT_INPUTS = {
 	},
 }
 
+type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityEffectPayload = AbilityTypes.AbilityEffectPayload
+type AbilitySlotState = AbilityTypes.AbilitySlotState
+type AbilityState = AbilityTypes.AbilityState
+type ClientBehavior = AbilityTypes.ClientBehavior
+
 local AbilityController = {}
 
 AbilityController.StateReceived = Signal.new()
@@ -43,9 +50,9 @@ AbilityController._effectConnection = nil :: RBXScriptConnection?
 AbilityController._hudConnections = {} :: { RBXScriptConnection }
 AbilityController._buttons = {} :: { [string]: ImageButton }
 AbilityController._buttonConnections = {} :: { RBXScriptConnection }
-AbilityController._data = nil
+AbilityController._data = nil :: AbilityState?
 AbilityController._clientSequence = 0
-AbilityController._behaviors = {} :: { [string]: any }
+AbilityController._behaviors = {} :: { [string]: ClientBehavior }
 
 local function getRemote(name: string): RemoteEvent?
 	local remotes = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, 10)
@@ -79,7 +86,7 @@ local function loadBehaviors()
 	end
 end
 
-local function getSlotState(slot: string)
+local function getSlotState(slot: string): AbilitySlotState?
 	local data = AbilityController._data
 	local slots = data and data.slots
 	return if typeof(slots) == "table" then slots[slot] else nil
@@ -90,7 +97,7 @@ local function getEquippedAbilityId(slot: string): string
 	return if typeof(slotState) == "table" and typeof(slotState.abilityId) == "string" then slotState.abilityId else ""
 end
 
-local function getClientBehavior(abilityId: string, definition)
+local function getClientBehavior(abilityId: string, definition: AbilityDefinition?): ClientBehavior?
 	local behaviorId = AbilityConfig.GetBehaviorId(abilityId)
 	if behaviorId == "" and definition and typeof(definition.id) == "string" then
 		behaviorId = definition.id
@@ -103,7 +110,7 @@ local function getServerTime(): number
 	return workspace:GetServerTimeNow()
 end
 
-local function getAimPayload()
+local function getAimPayload(): any
 	local camera = workspace.CurrentCamera
 	local character = LocalPlayer.Character
 	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
@@ -123,7 +130,7 @@ local function getAimPayload()
 	}
 end
 
-local function getCooldownRemaining(slotState): number
+local function getCooldownRemaining(slotState: AbilitySlotState?): number
 	if typeof(slotState) ~= "table" or typeof(slotState.cooldownEndsAt) ~= "number" then
 		return 0
 	end
@@ -207,7 +214,7 @@ function AbilityController:_updateButtons()
 	end
 end
 
-function AbilityController:_bindReplica(replica)
+function AbilityController:_bindReplica(replica: any)
 	if replica.Tags.Player ~= LocalPlayer then
 		return
 	end
@@ -238,7 +245,7 @@ function AbilityController:_bindEffects()
 		return
 	end
 
-	self._effectConnection = self._effectRemote.OnClientEvent:Connect(function(effectName: string, payload)
+	self._effectConnection = self._effectRemote.OnClientEvent:Connect(function(effectName: string, payload: any)
 		if typeof(payload) ~= "table" then
 			return
 		end
@@ -253,7 +260,7 @@ function AbilityController:_bindEffects()
 			local ok, err = pcall(function()
 				behavior.OnEffect({
 					effectName = effectName,
-					payload = payload,
+					payload = payload :: AbilityEffectPayload,
 					localPlayer = LocalPlayer,
 					controller = self,
 				})
@@ -282,7 +289,7 @@ function AbilityController:_bindInputs()
 	end
 end
 
-function AbilityController:SendMessage(slot: string, messageType: string, payload)
+function AbilityController:SendMessage(slot: string, messageType: string, payload: any?): boolean
 	if not AbilityConfig.IsKnownSlot(slot) then
 		return false
 	end
@@ -352,11 +359,11 @@ function AbilityController:GetEquippedAbilityId(slot: string): string
 	return getEquippedAbilityId(slot)
 end
 
-function AbilityController:GetState()
+function AbilityController:GetState(): AbilityState?
 	return self._data
 end
 
-function AbilityController:GetSlotState(slot: string)
+function AbilityController:GetSlotState(slot: string): AbilitySlotState?
 	return getSlotState(slot)
 end
 

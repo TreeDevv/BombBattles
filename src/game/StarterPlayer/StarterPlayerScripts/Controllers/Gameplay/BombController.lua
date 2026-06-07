@@ -7,8 +7,11 @@ local UserInputService = game:GetService("UserInputService")
 
 local AnimationConfig = require(ReplicatedStorage.Shared.Config.AnimationConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
+local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
+local HipBombVisual = require(ReplicatedStorage.Shared.Effects.HipBombVisual)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debris)
 
@@ -29,9 +32,12 @@ local HELD_BOMB_VISUAL_NAME = "BombHeldVisual"
 local HELD_BOMB_GRIP_ATTACHMENT_NAME = "BombGripAttachment"
 local HELD_BOMB_CONSTRAINT_NAME = "BombGripConstraint"
 local HELD_BOMB_WELD_NAME = "BombHeldWeld"
+local HIP_BOMB_VISUAL_NAME = (BombConfig.HipCarry and BombConfig.HipCarry.VisualName) or "BombHipVisual"
+local HIP_BOMB_MOTOR_NAME = (BombConfig.HipCarry and BombConfig.HipCarry.MotorName) or "BombHipMotor"
 local HELD_BOMB_ATTACH_RETRY_SECONDS = 0.1
 local HELD_BOMB_ATTACH_MAX_ATTEMPTS = 5
 local ANIMATOR_LOOKUP_TIMEOUT = 5
+local ANIMATOR_RETRY_SECONDS = 0.25
 local RENDER_STEP_NAME = "BombBattlesBombPreview"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 2
 local ROUND_ALIVE_ATTR = "RoundAlive"
@@ -79,9 +85,11 @@ BombController._characterRemovingConnection = nil :: RBXScriptConnection?
 BombController._playerRemovingConnection = nil :: RBXScriptConnection?
 BombController._cookingConnection = nil :: RBXScriptConnection?
 BombController._humanoidConnection = nil :: RBXScriptConnection?
+BombController._hipBombConnection = nil :: RBXScriptConnection?
 BombController._stateConnections = {} :: { RBXScriptConnection }
 BombController._character = nil :: Model?
 BombController._animator = nil :: Animator?
+BombController._animationLoadSerial = 0
 BombController._bombTracks = {} :: { [string]: AnimationTrack }
 BombController._animationObjects = {} :: { Animation }
 BombController._animationConnections = {} :: { RBXScriptConnection }
@@ -99,6 +107,7 @@ BombController._heldBombs = {} :: {
 	[Player]: {
 		instance: Instance,
 		rootPart: BasePart,
+		skinId: string?,
 		highlight: Highlight?,
 		pulseConnection: RBXScriptConnection?,
 		fuseStartedAt: number?,
@@ -106,12 +115,14 @@ BombController._heldBombs = {} :: {
 	},
 }
 BombController._heldBombWanted = {} :: { [Player]: boolean }
+BombController._heldBombSkinIds = {} :: { [Player]: string }
 BombController._heldBombPulseTimes = {} :: {
 	[Player]: {
 		fuseStartedAt: number,
 		fuseEndsAt: number,
 	},
 }
+BombController._hipBombs = {} :: { [Player]: any }
 BombController._projectileVisualFolder = nil :: Folder?
 BombController._projectileVisuals = {} :: {
 	[string]: {
@@ -128,6 +139,7 @@ BombController._projectileVisuals = {} :: {
 		settled: boolean?,
 		spin: number,
 		ownsInstance: boolean,
+		skinId: string?,
 		highlight: Highlight?,
 		pulseConnection: RBXScriptConnection?,
 		fuseStartedAt: number?,
@@ -279,40 +291,25 @@ local function calculateTrajectory(origin: Vector3, aimDirection: Vector3)
 	)
 end
 
-local function getFirstBasePart(instance: Instance?): BasePart?
-	if not instance then
-		return nil
+local function getPlayerBombSkinId(player: Player?): string
+	if not player then
+		return BombSkinConfig.DefaultSkinId
 	end
-	if instance:IsA("BasePart") then
-		return instance
-	end
-	return instance:FindFirstChildWhichIsA("BasePart", true)
+
+	local skinId = BombSkinConfig.NormalizeSkinId(player:GetAttribute(BombSkinConfig.AttributeName))
+	return if skinId ~= "" then skinId else BombSkinConfig.DefaultSkinId
 end
 
-local function getBombAsset(): Instance?
-	local assets = ReplicatedStorage:FindFirstChild("Assets")
-	local bombs = assets and assets:FindFirstChild("Bombs")
-	if not bombs then
-		return nil
-	end
-
-	return bombs:FindFirstChild(BombConfig.RuntimeBombName) or bombs:FindFirstChildWhichIsA("Model") or bombs:FindFirstChildWhichIsA("BasePart")
-end
-
-local function createBombVisualInstance(): (Instance, BasePart?)
-	local asset = getBombAsset()
-	if asset then
-		local instance = asset:Clone()
-		return instance, getFirstBasePart(instance)
-	end
-
-	local part = Instance.new("Part")
-	part.Name = BombConfig.RuntimeBombName
-	part.Shape = Enum.PartType.Ball
-	part.Size = BombConfig.RuntimeBombSize
-	part.Material = Enum.Material.Neon
-	part.Color = Color3.fromRGB(45, 45, 45)
-	return part, part
+local function createBombVisualInstance(skinId: any, name: string?, effectState, visualScale: number?): (Instance, BasePart?)
+	local instance, rootPart = BombVisualUtil.CreateBombVisual(skinId, name or BombConfig.RuntimeBombName, {
+		anchored = false,
+		canCollide = false,
+		canQuery = false,
+		massless = true,
+		effectState = effectState,
+		visualScale = visualScale,
+	})
+	return instance, rootPart
 end
 
 local function getRightGripAttachment(character: Model?): Attachment?
@@ -380,6 +377,11 @@ local function getBombCount(): number
 	return if typeof(count) == "number" then count else BombConfig.MaxBombs
 end
 
+local function getPlayerBombCount(player: Player): number
+	local count = player:GetAttribute(ATTR.Count)
+	return if typeof(count) == "number" then count else BombConfig.MaxBombs
+end
+
 local function isCooking(): boolean
 	return LocalPlayer:GetAttribute(ATTR.Cooking) == true
 end
@@ -404,20 +406,18 @@ local function findServerAnimator(humanoid: Humanoid): Animator?
 end
 
 local function waitForServerAnimator(character: Model): Animator?
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	if not humanoid then
-		return nil
-	end
-
 	local deadline = os.clock() + ANIMATOR_LOOKUP_TIMEOUT
 	repeat
-		local animator = findServerAnimator(humanoid)
-		if animator then
-			return animator
+		local humanoid = character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			local animator = findServerAnimator(humanoid)
+			if animator then
+				return animator
+			end
 		end
 
 		task.wait()
-	until os.clock() >= deadline or not humanoid.Parent
+	until os.clock() >= deadline or not character.Parent
 
 	return nil
 end
@@ -746,6 +746,7 @@ end
 
 function BombController:_hideHeldBomb(player: Player)
 	self._heldBombWanted[player] = nil
+	self._heldBombSkinIds[player] = nil
 	self._heldBombPulseTimes[player] = nil
 	self:_destroyHeldBomb(player)
 end
@@ -756,7 +757,8 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 	end
 
 	local held = self._heldBombs[player]
-	if held and held.instance.Parent then
+	local skinId = self._heldBombSkinIds[player] or getPlayerBombSkinId(player)
+	if held and held.instance.Parent and held.skinId == skinId then
 		return
 	end
 	self:_destroyHeldBomb(player)
@@ -772,7 +774,11 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 		return
 	end
 
-	local instance, rootPart = createBombVisualInstance()
+	local instance, rootPart = createBombVisualInstance(skinId, HELD_BOMB_VISUAL_NAME, {
+		vfx = true,
+		fuseSpark = false,
+		trail = false,
+	}, BombConfig.HeldVisualScale)
 	if not rootPart then
 		instance:Destroy()
 		return
@@ -808,6 +814,7 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 	local held = {
 		instance = instance,
 		rootPart = rootPart,
+		skinId = skinId,
 		highlight = nil,
 		pulseConnection = nil,
 		fuseStartedAt = nil,
@@ -821,9 +828,144 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 	end
 end
 
-function BombController:_showHeldBomb(player: Player)
+function BombController:_showHeldBomb(player: Player, skinId: any?)
 	self._heldBombWanted[player] = true
+	local resolvedSkinId = BombSkinConfig.NormalizeSkinId(skinId)
+	self._heldBombSkinIds[player] = if resolvedSkinId ~= "" then resolvedSkinId else getPlayerBombSkinId(player)
 	self:_ensureHeldBomb(player, 0)
+end
+
+function BombController:_setHeldBombEffects(player: Player, fuseSpark: boolean, trail: boolean)
+	local held = self._heldBombs[player]
+	if not held then
+		return
+	end
+
+	BombVisualUtil.SetEffectState(held.instance, {
+		vfx = true,
+		fuseSpark = fuseSpark,
+		trail = trail,
+	})
+end
+
+function BombController:_destroyHipBomb(player: Player)
+	local visual = self._hipBombs[player]
+	if visual then
+		visual:Destroy()
+	end
+	self._hipBombs[player] = nil
+	if not visual then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant.Name == HIP_BOMB_VISUAL_NAME or (descendant.Name == HIP_BOMB_MOTOR_NAME and descendant:IsA("Motor6D")) then
+			descendant:Destroy()
+		end
+	end
+end
+
+function BombController:_isHipBombSuppressed(player: Player): boolean
+	if self._heldBombWanted[player] == true then
+		return true
+	end
+
+	return player == LocalPlayer and (self._holding or self._releasePending or isCooking())
+end
+
+function BombController:_shouldShowHipBomb(player: Player): boolean
+	local hipConfig = BombConfig.HipCarry
+	if hipConfig and hipConfig.Enabled == false then
+		return false
+	end
+	if player.Parent ~= Players then
+		return false
+	end
+	if RoundController:Get("state") ~= RoundStates.Active then
+		return false
+	end
+	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+		return false
+	end
+	if getPlayerBombCount(player) <= 0 then
+		return false
+	end
+	if self:_isHipBombSuppressed(player) then
+		return false
+	end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	return character ~= nil and humanoid ~= nil and humanoid.Health > 0
+end
+
+function BombController:_getHipSwayState(player: Player)
+	local character = player.Character
+	if not character then
+		return nil
+	end
+
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not (rootPart and rootPart:IsA("BasePart")) then
+		return nil
+	end
+
+	return {
+		cframe = rootPart.CFrame,
+		linearVelocity = rootPart.AssemblyLinearVelocity,
+		grounded = character:GetAttribute("Movement_Grounded") ~= false,
+		sprinting = character:GetAttribute("Movement_Sprinting") == true,
+		sliding = character:GetAttribute("Movement_Sliding") == true,
+		landingRecoveryAlpha = character:GetAttribute("Movement_LandingRecoveryAlpha"),
+	}
+end
+
+function BombController:_stepHipBombs(deltaTime: number)
+	local activePlayers = {}
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		activePlayers[player] = true
+		if not self:_shouldShowHipBomb(player) then
+			self:_destroyHipBomb(player)
+			continue
+		end
+
+		local visual = self._hipBombs[player]
+		local skinId = getPlayerBombSkinId(player)
+		if visual and visual.skinId ~= skinId then
+			self:_destroyHipBomb(player)
+			visual = nil
+		end
+		if not visual then
+			local character = player.Character
+			if character then
+				visual = HipBombVisual.new(character, nil, {
+					skinId = skinId,
+				})
+				self._hipBombs[player] = visual
+			end
+		end
+
+		if visual then
+			local state = self:_getHipSwayState(player)
+			if not state or not visual:Step(deltaTime, state) then
+				self:_destroyHipBomb(player)
+			else
+				visual:SetVisible(true)
+			end
+		end
+	end
+
+	for player in pairs(self._hipBombs) do
+		if not activePlayers[player] then
+			self:_destroyHipBomb(player)
+		end
+	end
 end
 
 function BombController:_startHeldBombPulse(player: Player, startedAt: number?, fuseSeconds: number?)
@@ -839,6 +981,7 @@ function BombController:_startHeldBombPulse(player: Player, startedAt: number?, 
 	local held = self._heldBombs[player]
 	if held and held.instance.Parent then
 		self:_startBombPulse(held, held.instance, fuseStartedAt, fuseEndsAt)
+		self:_setHeldBombEffects(player, true, false)
 	end
 end
 
@@ -938,6 +1081,7 @@ function BombController:_cancelHoldIfInvalid()
 end
 
 function BombController:_destroyBombAnimations()
+	self._animationLoadSerial += 1
 	self:_clearBombAnimationState()
 
 	for _, animation in ipairs(self._animationObjects) do
@@ -948,6 +1092,36 @@ function BombController:_destroyBombAnimations()
 	self._bombTracks = {}
 	self._animator = nil
 	self._lastDebugLogTimes = {}
+end
+
+function BombController:_bindBombAnimations(character: Model, animator: Animator?, serial: number): boolean
+	if self._animationLoadSerial ~= serial or self._character ~= character or LocalPlayer.Character ~= character then
+		return false
+	end
+	if not (animator and character.Parent and animator.Parent and animator.Parent:IsA("Humanoid")) then
+		return false
+	end
+
+	self._animator = animator
+
+	for name, config in pairs(AnimationConfig.BombAnimations) do
+		if self._animationLoadSerial ~= serial or self._character ~= character or LocalPlayer.Character ~= character then
+			return false
+		end
+
+		local animation = Instance.new("Animation")
+		animation.Name = "Bomb" .. name
+		animation.AnimationId = config.AnimationId
+		animation.Parent = script
+		table.insert(self._animationObjects, animation)
+
+		local track = animator:LoadAnimation(animation)
+		track.Looped = config.Looped == true
+		track.Priority = config.Priority
+		self._bombTracks[name] = track
+	end
+
+	return true
 end
 
 function BombController:_disconnectStateConnections()
@@ -978,28 +1152,30 @@ end
 
 function BombController:_loadBombAnimations(character: Model)
 	self:_destroyBombAnimations()
-
-	local animator = waitForServerAnimator(character)
-	if not animator then
-		warn("[BombController] Missing server-created Animator for character:", character:GetFullName())
-		return
-	end
-
 	self._character = character
-	self._animator = animator
+	local serial = self._animationLoadSerial
 
-	for name, config in pairs(AnimationConfig.BombAnimations) do
-		local animation = Instance.new("Animation")
-		animation.Name = "Bomb" .. name
-		animation.AnimationId = config.AnimationId
-		animation.Parent = script
-		table.insert(self._animationObjects, animation)
+	task.spawn(function()
+		while self._animationLoadSerial == serial and self._character == character and LocalPlayer.Character == character do
+			if not character.Parent then
+				return
+			end
 
-		local track = animator:LoadAnimation(animation)
-		track.Looped = config.Looped == true
-		track.Priority = config.Priority
-		self._bombTracks[name] = track
-	end
+			local animator = waitForServerAnimator(character)
+			if self:_bindBombAnimations(character, animator, serial) then
+				return
+			end
+			if self._animationLoadSerial ~= serial or self._character ~= character or LocalPlayer.Character ~= character then
+				return
+			end
+			if not character.Parent then
+				return
+			end
+
+			warn("[BombController] Waiting for server-created Animator for character:", character:GetFullName())
+			task.wait(ANIMATOR_RETRY_SECONDS)
+		end
+	end)
 end
 
 function BombController:_setDebugAttributes(eventName: string, trackName: string?, pitch: number, roll: number)
@@ -1232,6 +1408,7 @@ function BombController:_requestRelease()
 	end
 
 	self._holding = false
+	self:_setHeldBombEffects(LocalPlayer, true, false)
 	self:_playRelease()
 	self.HoldReleased:Fire()
 	return true
@@ -1497,7 +1674,7 @@ end
 
 function BombController:_findPhysicalProjectile(projectileId: string, physicalProjectile: any): (Instance?, BasePart?)
 	if typeof(physicalProjectile) == "Instance" then
-		local rootPart = getFirstBasePart(physicalProjectile)
+		local rootPart = BombVisualUtil.GetRootPart(physicalProjectile)
 		if rootPart then
 			return physicalProjectile, rootPart
 		end
@@ -1506,7 +1683,7 @@ function BombController:_findPhysicalProjectile(projectileId: string, physicalPr
 	local folder = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
 	local projectile = folder and folder:FindFirstChild("BombProjectile_" .. projectileId)
 	if projectile then
-		local rootPart = getFirstBasePart(projectile)
+		local rootPart = BombVisualUtil.GetRootPart(projectile)
 		if rootPart then
 			return projectile, rootPart
 		end
@@ -1532,6 +1709,11 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 	end
 
 	local airborneInstance = visual.instance
+	BombVisualUtil.SetEffectState(projectile, {
+		vfx = true,
+		fuseSpark = true,
+		trail = true,
+	})
 	self:_startBombPulse(
 		visual,
 		projectile,
@@ -1546,6 +1728,10 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 	visual.rootPart = rootPart
 	visual.path = nil
 	visual.ownsInstance = false
+	local skinId = BombSkinConfig.NormalizeSkinId(projectile:GetAttribute("BombSkinId"))
+	if skinId ~= "" then
+		visual.skinId = skinId
+	end
 	return true
 end
 
@@ -1560,8 +1746,16 @@ function BombController:_retryTransferProjectilePulseToPhysical(projectileId: st
 	end)
 end
 
-function BombController:_createProjectileVisual(projectileId: string)
-	local instance, rootPart = createBombVisualInstance()
+function BombController:_createProjectileVisual(projectileId: string, skinId: any)
+	local resolvedSkinId = BombSkinConfig.NormalizeSkinId(skinId)
+	if resolvedSkinId == "" then
+		resolvedSkinId = BombSkinConfig.DefaultSkinId
+	end
+	local instance, rootPart = createBombVisualInstance(resolvedSkinId, "BombProjectile_" .. projectileId, {
+		vfx = true,
+		fuseSpark = true,
+		trail = true,
+	}, BombConfig.ProjectileVisualScale)
 
 	if not rootPart then
 		instance:Destroy()
@@ -1603,6 +1797,7 @@ function BombController:_createProjectileVisual(projectileId: string)
 		settled = false,
 		spin = 0,
 		ownsInstance = true,
+		skinId = resolvedSkinId,
 		highlight = nil,
 		pulseConnection = nil,
 		fuseStartedAt = nil,
@@ -1647,7 +1842,7 @@ function BombController:_playThrowEffect(payload)
 	end
 
 	self:_destroyProjectileVisual(projectileId)
-	local visual = self:_createProjectileVisual(projectileId)
+	local visual = self:_createProjectileVisual(projectileId, payload.bombSkinId)
 	if not visual then
 		return
 	end
@@ -1665,47 +1860,12 @@ function BombController:_playThrowEffect(payload)
 	end
 	self._projectileVisuals[projectileId] = visual
 
-	local rootPart = visual.rootPart
-	local attachment0 = Instance.new("Attachment")
-	attachment0.Name = "BombThrowTrailAttachment0"
-	attachment0.Position = Vector3.new(0, rootPart.Size.Y * 0.35, 0)
-	attachment0.Parent = rootPart
-
-	local attachment1 = Instance.new("Attachment")
-	attachment1.Name = "BombThrowTrailAttachment1"
-	attachment1.Position = Vector3.new(0, -rootPart.Size.Y * 0.35, 0)
-	attachment1.Parent = rootPart
-
-	local trail = Instance.new("Trail")
-	trail.Name = "BombThrowTrail"
-	trail.Attachment0 = attachment0
-	trail.Attachment1 = attachment1
-	trail.Color = ColorSequence.new(BombConfig.PreviewColor, BombConfig.PreviewDangerColor)
-	trail.LightEmission = 0.35
-	trail.Lifetime = 0.22
-	trail.MinLength = 0.08
-	trail.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.12),
-		NumberSequenceKeypoint.new(1, 1),
-	})
-	trail.WidthScale = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0.85),
-		NumberSequenceKeypoint.new(1, 0),
-	})
-	trail.Parent = rootPart
-
-	local light = Instance.new("PointLight")
-	light.Name = "BombThrowGlow"
-	light.Color = BombConfig.PreviewColor
-	light.Brightness = 1.3
-	light.Range = 9
-	light.Parent = rootPart
-
 	local startedAt = if typeof(payload.startedAt) == "number" then payload.startedAt else getServerTime()
 	local lifetime = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds
 	local fuseStartedAt = if typeof(payload.fuseStartedAt) == "number" then payload.fuseStartedAt else startedAt
 	local fuseEndsAt = startedAt + lifetime
 	self:_startBombPulse(visual, visual.instance, fuseStartedAt, fuseEndsAt)
+	local rootPart = visual.rootPart
 
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
 		visual.spin += deltaTime * BombConfig.VisualSpinRadiansPerSecond
@@ -1797,6 +1957,7 @@ function BombController:_handleProjectileSnapshot(payload)
 			startedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
 			fuseStartedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
 			remainingFuse = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds,
+			bombSkinId = payload.bombSkinId,
 		})
 		visual = self._projectileVisuals[projectileId]
 		if not visual then
@@ -1989,7 +2150,7 @@ function BombController:_bindEffects()
 	self._effectConnection = self._effectRemote.OnClientEvent:Connect(function(effectName: string, payload)
 		local payloadPlayer = getPayloadPlayer(payload)
 		if effectName == "Hold" and payloadPlayer then
-			self:_showHeldBomb(payloadPlayer)
+			self:_showHeldBomb(payloadPlayer, if typeof(payload) == "table" then payload.bombSkinId else nil)
 		elseif effectName == "HoldEnd" and payloadPlayer then
 			self:_hideHeldBomb(payloadPlayer)
 		elseif effectName == "Throw" and typeof(payload) == "table" then
@@ -2025,6 +2186,11 @@ function BombController:_bindEffects()
 			self:_playTerrainDebris(payload.payloads)
 		elseif effectName == "Cook" and typeof(payload) == "table" then
 			if payloadPlayer then
+				local skinId = BombSkinConfig.NormalizeSkinId(payload.bombSkinId)
+				if skinId ~= "" then
+					self._heldBombSkinIds[payloadPlayer] = skinId
+					self:_ensureHeldBomb(payloadPlayer, 0)
+				end
 				self:_startHeldBombPulse(payloadPlayer, payload.startedAt, payload.fuseSeconds)
 			end
 			if payload.player == LocalPlayer then
@@ -2037,7 +2203,6 @@ end
 function BombController:_bindCharacter(character: Model?)
 	self:_stopPreview()
 	self._holding = false
-	self:_destroyBombAnimations()
 
 	if self._cookingConnection then
 		self._cookingConnection:Disconnect()
@@ -2054,20 +2219,23 @@ function BombController:_bindCharacter(character: Model?)
 		end
 	end)
 
-	if character then
-		self:_loadBombAnimations(character)
-		local humanoid = character:FindFirstChildOfClass("Humanoid")
-		if humanoid then
-			self._humanoidConnection = humanoid.HealthChanged:Connect(function()
-				self:_cancelHoldIfInvalid()
-			end)
-		end
-		task.defer(function()
-			if not isCooking() then
-				self:_stopPreview()
-			end
+	if not character then
+		self:_destroyBombAnimations()
+		return
+	end
+
+	self:_loadBombAnimations(character)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		self._humanoidConnection = humanoid.HealthChanged:Connect(function()
+			self:_cancelHoldIfInvalid()
 		end)
 	end
+	task.defer(function()
+		if not isCooking() then
+			self:_stopPreview()
+		end
+	end)
 end
 
 function BombController:OnStart()
@@ -2098,15 +2266,24 @@ function BombController:OnStart()
 	if self._playerRemovingConnection then
 		self._playerRemovingConnection:Disconnect()
 	end
+	if self._hipBombConnection then
+		self._hipBombConnection:Disconnect()
+		self._hipBombConnection = nil
+	end
 
 	self._characterConnection = LocalPlayer.CharacterAdded:Connect(function(character)
 		self:_bindCharacter(character)
 	end)
 	self._characterRemovingConnection = LocalPlayer.CharacterRemoving:Connect(function()
 		self:_cancelHold()
+		self:_destroyHipBomb(LocalPlayer)
 	end)
 	self._playerRemovingConnection = Players.PlayerRemoving:Connect(function(player)
 		self:_hideHeldBomb(player)
+		self:_destroyHipBomb(player)
+	end)
+	self._hipBombConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		self:_stepHipBombs(deltaTime)
 	end)
 	self:_bindCharacter(LocalPlayer.Character)
 end

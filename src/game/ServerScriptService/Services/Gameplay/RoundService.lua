@@ -19,6 +19,7 @@ local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
 local SET_AFK_REMOTE_NAME = "SetAFK"
 local REPORT_PREFERRED_INPUT_REMOTE_NAME = "ReportPreferredInput"
 local KILL_FEED_REMOTE_NAME = "KillFeed"
+local DESTRUCTION_SCORE_REMOTE_NAME = "DestructionScore"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
@@ -65,6 +66,7 @@ local submitMapVoteRemote: RemoteEvent? = nil
 local setAFKRemote: RemoteEvent? = nil
 local reportPreferredInputRemote: RemoteEvent? = nil
 local killFeedRemote: RemoteEvent? = nil
+local destructionScoreRemote: RemoteEvent? = nil
 local running = false
 local roundId = 0
 local activeRoundStartedAt = 0
@@ -240,6 +242,22 @@ local function ensureKillFeedRemote(): RemoteEvent
 
 	local remote = Instance.new("RemoteEvent")
 	remote.Name = KILL_FEED_REMOTE_NAME
+	remote.Parent = folder
+	return remote
+end
+
+local function ensureDestructionScoreRemote(): RemoteEvent
+	local folder = ensureRemotesFolder()
+	local existing = folder:FindFirstChild(DESTRUCTION_SCORE_REMOTE_NAME)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = DESTRUCTION_SCORE_REMOTE_NAME
 	remote.Parent = folder
 	return remote
 end
@@ -1915,7 +1933,7 @@ function RoundService:RecordPlayerDamage(attacker: Player, target: Player, damag
 	syncScoreboardStats()
 end
 
-function RoundService:RecordMapDestruction(sourceContext, targetsHit: number)
+function RoundService:RecordMapDestruction(sourceContext, targetsHit: number, position: Vector3?)
 	if currentState ~= RoundStates.Active then
 		return
 	end
@@ -1932,8 +1950,21 @@ function RoundService:RecordMapDestruction(sourceContext, targetsHit: number)
 	end
 
 	local stats = getScoreboardStatsFor(player)
-	stats.destruction += roundNonNegative(targetsHit)
+	local value = roundNonNegative(targetsHit)
+	stats.destruction += value
 	syncScoreboardStats()
+
+	local remote = destructionScoreRemote or ensureDestructionScoreRemote()
+	destructionScoreRemote = remote
+	local payload = {
+		value = value,
+		roundId = roundId,
+		timestamp = workspace:GetServerTimeNow(),
+	}
+	if typeof(position) == "Vector3" then
+		payload.position = position
+	end
+	remote:FireClient(player, payload)
 end
 
 function RoundService:ReportPreferredInput(player: Player, preferredInput: any)
@@ -1955,8 +1986,8 @@ end
 
 function RoundService:OnStart()
 	Players.CharacterAutoLoads = false
-	DestructionService:SetScoreRecorder(function(sourceContext, targetsHit)
-		RoundService:RecordMapDestruction(sourceContext, targetsHit)
+	DestructionService:SetScoreRecorder(function(sourceContext, targetsHit, position)
+		RoundService:RecordMapDestruction(sourceContext, targetsHit, position)
 	end)
 	createGameReplica()
 	submitMapVoteRemote = ensureVoteRemote()
@@ -1966,6 +1997,7 @@ function RoundService:OnStart()
 	reportPreferredInputRemote = ensureReportPreferredInputRemote()
 	reportPreferredInputRemote.OnServerEvent:Connect(onReportPreferredInput)
 	killFeedRemote = ensureKillFeedRemote()
+	destructionScoreRemote = ensureDestructionScoreRemote()
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		player:SetAttribute(AFK_ATTR, false)

@@ -1,6 +1,13 @@
-local DebugPulse = {}
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-function DebugPulse.OnActivate(context)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+
+type ServerActivateContext = AbilityTypes.ServerActivateContext
+type AbilityActivationResult = AbilityTypes.AbilityActivationResult
+
+local DebugPulse = {} :: AbilityTypes.ServerBehavior
+
+function DebugPulse.OnActivate(context: ServerActivateContext): AbilityActivationResult
 	local currentState = context.slotState.state
 	local pulseCount = 0
 	if typeof(currentState) == "table" and typeof(currentState.pulseCount) == "number" then

@@ -1,5 +1,20 @@
 local AbilityResult = {}
 
+export type AbilityResultKind =
+	"Continue"
+	| "Block"
+	| "Reflect"
+	| "Absorb"
+	| "DestroyProjectile"
+	| "ModifyDamage"
+	| "DeferProjectile"
+	| "RedirectProjectile"
+
+export type AbilityHookResult = {
+	kind: AbilityResultKind?,
+	[string]: any,
+}
+
 AbilityResult.Kind = table.freeze({
 	Continue = "Continue",
 	Block = "Block",
@@ -11,13 +26,13 @@ AbilityResult.Kind = table.freeze({
 	RedirectProjectile = "RedirectProjectile",
 })
 
-function AbilityResult.Continue(extra)
+function AbilityResult.Continue(extra: AbilityHookResult?): AbilityHookResult
 	local result = extra or {}
 	result.kind = AbilityResult.Kind.Continue
 	return result
 end
 
-function AbilityResult.IsHandled(result): boolean
+function AbilityResult.IsHandled(result: any): boolean
 	return typeof(result) == "table" and result.kind ~= nil and result.kind ~= AbilityResult.Kind.Continue
 end
 

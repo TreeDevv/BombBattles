@@ -80,6 +80,9 @@
         "BombProjectileService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombProjectileService.lua"
         },
+        "BombSkinService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/BombSkinService.lua"
+        },
         "CharacterAbilityService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/CharacterAbilityService.lua"
         },
@@ -190,6 +193,9 @@
           },
           "NotificationController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/NotificationController.lua"
+          },
+          "DestructionMeterController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/DestructionMeterController.lua"
           },
           "AFKController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/AFKController.lua"

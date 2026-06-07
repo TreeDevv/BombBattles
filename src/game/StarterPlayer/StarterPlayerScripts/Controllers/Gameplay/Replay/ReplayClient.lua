@@ -5,6 +5,9 @@ local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
+local HipBombVisual = require(ReplicatedStorage.Shared.Effects.HipBombVisual)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 local EventTextPresenter = require(ReplicatedStorage.Shared.Effects.EventTextPresenter)
 local ReplayMapSimulator = require(script.Parent:WaitForChild("ReplayMapSimulator"))
@@ -576,7 +579,7 @@ local function attachReplayBombPulse(visual, adornee: Instance, rootPart: BasePa
 	highlight.Parent = adornee
 	visual.highlight = highlight
 
-	if rootPart then
+	if visual.fallback and rootPart then
 		local light = Instance.new("PointLight")
 		light.Name = "BombThrowGlow"
 		light.Color = BombConfig.PreviewColor
@@ -742,7 +745,7 @@ local function buildReplayPoseJoints(model: Model)
 	return joints
 end
 
-local function makeAvatarCharacterVisual(parent: Instance, userId: number, teamName: any, hasPoseSnapshots: boolean?)
+local function makeAvatarCharacterVisual(parent: Instance, userId: number, teamName: any, hasPoseSnapshots: boolean?, bombSkinId: any)
 	local model = ReplayAvatarFactory.CloneCachedTemplate(userId)
 	if not model then
 		return nil
@@ -776,6 +779,10 @@ local function makeAvatarCharacterVisual(parent: Instance, userId: number, teamN
 
 	local nameplate = makeNameplate(rootPart, userId, teamName, color)
 	model.Parent = parent
+	local hipBomb = HipBombVisual.new(model, nil, {
+		mode = "animated",
+		skinId = bombSkinId,
+	})
 
 	local poseJoints = buildReplayPoseJoints(model)
 	local animationDriver = nil
@@ -811,12 +818,13 @@ local function makeAvatarCharacterVisual(parent: Instance, userId: number, teamN
 		highlight = highlight,
 		poseJoints = poseJoints,
 		animationDriver = animationDriver,
+		hipBomb = hipBomb,
 		lastCFrame = nil,
 	}
 end
 
-local function makeCharacterVisual(parent: Instance, userId: number, teamName: any, hasPoseSnapshots: boolean?)
-	local avatarVisual = makeAvatarCharacterVisual(parent, userId, teamName, hasPoseSnapshots)
+local function makeCharacterVisual(parent: Instance, userId: number, teamName: any, hasPoseSnapshots: boolean?, bombSkinId: any)
+	local avatarVisual = makeAvatarCharacterVisual(parent, userId, teamName, hasPoseSnapshots, bombSkinId)
 	if avatarVisual then
 		return avatarVisual
 	end
@@ -866,6 +874,11 @@ local function makeCharacterVisual(parent: Instance, userId: number, teamName: a
 		{ part = rightArm, offset = CFrame.new(1.35, 0.15, 0) },
 		{ part = teamRing, offset = CFrame.new(0, -2.7, 0) },
 	}
+	local hipBomb = HipBombVisual.new(model, nil, {
+		carrierPart = body,
+		mode = "animated",
+		skinId = bombSkinId,
+	})
 
 	return {
 		model = model,
@@ -873,6 +886,7 @@ local function makeCharacterVisual(parent: Instance, userId: number, teamName: a
 		parts = parts,
 		nameplate = nameplate,
 		highlight = highlight,
+		hipBomb = hipBomb,
 		lastCFrame = nil,
 	}
 end
@@ -913,27 +927,41 @@ local function makeFallbackBombVisual(parent: Instance, bombId: string, bombType
 	return visual
 end
 
-local function makeBombVisual(parent: Instance, bombId: string, bombType: any)
-	local template = getBombTemplate(bombType)
-	if template then
-		local clone = template:Clone()
-		clone.Name = "ReplayBomb_" .. bombId
-		local records, rootPart = prepareReplayClone(clone)
-		if rootPart and #records > 0 then
-			clone.Parent = parent
-			local visual = {
-				instance = clone,
-				rootPart = rootPart,
-				parts = records,
-				fallback = false,
-				bombType = bombType,
-				lastCFrame = nil,
-			}
-			attachReplayBombPulse(visual, clone, rootPart)
-			return visual
-		end
-		clone:Destroy()
+local function makeBombVisual(parent: Instance, bombId: string, bombType: any, bombSkinId: any)
+	local instance, rootPart, resolvedSkinId = BombVisualUtil.CreateBombVisual(bombSkinId, "ReplayBomb_" .. bombId, {
+		anchored = true,
+		canCollide = false,
+		canQuery = false,
+		massless = true,
+		effectState = {
+			vfx = true,
+			fuseSpark = true,
+			trail = true,
+		},
+		visualScale = BombConfig.ProjectileVisualScale,
+	})
+	local records, preparedRootPart = prepareReplayClone(instance)
+	rootPart = BombVisualUtil.GetRootPart(instance) or preparedRootPart or rootPart
+	if rootPart and #records > 0 then
+		instance.Parent = parent
+		BombVisualUtil.SetEffectState(instance, {
+			vfx = true,
+			fuseSpark = true,
+			trail = true,
+		})
+		local visual = {
+			instance = instance,
+			rootPart = rootPart,
+			parts = records,
+			fallback = false,
+			bombType = bombType,
+			bombSkinId = resolvedSkinId,
+			lastCFrame = nil,
+		}
+		attachReplayBombPulse(visual, instance, rootPart)
+		return visual
 	end
+	instance:Destroy()
 
 	return makeFallbackBombVisual(parent, bombId, bombType)
 end
@@ -1040,6 +1068,35 @@ local function applyPoseSnapshots(visual, leftSnapshot, rightSnapshot, alpha: nu
 	return applied > 0
 end
 
+local function updateReplayHipBomb(visual, cframe: CFrame, alive: boolean?, snapshot)
+	local hipBomb = visual and visual.hipBomb
+	if not hipBomb then
+		return
+	end
+
+	local animationState = if typeof(snapshot) == "table" and typeof(snapshot.animationState) == "table"
+		then snapshot.animationState
+		else {}
+	local visible = alive ~= false and animationState.bombCooking ~= true
+	hipBomb:SetVisible(visible)
+	if not visible then
+		return
+	end
+
+	local ok = hipBomb:Step(1 / 60, {
+		cframe = cframe,
+		linearVelocity = if typeof(animationState.linearVelocity) == "Vector3" then animationState.linearVelocity else Vector3.zero,
+		grounded = if typeof(animationState.grounded) == "boolean" then animationState.grounded else true,
+		sprinting = animationState.sprinting == true,
+		sliding = animationState.sliding == true,
+		landingRecoveryAlpha = animationState.landingRecoveryAlpha,
+	})
+	if not ok then
+		hipBomb:Destroy()
+		visual.hipBomb = nil
+	end
+end
+
 local function setCharacterCFrame(visual, cframe: CFrame, alive: boolean?, snapshot, leftSnapshot, rightSnapshot, alpha: number?)
 	local poseApplied = false
 	local resolvedCFrame = cframe
@@ -1083,6 +1140,7 @@ local function setCharacterCFrame(visual, cframe: CFrame, alive: boolean?, snaps
 		if visual.animationDriver and not (DEBUG_REPLAY_POSE_JOINTS and poseApplied) then
 			visual.animationDriver:Step(snapshot, resolvedCFrame)
 		end
+		updateReplayHipBomb(visual, resolvedCFrame, alive, snapshot)
 		return
 	end
 
@@ -1101,11 +1159,15 @@ local function setCharacterCFrame(visual, cframe: CFrame, alive: boolean?, snaps
 	if visual.highlight then
 		visual.highlight.Enabled = true
 	end
+	updateReplayHipBomb(visual, resolvedCFrame, alive, snapshot)
 end
 
 local function hideCharacter(visual)
 	for _, entry in ipairs(visual.parts) do
 		setPartVisible(entry.part, false)
+	end
+	if visual.hipBomb then
+		visual.hipBomb:SetVisible(false)
 	end
 	if visual.nameplate then
 		visual.nameplate.Enabled = false
@@ -1538,9 +1600,16 @@ local function collectPlayerMeta(frames)
 					userId = snapshot.userId,
 					teamName = snapshot.teamName,
 					hasPose = getSnapshotPose(snapshot) ~= nil,
+					bombSkinId = snapshot.bombSkinId
+						or (snapshot.animationState and snapshot.animationState.bombSkinId)
+						or BombSkinConfig.DefaultSkinId,
 				}
 			elseif not meta[key].hasPose and getSnapshotPose(snapshot) ~= nil then
 				meta[key].hasPose = true
+			elseif meta[key].bombSkinId == nil then
+				meta[key].bombSkinId = snapshot.bombSkinId
+					or (snapshot.animationState and snapshot.animationState.bombSkinId)
+					or BombSkinConfig.DefaultSkinId
 			end
 		end
 	end
@@ -1571,12 +1640,16 @@ local function collectBombMeta(frames)
 				record = {
 					bombId = snapshot.bombId,
 					bombType = snapshot.bombType,
+					bombSkinId = snapshot.bombSkinId,
 					ownerUserId = snapshot.ownerUserId,
 				}
 				meta[key] = record
 			else
 				if record.bombType == nil and typeof(snapshot.bombType) == "string" and snapshot.bombType ~= "" then
 					record.bombType = snapshot.bombType
+				end
+				if record.bombSkinId == nil and typeof(snapshot.bombSkinId) == "string" and snapshot.bombSkinId ~= "" then
+					record.bombSkinId = snapshot.bombSkinId
 				end
 				if record.ownerUserId == nil and isFiniteNumber(snapshot.ownerUserId) then
 					record.ownerUserId = snapshot.ownerUserId
@@ -2408,6 +2481,13 @@ function ReplayClient:CancelReplay(reason: string?)
 			pcall(function()
 				driver:Destroy()
 			end)
+		end
+		local hipBomb = visual.hipBomb
+		if hipBomb then
+			pcall(function()
+				hipBomb:Destroy()
+			end)
+			visual.hipBomb = nil
 		end
 	end
 

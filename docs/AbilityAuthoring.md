@@ -28,9 +28,9 @@ Good client responsibilities:
 
 Client behavior modules should use the controller hooks for ability-specific logic:
 
-- `OnActivateRequested(controller, abilityId, config)`
-- `OnEffect(controller, abilityId, effect, config)`
-- `controller:SendMessage(abilityId, message)`
+- `OnActivateRequested(context)`
+- `OnEffect(context)`
+- `context.controller:SendMessage(context.slot, messageType, payload)`
 
 The client may send intent, not truth. For example, send "place wall near this aimed point", not "spawn this final wall with this exact authoritative result".
 
@@ -54,10 +54,84 @@ Common server hooks:
 
 - `CanActivate(context)`
 - `OnActivate(context)`
-- `OnClientMessage(context, message)`
+- `OnClientMessage(context)`
 - Hook functions called through `AbilityService:RunHook(...)`
 
 If an activation is invalid, return failure without spending the cooldown unless the design explicitly says failed attempts should consume it.
+
+## Typed Ability Templates
+
+Shared ability contracts live in `ReplicatedStorage.Shared.Common.AbilityTypes`. Import those types in new behavior modules so Studio autocomplete shows the available context fields.
+
+Minimal client behavior:
+
+```lua
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+
+type ClientActivateRequestedContext = AbilityTypes.ClientActivateRequestedContext
+type ClientEffectContext = AbilityTypes.ClientEffectContext
+
+local MyAbility = {} :: AbilityTypes.ClientBehavior
+
+function MyAbility.OnActivateRequested(context: ClientActivateRequestedContext): boolean
+	if context.controller:GetCooldownRemaining(context.slot) > 0 then
+		return true
+	end
+
+	context.controller:SendMessage(context.slot, AbilityConfig.MessageTypes.Activate, {
+		aimPosition = nil,
+	})
+	return true
+end
+
+function MyAbility.OnEffect(context: ClientEffectContext)
+	if context.effectName ~= "Activated" or context.payload.abilityId ~= "MyAbility" then
+		return
+	end
+end
+
+return MyAbility
+```
+
+Minimal server behavior:
+
+```lua
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+
+type ServerActivateContext = AbilityTypes.ServerActivateContext
+type AbilityActivationResult = AbilityTypes.AbilityActivationResult
+
+local MyAbility = {} :: AbilityTypes.ServerBehavior
+
+function MyAbility.CanActivate(context: ServerActivateContext): boolean
+	return context.player.Character ~= nil
+end
+
+function MyAbility.OnActivate(context: ServerActivateContext): AbilityActivationResult
+	local state = context.slotState.state
+	local uses = if typeof(state.uses) == "number" then state.uses else 0
+
+	return {
+		state = {
+			uses = uses + 1,
+			lastActivatedAt = context.now,
+		},
+		effect = {
+			name = "MyAbilityActivated",
+			payload = {},
+		},
+	}
+end
+
+return MyAbility
+```
+
+Ability-specific payloads and replicated state are intentionally broad at the shared boundary. Narrow them inside the behavior with `typeof` checks before trusting numbers, vectors, instances, or tables from the client.
 
 ## Networking Contract
 

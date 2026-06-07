@@ -5,8 +5,10 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
+local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
 
 local RESULT_KIND = AbilityResult.Kind
@@ -14,13 +16,14 @@ local DEBUG_REPLAY_EVENTS = false
 
 type HandlerTable = {
 	fireEffect: ((effectName: string, payload: any) -> ())?,
-	explode: ((owner: Player, position: Vector3, source: string, projectileId: string?) -> ())?,
+	explode: ((owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?) -> ())?,
 }
 
 type ProjectileState = {
 	id: string,
 	owner: Player,
 	bombType: string,
+	skinId: string,
 	position: Vector3,
 	lastPosition: Vector3,
 	velocity: Vector3,
@@ -99,10 +102,10 @@ local function fireEffect(effectName: string, payload)
 	end
 end
 
-local function explode(owner: Player, position: Vector3, source: string, projectileId: string?)
+local function explode(owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?)
 	local callback = handlers.explode
 	if callback then
-		callback(owner, position, source, projectileId)
+		callback(owner, position, source, projectileId, bombSkinId)
 	end
 end
 
@@ -165,24 +168,6 @@ local function resolveGroundRollDirection(owner: Player, aimDirection: Vector3):
 	return getHorizontalDirection(aimDirection) or getOwnerFacingDirection(owner) or Vector3.zAxis
 end
 
-local function getBombAsset(): Instance?
-	local assets = ReplicatedStorage:FindFirstChild("Assets")
-	local bombs = assets and assets:FindFirstChild("Bombs")
-	if not bombs then
-		return nil
-	end
-
-	return bombs:FindFirstChild(BombConfig.RuntimeBombName) or bombs:FindFirstChildWhichIsA("Model") or bombs:FindFirstChildWhichIsA("BasePart")
-end
-
-local function getFirstBasePart(instance: Instance): BasePart?
-	if instance:IsA("BasePart") then
-		return instance
-	end
-
-	return instance:FindFirstChildWhichIsA("BasePart", true)
-end
-
 local function getProjectileFolder(): Folder
 	local existing = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
 	if existing and existing:IsA("Folder") then
@@ -198,51 +183,32 @@ local function getProjectileFolder(): Folder
 	return folder
 end
 
-local function preparePhysicalProjectile(projectileId: string, owner: Player, bombType: string): (Instance, BasePart)
-	local asset = getBombAsset()
-	local projectile: Instance
-	local rootPart: BasePart?
-
-	if asset then
-		projectile = asset:Clone()
-		rootPart = getFirstBasePart(projectile)
-	else
-		local part = Instance.new("Part")
-		part.Name = BombConfig.RuntimeBombName
-		part.Shape = Enum.PartType.Ball
-		part.Size = BombConfig.RuntimeBombSize
-		part.Material = Enum.Material.Neon
-		part.Color = Color3.fromRGB(45, 45, 45)
-		projectile = part
-		rootPart = part
-	end
-
+local function preparePhysicalProjectile(projectileId: string, owner: Player, bombType: string, skinId: string): (Instance, BasePart)
+	local projectile, rootPart = BombVisualUtil.CreateBombVisual(skinId, "BombProjectile_" .. projectileId, {
+		anchored = false,
+		canCollide = true,
+		canQuery = true,
+		massless = false,
+		effectState = {
+			vfx = true,
+			fuseSpark = true,
+			trail = true,
+		},
+		visualScale = BombConfig.ProjectileVisualScale,
+	})
 	projectile.Name = "BombProjectile_" .. projectileId
-	if projectile:IsA("Model") and rootPart then
+	if projectile:IsA("Model") then
 		projectile.PrimaryPart = rootPart
 	end
 
-	for _, descendant in ipairs(projectile:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			local isRootPart = descendant == rootPart
-			descendant.Anchored = false
-			descendant.CanCollide = isRootPart
-			descendant.CanQuery = isRootPart
-			descendant.CanTouch = false
-			descendant.Massless = not isRootPart
-		end
-	end
-	if projectile:IsA("BasePart") then
-		projectile.Anchored = false
-		projectile.CanCollide = true
-		projectile.CanQuery = true
-		projectile.CanTouch = false
-	end
-
-	assert(rootPart, "Bomb projectile requires a BasePart")
 	projectile:SetAttribute("ProjectileId", projectileId)
 	projectile:SetAttribute("OwnerUserId", owner.UserId)
 	projectile:SetAttribute("BombType", bombType)
+	projectile:SetAttribute("BombSkinId", skinId)
+	rootPart:SetAttribute("ProjectileId", projectileId)
+	rootPart:SetAttribute("OwnerUserId", owner.UserId)
+	rootPart:SetAttribute("BombType", bombType)
+	rootPart:SetAttribute("BombSkinId", skinId)
 	return projectile, rootPart
 end
 
@@ -301,7 +267,7 @@ local function spawnPhysicalProjectile(state: ProjectileState): Instance?
 		return state.physicalProjectile
 	end
 
-	local projectile, rootPart = preparePhysicalProjectile(state.id, state.owner, state.bombType)
+	local projectile, rootPart = preparePhysicalProjectile(state.id, state.owner, state.bombType, state.skinId)
 	projectile:SetAttribute("FuseStartedAt", state.fuseStartedAt)
 	projectile:SetAttribute("FuseEndsAt", state.explodeAt)
 
@@ -396,6 +362,7 @@ local function fireSnapshot(state: ProjectileState, currentTime: number, force: 
 		player = state.owner,
 		projectileId = state.id,
 		customProjectile = true,
+		bombSkinId = state.skinId,
 		position = state.position,
 		velocity = state.velocity,
 		acceleration = getAcceleration(state.physics, state.hasImpacted),
@@ -449,6 +416,7 @@ local function fireImpact(
 		player = state.owner,
 		projectileId = state.id,
 		customProjectile = true,
+		bombSkinId = state.skinId,
 		position = hitPosition,
 		projectilePosition = state.position,
 		impactNormal = hitNormal,
@@ -466,6 +434,7 @@ local function fireSettle(state: ProjectileState)
 		player = state.owner,
 		projectileId = state.id,
 		customProjectile = true,
+		bombSkinId = state.skinId,
 		position = state.position,
 		velocity = Vector3.zero,
 		settled = true,
@@ -591,6 +560,7 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 		player = state.owner,
 		projectileId = state.id,
 		customProjectile = true,
+		bombSkinId = state.skinId,
 		origin = state.position,
 		position = state.position,
 		initialVelocity = state.velocity,
@@ -644,7 +614,7 @@ local function explodeProjectile(state: ProjectileState)
 	state.destroyed = true
 	state.position = getPhysicalPosition(state)
 	destroyPhysicalProjectile(state)
-	explode(state.owner, state.position, "Projectile", state.id)
+	explode(state.owner, state.position, "Projectile", state.id, state.skinId)
 end
 
 local function stepProjectile(state: ProjectileState, fixedDt: number, currentTime: number)
@@ -758,6 +728,10 @@ function BombProjectileService:Launch(request): boolean
 	end
 
 	local bombType = if typeof(request.bombType) == "string" and request.bombType ~= "" then request.bombType else BombProjectileConfig.BombType.Normal
+	local skinId = BombSkinConfig.NormalizeSkinId(request.skinId)
+	if skinId == "" then
+		skinId = BombSkinConfig.DefaultSkinId
+	end
 	local physics, collision, explosionConfig, visuals, fuseConfig = resolveStateConfig(bombType, request.modifier)
 	local origin = readFiniteVector(request.origin, Vector3.zero)
 	local aimDirection = readFiniteVector(request.aimDirection, Vector3.zAxis)
@@ -769,6 +743,7 @@ function BombProjectileService:Launch(request): boolean
 		owner = owner,
 		projectileId = projectileId,
 		bombType = bombType,
+		bombSkinId = skinId,
 		origin = origin,
 		aimDirection = aimDirection,
 		remainingFuse = requestedFuse,
@@ -815,6 +790,7 @@ function BombProjectileService:Launch(request): boolean
 		id = projectileId,
 		owner = owner,
 		bombType = bombType,
+		skinId = skinId,
 		position = origin,
 		lastPosition = origin,
 		velocity = initialVelocity,
@@ -842,6 +818,7 @@ function BombProjectileService:Launch(request): boolean
 		projectileId = projectileId,
 		customProjectile = true,
 		bombType = bombType,
+		bombSkinId = skinId,
 		origin = origin,
 		position = origin,
 		initialVelocity = initialVelocity,
@@ -858,6 +835,7 @@ function BombProjectileService:Launch(request): boolean
 		bombId = projectileId,
 		ownerUserId = owner.UserId,
 		bombType = bombType,
+		bombSkinId = skinId,
 		position = origin,
 		velocity = initialVelocity,
 		fuseDuration = requestedFuse,
@@ -880,6 +858,7 @@ function BombProjectileService:DestroyProjectile(projectileId: string, reason: s
 		player = state.owner,
 		projectileId = state.id,
 		customProjectile = true,
+		bombSkinId = state.skinId,
 		reason = reason or "Destroyed",
 		position = state.position,
 	})
@@ -919,6 +898,7 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 			bombId = state.id,
 			ownerUserId = ownerUserId,
 			bombType = state.bombType,
+			bombSkinId = state.skinId,
 			cframe = CFrame.new(position),
 			assemblyLinearVelocity = velocity,
 			radius = radius,

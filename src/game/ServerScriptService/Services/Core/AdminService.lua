@@ -6,6 +6,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local BombService = require(ServerScriptService.Services.BombService)
+local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local DataService = require(ServerScriptService.Services.DataService)
 local ReplayService = require(ServerScriptService.Services.ReplayService)
 local RoundService = require(ServerScriptService.Services.RoundService)
@@ -320,6 +321,10 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 		return result(ok, message or "", getStatePayload())
 	elseif command == "player.clearBombState" then
 		local ok, message = BombService:AdminClearPlayerBombState(targetPlayer)
+		return result(ok, message or "", getStatePayload())
+	elseif command == "player.setBombSkin" then
+		local skinId = if typeof(payload) == "table" then payload.skinId else nil
+		local ok, message = BombSkinService:AdminGrantAndEquipSkin(targetPlayer, skinId)
 		return result(ok, message or "", getStatePayload())
 	elseif command == "data.wipe" then
 		local confirmation = if typeof(payload) == "table" then payload.confirmation else nil

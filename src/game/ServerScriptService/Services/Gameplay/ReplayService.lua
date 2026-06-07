@@ -4,6 +4,7 @@ local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local ReplayConstants = require(ReplicatedStorage.Shared.Replay.ReplayConstants)
 local ReplayUtil = require(ReplicatedStorage.Shared.Replay.ReplayUtil)
 local ReplayClipPolicy = require(ReplicatedStorage.Shared.Replay.ReplayClipPolicy)
@@ -337,6 +338,7 @@ local function getInferredAnimationState(player: Player, character: Model, human
 		linearVelocity = clampVectorMagnitude(linearVelocity, MAX_REPLAY_ANIMATION_SPEED) or Vector3.zero,
 		bombCooking = player:GetAttribute(BombConfig.Attributes.Cooking) == true,
 		bombCookStartedAt = getNumberAttribute(player, BombConfig.Attributes.CookStartedAt),
+		bombSkinId = BombSkinConfig.NormalizeSkinId(player:GetAttribute(BombSkinConfig.AttributeName)),
 	}
 end
 
@@ -356,6 +358,7 @@ local function mergeClientAnimationState(inferredState, clientState)
 	merged.linearVelocity = inferredState.linearVelocity
 	merged.bombCooking = inferredState.bombCooking
 	merged.bombCookStartedAt = inferredState.bombCookStartedAt
+	merged.bombSkinId = inferredState.bombSkinId
 	return merged
 end
 
@@ -481,6 +484,7 @@ local function sanitizeClientAnimationState(payload, currentTime: number)
 	copyNumber("moveMagnitude", nil, 0, 1)
 	copyNumber("jumpSerial", nil, 0, 1000000)
 	copyNumber("bombCookStartedAt", nil, 0, math.huge)
+	copyString("bombSkinId", nil, BombSkinConfig.MaxSkinIdLength)
 	copyString("lastJumpKind", nil, 32)
 
 	local linearVelocity = clampVectorMagnitude(payload.linearVelocity, MAX_REPLAY_ANIMATION_SPEED)
@@ -690,6 +694,7 @@ local function getPlayerSnapshot(player: Player, timestamp: number)
 		animationState = animationState,
 		camera = cameraState,
 		pose = poseState,
+		bombSkinId = animationState.bombSkinId,
 	}
 end
 
@@ -734,6 +739,10 @@ local function getBombSnapshot(instance: Instance)
 		or readNumberAttribute(rootPart, { "OwnerUserId", "OwnerUserID", "OwnerId", "OwnerID" })
 	local bombType = readStringAttribute(instance, { "BombType", "Type" })
 		or readStringAttribute(rootPart, { "BombType", "Type" })
+	local bombSkinId = BombSkinConfig.NormalizeSkinId(
+		readStringAttribute(instance, { "BombSkinId", "SkinId", "SkinID" })
+			or readStringAttribute(rootPart, { "BombSkinId", "SkinId", "SkinID" })
+	)
 	local sizeScale = readNumberAttribute(instance, { "SizeScale", "Scale" })
 		or readNumberAttribute(rootPart, { "SizeScale", "Scale" })
 	local fuseStartedAt = readNumberAttribute(instance, { "FuseStartedAt", "FuseStartTime" })
@@ -745,6 +754,7 @@ local function getBombSnapshot(instance: Instance)
 		bombId = bombId,
 		ownerUserId = ownerUserId,
 		bombType = bombType,
+		bombSkinId = if bombSkinId ~= "" then bombSkinId else BombSkinConfig.DefaultSkinId,
 		cframe = rootPart.CFrame,
 		assemblyLinearVelocity = rootPart.AssemblyLinearVelocity,
 		sizeScale = sizeScale,

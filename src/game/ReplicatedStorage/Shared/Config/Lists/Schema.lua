@@ -22,6 +22,16 @@ return {
 		},
 	},
 
+	OwnedBombSkins = {
+		key = "ownedBombSkins",
+		value = {},
+	},
+
+	EquippedBombSkin = {
+		key = "equippedBombSkin",
+		value = "Default",
+	},
+
 	Quests = {
 		key = "quests",
 		value = {

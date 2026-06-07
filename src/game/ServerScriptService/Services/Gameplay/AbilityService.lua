@@ -4,6 +4,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local RoundService = require(ServerScriptService.Services.RoundService)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 
@@ -22,12 +23,37 @@ type PlayerRuntime = {
 	messageWindows: { [string]: { startedAt: number, count: number } },
 }
 
+type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityHookResult = AbilityTypes.AbilityHookResult
+type AbilityLoadout = AbilityTypes.AbilityLoadout
+type AbilitySlotState = AbilityTypes.AbilitySlotState
+type AbilityState = AbilityTypes.AbilityState
+type ServerBehavior = AbilityTypes.ServerBehavior
+type ResolvedAbilityRequest = {
+	slot: string,
+	slotState: AbilitySlotState,
+	abilityId: string,
+	definition: AbilityDefinition,
+	messageType: string,
+	payload: any?,
+	clientSequence: number?,
+}
+type HookCandidate = {
+	player: Player,
+	slot: string,
+	slotState: AbilitySlotState,
+	abilityId: string,
+	definition: AbilityDefinition,
+	behavior: ServerBehavior,
+	priority: number,
+}
+
 local AbilityService = {}
 
 local requestRemote: RemoteEvent? = nil
 local effectRemote: RemoteEvent? = nil
 local runtimes: { [Player]: PlayerRuntime } = {}
-local behaviorModules: { [string]: any } = {}
+local behaviorModules: { [string]: ServerBehavior } = {}
 
 local function now(): number
 	return workspace:GetServerTimeNow()
@@ -58,7 +84,7 @@ local function getReplayService()
 	return nil
 end
 
-local function recordReplayEvent(eventType: string, payload)
+local function recordReplayEvent(eventType: string, payload: any?)
 	local service = getReplayService()
 	if not (service and type(service.RecordEvent) == "function") then
 		return
@@ -220,7 +246,7 @@ local function getReplica(player: Player): any?
 	return nil
 end
 
-local function getSlotState(player: Player, slot: string)
+local function getSlotState(player: Player, slot: string): AbilitySlotState?
 	local replica = getReplica(player)
 	if not replica then
 		return nil
@@ -230,7 +256,7 @@ local function getSlotState(player: Player, slot: string)
 	return if typeof(slots) == "table" then slots[slot] else nil
 end
 
-local function getBehavior(abilityId: string, definition)
+local function getBehavior(abilityId: string, definition: AbilityDefinition?): ServerBehavior?
 	local behaviorId = AbilityConfig.GetBehaviorId(abilityId)
 	if behaviorId == "" and definition and typeof(definition.id) == "string" then
 		behaviorId = definition.id
@@ -253,7 +279,7 @@ local function isPlainString(value: any, maxLength: number): boolean
 	return typeof(value) == "string" and value ~= "" and #value <= maxLength
 end
 
-local function checkWindow(window, maxPerSecond: number, currentTime: number): boolean
+local function checkWindow(window: { startedAt: number, count: number }, maxPerSecond: number, currentTime: number): boolean
 	if currentTime - window.startedAt >= 1 then
 		window.startedAt = currentTime
 		window.count = 0
@@ -263,7 +289,13 @@ local function checkWindow(window, maxPerSecond: number, currentTime: number): b
 	return window.count <= maxPerSecond
 end
 
-local function isRateLimited(player: Player, abilityId: string, messageType: string, definition, currentTime: number): boolean
+local function isRateLimited(
+	player: Player,
+	abilityId: string,
+	messageType: string,
+	definition: AbilityDefinition,
+	currentTime: number
+): boolean
 	local runtime = getRuntime(player)
 	local globalWindow = {
 		startedAt = runtime.requestWindowStartedAt,
@@ -288,7 +320,7 @@ local function isRateLimited(player: Player, abilityId: string, messageType: str
 	return not checkWindow(window, maxPerSecond, currentTime)
 end
 
-local function resolveRequest(player: Player, request)
+local function resolveRequest(player: Player, request: any): ResolvedAbilityRequest?
 	if typeof(request) ~= "table" then
 		return nil
 	end
@@ -333,20 +365,20 @@ local function resolveRequest(player: Player, request)
 	}
 end
 
-local function setSlotValues(player: Player, slot: string, values)
+local function setSlotValues(player: Player, slot: string, values: { [string]: any })
 	local replica = getReplica(player)
 	if replica then
 		replica:SetValues({ "slots", slot }, values)
 	end
 end
 
-local function fireAbilityEffect(effectName: string, payload)
+local function fireAbilityEffect(effectName: string, payload: any?)
 	if effectRemote then
 		effectRemote:FireAllClients(effectName, payload)
 	end
 end
 
-local function activate(player: Player, resolved, currentTime: number)
+local function activate(player: Player, resolved: ResolvedAbilityRequest, currentTime: number)
 	if not isAliveActivePlayer(player) then
 		return
 	end
@@ -439,7 +471,7 @@ local function activate(player: Player, resolved, currentTime: number)
 	end
 end
 
-local function handleClientMessage(player: Player, request)
+local function handleClientMessage(player: Player, request: any)
 	local currentTime = now()
 	local resolved = resolveRequest(player, request)
 	if not resolved then
@@ -487,7 +519,7 @@ local function cleanupPlayer(player: Player)
 	runtimes[player] = nil
 end
 
-local function collectHookCandidates(hookName: string, currentTime: number)
+local function collectHookCandidates(hookName: string, currentTime: number): { HookCandidate }
 	local candidates = {}
 
 	for player, runtime in pairs(runtimes) do
@@ -583,7 +615,7 @@ function AbilityService:OnPlayerRemoving(player: Player)
 	cleanupPlayer(player)
 end
 
-function AbilityService:RunHook(hookName: string, context)
+function AbilityService:RunHook(hookName: string, context: any?): AbilityHookResult
 	if typeof(hookName) ~= "string" or hookName == "" then
 		return AbilityResult.Continue()
 	end
@@ -615,7 +647,7 @@ function AbilityService:RunHook(hookName: string, context)
 	return AbilityResult.Continue()
 end
 
-function AbilityService:FireEffect(effectName: string, payload)
+function AbilityService:FireEffect(effectName: string, payload: any?)
 	fireAbilityEffect(effectName, payload)
 end
 
@@ -638,7 +670,7 @@ function AbilityService:SetEquippedAbility(player: Player, slot: string, ability
 	return true
 end
 
-function AbilityService:SetLoadout(player: Player, loadout): boolean
+function AbilityService:SetLoadout(player: Player, loadout: AbilityLoadout): boolean
 	local replica = createReplica(player, loadout)
 
 	for _, slot in ipairs(AbilityConfig.SlotOrder) do
@@ -649,7 +681,7 @@ function AbilityService:SetLoadout(player: Player, loadout): boolean
 	return true
 end
 
-function AbilityService:GetPlayerState(player: Player)
+function AbilityService:GetPlayerState(player: Player): AbilityState?
 	local replica = getReplica(player)
 	return replica and replica.Data or nil
 end

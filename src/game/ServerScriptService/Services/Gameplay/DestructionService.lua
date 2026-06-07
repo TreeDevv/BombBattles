@@ -150,12 +150,12 @@ function DestructionService:SetScoreRecorder(recorder)
 	scoreRecorder = if type(recorder) == "function" then recorder else nil
 end
 
-local function recordDestructionScore(sourceContext, targetsHit: number)
+local function recordDestructionScore(sourceContext, targetsHit: number, position: Vector3?)
 	if not scoreRecorder then
 		return
 	end
 
-	local ok, err = pcall(scoreRecorder, sourceContext, targetsHit)
+	local ok, err = pcall(scoreRecorder, sourceContext, targetsHit, position)
 	if not ok then
 		warn("[DestructionService] Failed to record destruction score:", err)
 	end
@@ -199,7 +199,7 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 		then debrisPayloads.targetsHit
 		else #debrisPayloads
 	if targetsHit > 0 then
-		recordDestructionScore(sourceContext, targetsHit)
+		recordDestructionScore(sourceContext, targetsHit, position)
 		recordMapDestruction(position, destructionRadius, sourceContext, debrisPayloads)
 	end
 

@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -21,6 +22,7 @@ AdminPanelController._mapLabel = nil :: TextLabel?
 AdminPanelController._speedInput = nil :: TextBox?
 AdminPanelController._jumpInput = nil :: TextBox?
 AdminPanelController._damageInput = nil :: TextBox?
+AdminPanelController._bombSkinInput = nil :: TextBox?
 AdminPanelController._wipeInput = nil :: TextBox?
 AdminPanelController._players = {}
 AdminPanelController._maps = {}
@@ -503,6 +505,12 @@ function AdminPanelController:_buildPanel()
 		{ text = "Refill Bombs", activated = function() self:_runCommand("player.refillBombs", {}) end },
 		{ text = "Clear Bomb", activated = function() self:_runCommand("player.clearBombState", {}) end },
 	})
+	self._bombSkinInput = self:_addInputRow(scroller, "Bomb skin", BombSkinConfig.DefaultSkinId)
+	self:_addButton(scroller, "Grant + Equip Bomb Skin", function()
+		self:_runCommand("player.setBombSkin", {
+			skinId = self._bombSkinInput and self._bombSkinInput.Text or BombSkinConfig.DefaultSkinId,
+		})
+	end)
 	self:_addButtonRow(scroller, {
 		{
 			text = "Set Speed",

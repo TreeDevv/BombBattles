@@ -2,13 +2,17 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 
-local ForcefieldDome = {}
+type AbilityDefinition = AbilityTypes.AbilityDefinition
+type ClientEffectContext = AbilityTypes.ClientEffectContext
+
+local ForcefieldDome = {} :: AbilityTypes.ClientBehavior
 
 local VISUAL_FOLDER_NAME = "ForcefieldDomeVisuals"
 local ACTIVE_VISUALS: { [Player]: Instance } = {}
 
-local function getByPath(root: Instance, path): Instance?
+local function getByPath(root: Instance, path: { string }): Instance?
 	local current: Instance? = root
 	for _, name in ipairs(path) do
 		if not current then
@@ -19,7 +23,7 @@ local function getByPath(root: Instance, path): Instance?
 	return current
 end
 
-local function getTemplate(definition): Instance?
+local function getTemplate(definition: AbilityDefinition?): Instance?
 	local path = definition and definition.assetPath
 	if typeof(path) ~= "table" then
 		return nil
@@ -131,7 +135,7 @@ local function tweenParts(records, tweenInfo: TweenInfo, transparency: number, s
 	end
 end
 
-local function playVisual(player: Player, definition, activeEndsAt: number)
+local function playVisual(player: Player, definition: AbilityDefinition, activeEndsAt: number)
 	destroyVisual(player)
 
 	local rootPart = getRootPart(player)
@@ -205,7 +209,7 @@ local function playVisual(player: Player, definition, activeEndsAt: number)
 	end)
 end
 
-function ForcefieldDome.OnEffect(context)
+function ForcefieldDome.OnEffect(context: ClientEffectContext)
 	if context.effectName ~= "Activated" then
 		return
 	end

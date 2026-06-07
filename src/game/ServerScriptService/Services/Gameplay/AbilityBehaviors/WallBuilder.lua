@@ -3,10 +3,20 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
-local WallBuilder = {}
+type AbilityActivationResult = AbilityTypes.AbilityActivationResult
+type AbilityDefinition = AbilityTypes.AbilityDefinition
+type ServerActivateContext = AbilityTypes.ServerActivateContext
+type FloorPlacement = {
+	position: Vector3,
+	facing: Vector3,
+	floor: Instance,
+}
+
+local WallBuilder = {} :: AbilityTypes.ServerBehavior
 
 local FOLDER_NAME = "AbilityObjects"
 local WALL_FOLDER_NAME = "WallBuilder"
@@ -19,7 +29,7 @@ local UNSAFE_TAGS = {
 	RoundConfig.Tags.LobbySpawn,
 }
 
-local function getByPath(root: Instance, path): Instance?
+local function getByPath(root: Instance, path: { string }): Instance?
 	local current: Instance? = root
 	for _, name in ipairs(path) do
 		if not current then
@@ -30,7 +40,7 @@ local function getByPath(root: Instance, path): Instance?
 	return current
 end
 
-local function getTemplate(definition): Instance?
+local function getTemplate(definition: AbilityDefinition?): Instance?
 	local path = definition and definition.assetPath
 	if typeof(path) ~= "table" then
 		return nil
@@ -140,7 +150,7 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloor(player: Player, rootPart: BasePart, definition)
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
 	local distance = definition.placementDistance or 8
 	local rayUp = definition.floorRaycastUp or 8
 	local rayDown = definition.floorRaycastDown or 32
@@ -221,7 +231,7 @@ local function isPlacementClear(boundsCFrame: CFrame, boundsSize: Vector3, floor
 	return true
 end
 
-local function validatePlacement(player: Player, definition, template: Instance)
+local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance): FloorPlacement?
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil
@@ -406,7 +416,7 @@ local function trackWall(player: Player, wall: Instance)
 	end)
 end
 
-function WallBuilder.OnActivate(context)
+function WallBuilder.OnActivate(context: ServerActivateContext): AbilityActivationResult
 	local definition = context.definition
 	local template = getTemplate(definition)
 	if not template then

@@ -119,14 +119,14 @@ function ReplayStateBuilder.Build(client, payload, deps)
 		if not deps.reserveReplayObjects(24) then
 			break
 		end
-		state.playerVisuals[key] = deps.makeCharacterVisual(scene, meta.userId, meta.teamName, meta.hasPose)
+		state.playerVisuals[key] = deps.makeCharacterVisual(scene, meta.userId, meta.teamName, meta.hasPose, meta.bombSkinId)
 	end
 
 	for key, meta in pairs(deps.collectBombMeta(frames)) do
 		if not deps.reserveReplayObjects(6) then
 			break
 		end
-		state.bombVisuals[key] = deps.makeBombVisual(scene, key, meta.bombType)
+		state.bombVisuals[key] = deps.makeBombVisual(scene, key, meta.bombType, meta.bombSkinId)
 	end
 
 	if not hasRecordedCamera then

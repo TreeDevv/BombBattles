@@ -18,7 +18,9 @@ local AIR_CONTROL_LAUNCH_SOURCE_ATTR = "AirControl_LaunchSource"
 local AIR_CONTROL_LAUNCH_SERIAL_ATTR = "AirControl_LaunchSerial"
 local AIR_CONTROL_LAUNCHED_AT_ATTR = "AirControl_LaunchedAt"
 local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 1
-local CONTROLLER_LOOKUP_TIMEOUT = 5
+local CONTROLLER_LOOKUP_TIMEOUT = 0.75
+local CONTROLLER_BIND_RETRY_TIMEOUT = 20
+local CONTROLLER_BIND_RETRY_INTERVAL = 0.25
 local NEVER = -math.huge
 local ADMIN_WALK_SPEED_ATTR = AdminConfig.WalkSpeedAttribute
 local KNOCKBACK_UNTIL_ATTR = "Bomb_KnockbackUntil"
@@ -50,6 +52,7 @@ MovementController._characterConnection = nil :: RBXScriptConnection?
 MovementController._jumpRequestConnection = nil :: RBXScriptConnection?
 MovementController._heartbeatConnection = nil :: RBXScriptConnection?
 MovementController._warnedCharacters = {} :: { [Model]: boolean }
+MovementController._bindSerial = 0
 MovementController._controls = nil :: Controls?
 MovementController._controllerManager = nil :: any
 MovementController._groundController = nil :: any
@@ -354,10 +357,6 @@ local function getMovementParts(character: Model)
 	)
 
 	if not controllerManager or not groundController then
-		if not MovementController._warnedCharacters[character] then
-			MovementController._warnedCharacters[character] = true
-			warn("[MovementController] Missing CCL ControllerManager or GroundController for character:", character:GetFullName())
-		end
 		return nil
 	end
 
@@ -2219,14 +2218,7 @@ function MovementController:_handleCrouchAction(_actionName: string, inputState:
 	return Enum.ContextActionResult.Pass
 end
 
-function MovementController:_bindCharacter(character: Model)
-	self:_unbindCharacter()
-
-	local parts = getMovementParts(character)
-	if not parts then
-		return
-	end
-
+function MovementController:_bindCharacterWithParts(character: Model, parts)
 	self._character = character
 	self._controllerManager = parts.controllerManager
 	self._groundController = parts.groundController
@@ -2284,6 +2276,55 @@ function MovementController:_bindCharacter(character: Model)
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function(dt)
 		self:_step(dt)
+	end)
+end
+
+function MovementController:_bindCharacter(character: Model)
+	self._bindSerial += 1
+	local bindSerial = self._bindSerial
+	self:_unbindCharacter()
+
+	character:SetAttribute("Movement_CCLReady", false)
+	character:SetAttribute("Movement_CCLMissing", false)
+	character:SetAttribute("Movement_CCLStatus", "Waiting")
+
+	task.spawn(function()
+		local deadline = os.clock() + CONTROLLER_BIND_RETRY_TIMEOUT
+		local parts = nil
+
+		repeat
+			if bindSerial ~= self._bindSerial or not character.Parent then
+				return
+			end
+
+			parts = getMovementParts(character)
+			if parts then
+				break
+			end
+
+			task.wait(CONTROLLER_BIND_RETRY_INTERVAL)
+		until os.clock() >= deadline
+
+		if bindSerial ~= self._bindSerial or not character.Parent then
+			return
+		end
+
+		if not parts then
+			character:SetAttribute("Movement_CCLReady", false)
+			character:SetAttribute("Movement_CCLMissing", true)
+			character:SetAttribute("Movement_CCLStatus", "Missing")
+
+			if not MovementController._warnedCharacters[character] then
+				MovementController._warnedCharacters[character] = true
+				warn("[MovementController] Missing engine-created CCL ControllerManager or GroundController for character:", character:GetFullName())
+			end
+			return
+		end
+
+		character:SetAttribute("Movement_CCLReady", true)
+		character:SetAttribute("Movement_CCLMissing", false)
+		character:SetAttribute("Movement_CCLStatus", "Ready")
+		self:_bindCharacterWithParts(character, parts)
 	end)
 end
 

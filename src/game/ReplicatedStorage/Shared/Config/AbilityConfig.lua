@@ -1,5 +1,63 @@
 local AbilityConfig = {}
 
+export type AbilitySlot = "Offensive" | "Defensive"
+export type AbilityId = string
+export type MessageType = string
+export type InventoryAction = string
+export type AbilityReplicatedState = { [string]: any }
+
+export type AbilityDefinition = {
+	id: AbilityId,
+	displayName: string,
+	description: string,
+	slot: AbilitySlot,
+	icon: string,
+	price: number,
+	catalogOrder: number?,
+	cooldownSeconds: number,
+	durationSeconds: number,
+	maxClientMessagesPerSecond: number,
+	hookPriority: number,
+	placeholder: boolean,
+	behaviorId: string?,
+	assetPath: { string }?,
+	replicatedState: AbilityReplicatedState,
+	[string]: any,
+}
+
+export type AbilitySlotState = {
+	abilityId: AbilityId,
+	cooldownEndsAt: number,
+	activeEndsAt: number,
+	charges: number,
+	state: AbilityReplicatedState,
+}
+
+export type AbilityState = {
+	slots: { [string]: AbilitySlotState },
+	lastActivatedAt: number,
+}
+
+export type AbilityLoadout = { [string]: AbilityId }
+
+export type AbilityRequest = {
+	slot: AbilitySlot,
+	abilityId: AbilityId?,
+	messageType: MessageType,
+	payload: any?,
+	clientSequence: number?,
+}
+
+export type AbilityEffectPayload = {
+	player: Player?,
+	slot: AbilitySlot?,
+	abilityId: AbilityId?,
+	startedAt: number?,
+	activeEndsAt: number?,
+	payload: any?,
+	[string]: any,
+}
+
 AbilityConfig.Scope = "AbilityState_1"
 AbilityConfig.RemotesFolderName = "Remotes"
 AbilityConfig.RequestRemoteName = "AbilityRequest"

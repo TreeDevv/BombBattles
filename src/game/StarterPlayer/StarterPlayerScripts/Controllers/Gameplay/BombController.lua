@@ -1436,19 +1436,6 @@ function BombController:_handleAction(_actionName: string, inputState: Enum.User
 	return Enum.ContextActionResult.Sink
 end
 
-function BombController:_getExplosionVfxTemplate(): Instance?
-	local assets = ReplicatedStorage:FindFirstChild("Assets")
-	local vfx = assets and assets:FindFirstChild("VFX")
-	local explosion = vfx and vfx:FindFirstChild("Explosion")
-	local template = explosion and explosion:FindFirstChild("Default")
-	if not template and not self._warnedMissingExplosionVfx then
-		self._warnedMissingExplosionVfx = true
-		warn("[BombController] Missing ReplicatedStorage.Assets.VFX.Explosion.Default")
-	end
-
-	return template
-end
-
 function BombController:_getEmitModule()
 	if self._emitModule then
 		return self._emitModule
@@ -1513,68 +1500,31 @@ function BombController:_getExplosionVfxFolder(): Folder
 	return folder
 end
 
-function BombController:_placeExplosionVfx(instance: Instance, position: Vector3)
-	local cframe = CFrame.new(position)
-	if instance:IsA("Model") then
-		instance:PivotTo(cframe)
-	elseif instance:IsA("BasePart") then
-		instance.CFrame = cframe
-	end
-
-	for _, descendant in ipairs(instance:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			descendant.Anchored = true
-			descendant.CanCollide = false
-			descendant.CanQuery = false
-			descendant.CanTouch = false
-		end
-	end
-	if instance:IsA("BasePart") then
-		instance.Anchored = true
-		instance.CanCollide = false
-		instance.CanQuery = false
-		instance.CanTouch = false
-	end
-end
-
-function BombController:_playExplosionEffect(position: Vector3)
-	local template = self:_getExplosionVfxTemplate()
+function BombController:_playExplosionEffect(position: Vector3, skinId: any)
 	local emitModule = self:_getEmitModule()
-	if not (template and emitModule and self:_ensureEmitModuleInitialized(emitModule)) then
-		return
+	if emitModule and not self:_ensureEmitModuleInitialized(emitModule) then
+		emitModule = nil
 	end
 
-	local clone = template:Clone()
-	clone.Name = "BombExplosionVFX"
-	self:_placeExplosionVfx(clone, position)
-	clone.Parent = self:_getExplosionVfxFolder()
-
-	local cleanedUp = false
-	local function cleanup()
-		if cleanedUp then
-			return
-		end
-		cleanedUp = true
-		if clone.Parent then
-			clone:Destroy()
+	local result = BombVisualUtil.PlayExplosionEffect({
+		parent = self:_getExplosionVfxFolder(),
+		position = position,
+		skinId = skinId,
+		emitModule = emitModule,
+		name = "BombExplosionVFX",
+		cleanupSeconds = EXPLOSION_VFX_CLEANUP_SECONDS,
+		warnPrefix = "[BombController]",
+	})
+	if not result.template and not self._warnedMissingExplosionVfx then
+		self._warnedMissingExplosionVfx = true
+		warn("[BombController] Missing bomb explosion VFX template and default fallback")
+	end
+	if emitModule and not result.emitted then
+		if not self._warnedMissingExplosionVfx then
+			self._warnedMissingExplosionVfx = true
+			warn("[BombController] Bomb explosion VFX was not emitted")
 		end
 	end
-
-	local ok, env = pcall(function()
-		return emitModule.emit(clone)
-	end)
-	if ok and typeof(env) == "table" and env.Finished and type(env.Finished.finally) == "function" then
-		env.Finished:finally(cleanup):catch(function(err)
-			warn("[BombController] Explosion VFX emit failed: " .. tostring(err))
-		end)
-	else
-		if not ok then
-			warn("[BombController] Explosion VFX emit failed: " .. tostring(env))
-		end
-		task.delay(EXPLOSION_VFX_CLEANUP_SECONDS, cleanup)
-	end
-
-	task.delay(EXPLOSION_VFX_CLEANUP_SECONDS, cleanup)
 end
 
 function BombController:_getProjectileVisualFolder(): Folder
@@ -2181,7 +2131,7 @@ function BombController:_bindEffects()
 				if typeof(payload.outerRadius) == "number" then payload.outerRadius else BombConfig.OuterRadius
 			)
 			self:_playHitFlashes(payload.hitUserIds)
-			self:_playExplosionEffect(payload.position)
+			self:_playExplosionEffect(payload.position, payload.bombSkinId)
 		elseif effectName == "TerrainDebris" and typeof(payload) == "table" then
 			self:_playTerrainDebris(payload.payloads)
 		elseif effectName == "Cook" and typeof(payload) == "table" then

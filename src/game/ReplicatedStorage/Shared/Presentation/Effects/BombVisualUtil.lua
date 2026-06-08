@@ -12,8 +12,21 @@ local ATTACHMENT_NAMES = table.freeze({
 	FuseSpark = "FuseSpark",
 	Trail = "Trail",
 })
+local DEFAULT_EXPLOSION_VFX_PATH = table.freeze({ "Assets", "VFX", "Explosion", "Default" })
+local DEFAULT_EXPLOSION_CLEANUP_SECONDS = 8
 
 local warnedMissingAttachments = {}
+
+local function getByPath(root: Instance, path): Instance?
+	local current: Instance? = root
+	for _, name in ipairs(path) do
+		if typeof(name) ~= "string" or name == "" or not current then
+			return nil
+		end
+		current = current:FindFirstChild(name)
+	end
+	return current
+end
 
 local function getAssetsBombsFolder(): Folder?
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
@@ -80,6 +93,10 @@ local function getSkinTemplate(skinId: any): Instance?
 	return nil
 end
 
+local function getDefaultExplosionTemplate(): Instance?
+	return getByPath(ReplicatedStorage, DEFAULT_EXPLOSION_VFX_PATH)
+end
+
 local function createFallbackVisual(): BasePart
 	local part = Instance.new("Part")
 	part.Name = BombConfig.RuntimeBombName
@@ -143,6 +160,45 @@ local function scaleVisual(visual: Instance, rootPart: BasePart, scale: number)
 	end
 end
 
+local function pivotVisualToRoot(visual: Instance, rootPart: BasePart)
+	if visual:IsA("Model") then
+		visual:PivotTo(rootPart.CFrame)
+		return
+	end
+
+	local firstPart = getFirstBasePart(visual)
+	if not firstPart then
+		return
+	end
+
+	local sourceCFrame = firstPart.CFrame
+	for _, part in ipairs(getBaseParts(visual)) do
+		local relativeCFrame = sourceCFrame:ToObjectSpace(part.CFrame)
+		part.CFrame = rootPart.CFrame * relativeCFrame
+	end
+end
+
+local function getSoundInstances(instance: Instance): { Sound }
+	local sounds = {}
+	if instance:IsA("Sound") then
+		table.insert(sounds, instance)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("Sound") then
+			table.insert(sounds, descendant)
+		end
+	end
+	return sounds
+end
+
+local function readSoundDuration(sound: Sound): number
+	local timeLength = tonumber(sound.TimeLength) or 0
+	if timeLength == timeLength and timeLength > 0 then
+		return timeLength / math.max(tonumber(sound.PlaybackSpeed) or 1, 0.01)
+	end
+	return 0
+end
+
 local function setEffectDescendantEnabled(descendant: Instance, enabled: boolean)
 	if descendant:IsA("ParticleEmitter")
 		or descendant:IsA("Beam")
@@ -175,6 +231,146 @@ local function warnMissingAttachment(skinId: string, attachmentName: string)
 	end
 	warnedMissingAttachments[key] = true
 	warn(("[BombVisualUtil] Bomb skin %s is missing %s attachment"):format(skinId, attachmentName))
+end
+
+function BombVisualUtil.GetExplosionTemplate(skinId: any): (Instance?, string, boolean)
+	local resolvedSkinId = BombSkinConfig.NormalizeSkinId(skinId)
+	if resolvedSkinId == "" then
+		resolvedSkinId = BombSkinConfig.DefaultSkinId
+	end
+
+	local skinFolder = getSkinFolder(resolvedSkinId)
+	local skinExplosion = skinFolder and skinFolder:FindFirstChild("Explosion")
+	if skinExplosion then
+		return skinExplosion, resolvedSkinId, false
+	end
+
+	return getDefaultExplosionTemplate(), resolvedSkinId, true
+end
+
+function BombVisualUtil.PlaceEffectInstance(instance: Instance, position: Vector3)
+	local cframe = CFrame.new(position)
+	if instance:IsA("Model") then
+		instance:PivotTo(cframe)
+	elseif instance:IsA("BasePart") then
+		instance.CFrame = cframe
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.CanTouch = false
+		end
+	end
+	if instance:IsA("BasePart") then
+		instance.Anchored = true
+		instance.CanCollide = false
+		instance.CanQuery = false
+		instance.CanTouch = false
+	end
+end
+
+function BombVisualUtil.PlaySoundDescendants(instance: Instance): (boolean, number)
+	local playedSound = false
+	local maxDuration = 0
+
+	for _, sound in ipairs(getSoundInstances(instance)) do
+		if sound.SoundId == "" then
+			continue
+		end
+		sound.Looped = false
+		sound.TimePosition = 0
+		sound:Stop()
+		sound:Play()
+		playedSound = true
+		maxDuration = math.max(maxDuration, readSoundDuration(sound))
+	end
+
+	return playedSound, maxDuration
+end
+
+function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
+	local result = {
+		emitted = false,
+		playedSound = false,
+		template = nil,
+		instance = nil,
+		resolvedSkinId = BombSkinConfig.DefaultSkinId,
+		usedFallback = false,
+	}
+	if typeof(options) ~= "table" then
+		return result
+	end
+
+	local parent = options.parent
+	local position = options.position
+	if not (typeof(position) == "Vector3" and typeof(parent) == "Instance") then
+		return result
+	end
+
+	local template, resolvedSkinId, usedFallback = BombVisualUtil.GetExplosionTemplate(options.skinId)
+	result.template = template
+	result.resolvedSkinId = resolvedSkinId
+	result.usedFallback = usedFallback
+	if not template then
+		return result
+	end
+
+	local clone = template:Clone()
+	clone.Name = if typeof(options.name) == "string" and options.name ~= "" then options.name else "BombExplosionVFX"
+	BombVisualUtil.PlaceEffectInstance(clone, position)
+	clone.Parent = parent
+	result.instance = clone
+
+	local playedSound, soundDuration = BombVisualUtil.PlaySoundDescendants(clone)
+	result.playedSound = playedSound
+
+	local cleanedUp = false
+	local function cleanup()
+		if cleanedUp then
+			return
+		end
+		cleanedUp = true
+		if clone.Parent then
+			clone:Destroy()
+		end
+	end
+
+	local cleanupSeconds = math.max(
+		tonumber(options.cleanupSeconds) or DEFAULT_EXPLOSION_CLEANUP_SECONDS,
+		if soundDuration > 0 then soundDuration + 0.25 else 0
+	)
+	local emitModule = options.emitModule
+	if emitModule and type(emitModule.emit) == "function" then
+		local ok, env = pcall(function()
+			return emitModule.emit(clone)
+		end)
+		if ok then
+			result.emitted = true
+		end
+
+		if ok and typeof(env) == "table" and env.Finished and type(env.Finished.finally) == "function" then
+			env.Finished:finally(function()
+				if playedSound and soundDuration <= 0 then
+					return
+				end
+				if soundDuration > 0 then
+					task.delay(soundDuration + 0.25, cleanup)
+				else
+					cleanup()
+				end
+			end):catch(function(err)
+				warn(("%s Explosion VFX emit failed: %s"):format(options.warnPrefix or "[BombVisualUtil]", tostring(err)))
+			end)
+		elseif not ok then
+			warn(("%s Explosion VFX emit failed: %s"):format(options.warnPrefix or "[BombVisualUtil]", tostring(env)))
+		end
+	end
+
+	task.delay(cleanupSeconds, cleanup)
+	return result
 end
 
 function BombVisualUtil.SetEffectState(instance: Instance?, state)
@@ -226,11 +422,7 @@ function BombVisualUtil.CreateBombVisual(skinId: any, name: string?, options): (
 		then math.max(options.visualScale, 0.05)
 		else 1
 
-	if visual:IsA("Model") then
-		visual:PivotTo(rootPart.CFrame)
-	elseif visual:IsA("BasePart") then
-		visual.CFrame = rootPart.CFrame
-	end
+	pivotVisualToRoot(visual, rootPart)
 	scaleVisual(visual, rootPart, visualScale)
 	visual.Parent = model
 	prepareVisualParts(visual, rootPart)

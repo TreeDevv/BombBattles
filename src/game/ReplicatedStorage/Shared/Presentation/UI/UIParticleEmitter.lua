@@ -1,4 +1,4 @@
-local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
 
 local DEFAULT_IMAGE = "rbxassetid://7083340510"
 local DEFAULT_LIFETIME = NumberRange.new(0.35, 0.45)
@@ -15,6 +15,11 @@ local DEFAULT_TRANSPARENCY = NumberSequence.new({
 
 local rng = Random.new()
 
+type ParticleRecord = {
+	Visual: ImageLabel,
+	Connection: RBXScriptConnection?,
+}
+
 type Config = {
 	Parent: GuiObject?,
 	Image: string?,
@@ -25,9 +30,17 @@ type Config = {
 	Lifetime: NumberRange?,
 	Rotation: NumberRange?,
 	RotationSpeed: NumberRange?,
+	Velocity: Vector2?,
+	Acceleration: Vector2?,
+	Speed: NumberRange?,
+	SpreadAngle: NumberRange?,
 	Rate: number?,
 	ZIndex: number?,
 	Enabled: boolean?,
+	LockedToParent: boolean?,
+	SizeDominantAxis: string?,
+	SizeIsInPixels: boolean?,
+	AffectedByParentTransparency: boolean?,
 }
 
 local UIParticleEmitter = {}
@@ -59,6 +72,18 @@ local function readNumberRange(value: any, fallback: NumberRange): NumberRange
 	end
 	if #numbers == 1 then
 		return NumberRange.new(numbers[1], numbers[1])
+	end
+	return fallback
+end
+
+local function readVector2(value: any, fallback: Vector2): Vector2
+	if typeof(value) == "Vector2" then
+		return value
+	end
+
+	local numbers = parseNumbers(value)
+	if #numbers >= 2 then
+		return Vector2.new(numbers[1], numbers[2])
 	end
 	return fallback
 end
@@ -133,19 +158,60 @@ local function sampleRange(value: NumberRange): number
 	return rng:NextNumber(value.Min, value.Max)
 end
 
-local function firstNumber(sequence: NumberSequence): number
+local function evalNumberSequence(sequence: NumberSequence, alpha: number): number
 	local keypoints = sequence.Keypoints
-	return if keypoints[1] then keypoints[1].Value else 0
+	if #keypoints == 0 then
+		return 0
+	end
+	if alpha <= 0 then
+		return keypoints[1].Value
+	end
+	if alpha >= 1 then
+		return keypoints[#keypoints].Value
+	end
+
+	for index = 2, #keypoints do
+		local previous = keypoints[index - 1]
+		local current = keypoints[index]
+		if alpha <= current.Time then
+			local span = math.max(current.Time - previous.Time, 0.001)
+			local localAlpha = math.clamp((alpha - previous.Time) / span, 0, 1)
+			return previous.Value + (current.Value - previous.Value) * localAlpha
+		end
+	end
+
+	return keypoints[#keypoints].Value
 end
 
-local function lastNumber(sequence: NumberSequence): number
+local function evalColorSequence(sequence: ColorSequence, alpha: number): Color3
 	local keypoints = sequence.Keypoints
-	return if keypoints[#keypoints] then keypoints[#keypoints].Value else firstNumber(sequence)
+	if #keypoints == 0 then
+		return Color3.new(1, 1, 1)
+	end
+	if alpha <= 0 or #keypoints == 1 then
+		return keypoints[1].Value
+	end
+	if alpha >= 1 then
+		return keypoints[#keypoints].Value
+	end
+
+	for index = 2, #keypoints do
+		local previous = keypoints[index - 1]
+		local current = keypoints[index]
+		if alpha <= current.Time then
+			local span = math.max(current.Time - previous.Time, 0.001)
+			return previous.Value:Lerp(current.Value, math.clamp((alpha - previous.Time) / span, 0, 1))
+		end
+	end
+
+	return keypoints[#keypoints].Value
 end
 
-local function firstColor(sequence: ColorSequence): Color3
-	local keypoints = sequence.Keypoints
-	return if keypoints[1] then keypoints[1].Value else Color3.new(1, 1, 1)
+local function rotateVector(vector: Vector2, degrees: number): Vector2
+	local radians = math.rad(degrees)
+	local cos = math.cos(radians)
+	local sin = math.sin(radians)
+	return Vector2.new(vector.X * cos - vector.Y * sin, vector.X * sin + vector.Y * cos)
 end
 
 local function readConfig(config: any): Config
@@ -173,16 +239,24 @@ local function readConfig(config: any): Config
 		Lifetime = readNumberRange(raw.Lifetime, DEFAULT_LIFETIME),
 		Rotation = readNumberRange(raw.Rotation, NumberRange.new(0, 0)),
 		RotationSpeed = readNumberRange(raw.RotationSpeed, NumberRange.new(0, 0)),
+		Velocity = readVector2(raw.Velocity, Vector2.zero),
+		Acceleration = readVector2(raw.Acceleration, Vector2.zero),
+		Speed = readNumberRange(raw.Speed, NumberRange.new(1, 1)),
+		SpreadAngle = readNumberRange(raw.SpreadAngle, NumberRange.new(0, 0)),
 		Rate = if typeof(raw.Rate) == "number" and raw.Rate > 0 then raw.Rate else 20,
 		ZIndex = if typeof(raw.ZIndex) == "number" then math.floor(raw.ZIndex) else 1,
 		Enabled = raw.Enabled == true,
+		LockedToParent = raw.LockedToParent == true,
+		SizeDominantAxis = if raw.SizeDominantAxis == "Y" then "Y" else "X",
+		SizeIsInPixels = raw.SizeIsInPixels == true,
+		AffectedByParentTransparency = raw.AffectedByParentTransparency == true,
 	}
 end
 
 function UIParticleEmitter.new(config: any)
 	local self = setmetatable({}, UIParticleEmitter)
 	self.Config = readConfig(config)
-	self.Particles = {}
+	self.Particles = {} :: { ParticleRecord }
 	self._enabled = false
 
 	if self.Config.Enabled then
@@ -192,14 +266,32 @@ function UIParticleEmitter.new(config: any)
 	return self
 end
 
-function UIParticleEmitter:SetColor(color: Color3)
+function UIParticleEmitter:SetColor(color: Color3 | ColorSequence)
 	if typeof(color) == "Color3" then
 		self.Config.Color = ColorSequence.new(color:Lerp(Color3.new(1, 1, 1), 0.25), color)
+	elseif typeof(color) == "ColorSequence" then
+		self.Config.Color = ColorSequence.new(color.Keypoints)
 	end
 end
 
 function UIParticleEmitter:SetParent(parent: GuiObject?)
 	self.Config.Parent = parent
+end
+
+function UIParticleEmitter:_removeParticle(record: ParticleRecord)
+	if record.Connection then
+		record.Connection:Disconnect()
+		record.Connection = nil
+	end
+
+	local index = table.find(self.Particles, record)
+	if index then
+		table.remove(self.Particles, index)
+	end
+
+	if record.Visual.Parent then
+		record.Visual:Destroy()
+	end
 end
 
 function UIParticleEmitter:Emit(count: number?)
@@ -211,13 +303,17 @@ function UIParticleEmitter:Emit(count: number?)
 	local amount = math.max(1, math.floor(count or 1))
 	for _ = 1, amount do
 		local lifetime = math.max(0.05, sampleRange(self.Config.Lifetime :: NumberRange))
-		local sizeMultiplier = math.max(0.05, sampleRange(self.Config.SizeMultiplier :: NumberRange))
-		local startSize = math.max(1, firstNumber(self.Config.Size :: NumberSequence) * sizeMultiplier)
-		local endSize = math.max(startSize, lastNumber(self.Config.Size :: NumberSequence) * sizeMultiplier)
-		local startTransparency = math.clamp(firstNumber(self.Config.Transparency :: NumberSequence), 0, 1)
-		local endTransparency = math.clamp(lastNumber(self.Config.Transparency :: NumberSequence), 0, 1)
-		local startRotation = sampleRange(self.Config.Rotation :: NumberRange)
-		local endRotation = startRotation + sampleRange(self.Config.RotationSpeed :: NumberRange) * lifetime
+		local sizeMultiplier = math.max(0.001, sampleRange(self.Config.SizeMultiplier :: NumberRange))
+		local rotation = sampleRange(self.Config.Rotation :: NumberRange)
+		local rotationSpeed = sampleRange(self.Config.RotationSpeed :: NumberRange)
+		local velocity = rotateVector(self.Config.Velocity or Vector2.zero, sampleRange(self.Config.SpreadAngle :: NumberRange))
+		local acceleration = self.Config.Acceleration or Vector2.zero
+		local speed = sampleRange(self.Config.Speed :: NumberRange)
+		local position = Vector2.zero
+		local basePosition = if self.Config.LockedToParent
+			then Vector2.new(rng:NextNumber(), rng:NextNumber())
+			else Vector2.new(0.5, 0.5)
+		local startedAt = os.clock()
 
 		local particle = Instance.new("ImageLabel")
 		particle.Name = "DestructionMeterParticle"
@@ -225,30 +321,47 @@ function UIParticleEmitter:Emit(count: number?)
 		particle.BackgroundTransparency = 1
 		particle.BorderSizePixel = 0
 		particle.Image = self.Config.Image or DEFAULT_IMAGE
-		particle.ImageColor3 = firstColor(self.Config.Color :: ColorSequence)
-		particle.ImageTransparency = startTransparency
-		particle.Position = UDim2.fromScale(0.5, 0.5)
-		particle.Rotation = startRotation
-		particle.Size = UDim2.fromOffset(startSize, startSize)
+		particle.Position = UDim2.fromScale(basePosition.X, basePosition.Y)
+		particle.Rotation = rotation
 		particle.ZIndex = (parent.ZIndex or 1) + (self.Config.ZIndex or 1)
 		particle.Parent = parent
-		table.insert(self.Particles, particle)
 
-		local tween = TweenService:Create(particle, TweenInfo.new(lifetime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
-			ImageTransparency = endTransparency,
-			Rotation = endRotation,
-			Size = UDim2.fromOffset(endSize, endSize),
-		})
-		tween:Play()
-		tween.Completed:Once(function()
-			local index = table.find(self.Particles, particle)
-			if index then
-				table.remove(self.Particles, index)
+		local record: ParticleRecord = {
+			Visual = particle,
+			Connection = nil,
+		}
+		table.insert(self.Particles, record)
+
+		local function updateParticle(deltaTime: number)
+			if not particle.Parent then
+				self:_removeParticle(record)
+				return
 			end
-			if particle.Parent then
-				particle:Destroy()
+
+			local alpha = math.clamp((os.clock() - startedAt) / lifetime, 0, 1)
+			if alpha >= 1 then
+				self:_removeParticle(record)
+				return
 			end
-		end)
+
+			velocity += acceleration * deltaTime
+			position += Vector2.new(velocity.X, -velocity.Y) * deltaTime * speed
+
+			local size = math.max(0, evalNumberSequence(self.Config.Size :: NumberSequence, alpha) * sizeMultiplier)
+			local transparency = math.clamp(evalNumberSequence(self.Config.Transparency :: NumberSequence, alpha), 0, 1)
+			if self.Config.AffectedByParentTransparency and parent:IsA("Frame") then
+				transparency = math.clamp(transparency + parent.BackgroundTransparency, 0, 1)
+			end
+
+			particle.ImageColor3 = evalColorSequence(self.Config.Color :: ColorSequence, alpha)
+			particle.ImageTransparency = transparency
+			particle.Position = UDim2.new(basePosition.X, position.X, basePosition.Y, position.Y)
+			particle.Rotation += rotationSpeed * deltaTime
+			particle.Size = UDim2.fromOffset(size, size)
+		end
+
+		updateParticle(0)
+		record.Connection = RunService.RenderStepped:Connect(updateParticle)
 	end
 end
 
@@ -271,10 +384,8 @@ function UIParticleEmitter:Disable()
 end
 
 function UIParticleEmitter:Clear()
-	for _, particle in ipairs(table.clone(self.Particles)) do
-		if particle.Parent then
-			particle:Destroy()
-		end
+	for _, record in ipairs(table.clone(self.Particles)) do
+		self:_removeParticle(record)
 	end
 	table.clear(self.Particles)
 end

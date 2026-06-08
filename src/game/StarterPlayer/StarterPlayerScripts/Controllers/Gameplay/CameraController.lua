@@ -13,6 +13,7 @@ local RENDER_STEP_NAME = "BombBattlesCameraController"
 local SHIFT_LOCK_ACTION_NAME = "BombBattlesShiftLockToggle"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 1
 local CAMERA_SPECTATING_ATTR = "Camera_Spectating"
+local MOUSE_UNLOCK_FRAME_COUNT = 3
 local HUD_FOV_BLUR_NAMES = {
 	HUDWindowBlur = true,
 	TemplateUIBlur = true,
@@ -26,6 +27,7 @@ type Controls = {
 local CameraController = {}
 
 CameraController._characterConnection = nil :: RBXScriptConnection?
+CameraController._characterRemovingConnection = nil :: RBXScriptConnection?
 CameraController._controls = nil :: Controls?
 CameraController._character = nil :: Model?
 CameraController._currentFOV = CameraConfig.BaseFOV
@@ -45,8 +47,7 @@ CameraController._landingSettleDuration = CameraConfig.LandingSettleDuration
 CameraController._currentLandingSettleYOffset = 0
 CameraController._throwFOVStartTime = NEVER
 CameraController._mouseLocked = false
-CameraController._previousMouseBehavior = nil :: Enum.MouseBehavior?
-CameraController._previousMouseIconEnabled = nil :: boolean?
+CameraController._mouseUnlockFrames = 0
 CameraController._shiftLocked = CameraConfig.DefaultShiftLocked == true
 CameraController._headLockedCamera = nil :: Camera?
 CameraController._headLockedSubject = nil :: BasePart?
@@ -125,6 +126,10 @@ local function isFirstPerson(camera: Camera): boolean
 	return distance <= CameraConfig.FirstPersonDistanceThreshold
 end
 
+local function getEffectiveShiftLocked(manualShiftLocked: boolean, firstPerson: boolean): boolean
+	return manualShiftLocked or firstPerson
+end
+
 local function isHudFOVActive(camera: Camera, extraFOVAllowance: number?): boolean
 	for _, child in Lighting:GetChildren() do
 		if child:IsA("BlurEffect") and HUD_FOV_BLUR_NAMES[child.Name] and child.Size > 0.1 then
@@ -140,23 +145,36 @@ local function isHudFOVActive(camera: Camera, extraFOVAllowance: number?): boole
 	return camera.FieldOfView > maxMovementFOV + 0.5
 end
 
-local function getUnlockedMouseBehavior(previousMouseBehavior: Enum.MouseBehavior?): Enum.MouseBehavior
-	if previousMouseBehavior ~= nil and previousMouseBehavior ~= Enum.MouseBehavior.LockCenter then
-		return previousMouseBehavior
+function CameraController:_applyMouseLock(locked: boolean)
+	if locked then
+		self._mouseLocked = true
+		self._mouseUnlockFrames = 0
+		UserInputService.MouseBehavior = CameraConfig.MouseBehavior
+		UserInputService.MouseIconEnabled = CameraConfig.LockMouseIconEnabled
+	else
+		self._mouseLocked = false
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+		UserInputService.MouseIconEnabled = true
 	end
-
-	return Enum.MouseBehavior.Default
 end
 
-function CameraController:_lockMouse()
-	if not self._mouseLocked then
-		self._previousMouseBehavior = UserInputService.MouseBehavior
-		self._previousMouseIconEnabled = UserInputService.MouseIconEnabled
-		self._mouseLocked = true
+function CameraController:_stepMouseUnlock()
+	if
+		self._mouseUnlockFrames > 0
+		or self._mouseLocked
+		or UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter
+	then
+		self:_applyMouseLock(false)
 	end
 
-	UserInputService.MouseBehavior = CameraConfig.MouseBehavior
-	UserInputService.MouseIconEnabled = CameraConfig.LockMouseIconEnabled
+	if self._mouseUnlockFrames > 0 then
+		self._mouseUnlockFrames -= 1
+	end
+end
+
+function CameraController:_forceMouseUnlock(frameCount: number?)
+	self._mouseUnlockFrames = math.max(self._mouseUnlockFrames, frameCount or MOUSE_UNLOCK_FRAME_COUNT)
+	self:_stepMouseUnlock()
 end
 
 function CameraController:_setShiftLocked(shiftLocked: boolean)
@@ -165,27 +183,19 @@ function CameraController:_setShiftLocked(shiftLocked: boolean)
 	end
 
 	self._shiftLocked = shiftLocked
-	if not shiftLocked then
-		self:_restoreMouse()
-	end
 
 	local character = self._character
 	if character then
-		character:SetAttribute("Camera_ShiftLocked", shiftLocked)
+		local camera = workspace.CurrentCamera
+		local firstPerson = if camera then isFirstPerson(camera) else character:GetAttribute("Camera_FirstPerson") == true
+		local effectiveShiftLocked = getEffectiveShiftLocked(shiftLocked, firstPerson)
+		character:SetAttribute("Camera_ShiftLocked", effectiveShiftLocked)
+		if not effectiveShiftLocked then
+			self:_forceMouseUnlock()
+		end
+	elseif not shiftLocked then
+		self:_forceMouseUnlock()
 	end
-end
-
-function CameraController:_restoreMouse()
-	if not self._mouseLocked and UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
-		return
-	end
-
-	UserInputService.MouseBehavior = getUnlockedMouseBehavior(self._previousMouseBehavior)
-	UserInputService.MouseIconEnabled = if self._previousMouseIconEnabled ~= nil then self._previousMouseIconEnabled else true
-
-	self._mouseLocked = false
-	self._previousMouseBehavior = nil
-	self._previousMouseIconEnabled = nil
 end
 
 function CameraController:_restoreCameraSubject(camera: Camera?, character: Model?)
@@ -210,8 +220,12 @@ function CameraController:_restoreCameraSubject(camera: Camera?, character: Mode
 	self._previousCameraSubject = nil
 end
 
-function CameraController:_updateHeadLockedCameraSubject(camera: Camera, character: Model)
-	if not CameraConfig.HeadLockedCameraSubjectEnabled or not self._shiftLocked or camera.CameraType == Enum.CameraType.Scriptable then
+function CameraController:_updateHeadLockedCameraSubject(camera: Camera, character: Model, effectiveShiftLocked: boolean)
+	if
+		not CameraConfig.HeadLockedCameraSubjectEnabled
+		or not effectiveShiftLocked
+		or camera.CameraType == Enum.CameraType.Scriptable
+	then
 		self:_restoreCameraSubject(camera, character)
 		return
 	end
@@ -235,8 +249,8 @@ function CameraController:_updateHeadLockedCameraSubject(camera: Camera, charact
 	end
 end
 
-function CameraController:_publishCameraState(character: Model, firstPerson: boolean)
-	character:SetAttribute("Camera_ShiftLocked", self._shiftLocked)
+function CameraController:_publishCameraState(character: Model, firstPerson: boolean, effectiveShiftLocked: boolean)
+	character:SetAttribute("Camera_ShiftLocked", effectiveShiftLocked)
 	character:SetAttribute("Camera_FirstPerson", firstPerson)
 end
 
@@ -467,6 +481,9 @@ function CameraController:_bindCharacter(character: Model)
 	self._character = character
 	character:SetAttribute("Camera_ShiftLocked", self._shiftLocked)
 	character:SetAttribute("Camera_FirstPerson", false)
+	if not self._shiftLocked then
+		self:_forceMouseUnlock()
+	end
 	self:_resetCameraState(workspace.CurrentCamera)
 end
 
@@ -477,6 +494,7 @@ function CameraController:_getCharacter(): Model?
 			self:_bindCharacter(character)
 		else
 			self._character = nil
+			self:_forceMouseUnlock()
 		end
 	end
 
@@ -489,7 +507,7 @@ function CameraController:_step(dt: number)
 		if camera then
 			self._currentFOV = camera.FieldOfView
 		end
-		self:_restoreMouse()
+		self:_forceMouseUnlock()
 		self._headLockedCamera = nil
 		self._headLockedSubject = nil
 		self._previousCameraSubject = nil
@@ -499,20 +517,21 @@ function CameraController:_step(dt: number)
 	local character = self:_getCharacter()
 	if not camera or not character then
 		self:_resetCameraState(camera)
-		self:_restoreMouse()
+		self:_forceMouseUnlock()
 		self:_restoreCameraSubject(camera, character)
 		return
 	end
 
 	local firstPerson = isFirstPerson(camera)
-	self:_publishCameraState(character, firstPerson)
+	local effectiveShiftLocked = getEffectiveShiftLocked(self._shiftLocked, firstPerson)
+	self:_publishCameraState(character, firstPerson, effectiveShiftLocked)
 
-	if self._shiftLocked then
-		self:_lockMouse()
+	if effectiveShiftLocked then
+		self:_applyMouseLock(true)
 	else
-		self:_restoreMouse()
+		self:_stepMouseUnlock()
 	end
-	self:_updateHeadLockedCameraSubject(camera, character)
+	self:_updateHeadLockedCameraSubject(camera, character, effectiveShiftLocked)
 
 	local controls = self._controls or getControls()
 	self._controls = controls
@@ -573,7 +592,7 @@ function CameraController:_step(dt: number)
 		camera.FieldOfView = self._currentFOV
 	end
 
-	local targetShoulderOffset = if self._shiftLocked and not firstPerson
+	local targetShoulderOffset = if effectiveShiftLocked and not firstPerson
 		then CameraConfig.ShoulderOffset
 		else Vector3.zero
 	self._currentShoulderOffset = smoothVector(
@@ -584,7 +603,7 @@ function CameraController:_step(dt: number)
 	)
 
 	local targetRoll = 0
-	if self._shiftLocked and controls and moveMagnitude > 0.05 then
+	if effectiveShiftLocked and controls and moveMagnitude > 0.05 then
 		local moveVector = controls:GetMoveVector()
 		targetRoll = math.rad(-CameraConfig.MaxStrafeRollDegrees * math.clamp(moveVector.X, -1, 1))
 	end
@@ -630,9 +649,16 @@ function CameraController:OnStart()
 	if self._characterConnection then
 		self._characterConnection:Disconnect()
 	end
+	if self._characterRemovingConnection then
+		self._characterRemovingConnection:Disconnect()
+	end
 
 	self._characterConnection = LocalPlayer.CharacterAdded:Connect(function(character)
 		self:_bindCharacter(character)
+	end)
+	self._characterRemovingConnection = LocalPlayer.CharacterRemoving:Connect(function()
+		self._character = nil
+		self:_forceMouseUnlock()
 	end)
 
 	if LocalPlayer.Character then

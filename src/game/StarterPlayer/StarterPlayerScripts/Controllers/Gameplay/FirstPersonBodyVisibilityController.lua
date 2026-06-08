@@ -12,7 +12,8 @@ local FirstPersonBodyVisibilityController = {}
 
 FirstPersonBodyVisibilityController._character = nil :: Model?
 FirstPersonBodyVisibilityController._characterConnection = nil :: RBXScriptConnection?
-FirstPersonBodyVisibilityController._visibleParts = {} :: { [BasePart]: boolean }
+FirstPersonBodyVisibilityController._modifiedParts = {} :: { [BasePart]: number }
+FirstPersonBodyVisibilityController._modifiedDecals = {} :: { [Decal]: number }
 
 local function hasAncestorOfClass(instance: Instance, className: string): boolean
 	local current = instance.Parent
@@ -26,37 +27,59 @@ local function hasAncestorOfClass(instance: Instance, className: string): boolea
 	return false
 end
 
-local function shouldShowPart(part: BasePart): boolean
+local function shouldHidePart(part: BasePart): boolean
 	if CameraConfig.FirstPersonHiddenPartNames[part.Name] then
-		return false
+		return true
 	end
 
 	if CameraConfig.FirstPersonHideAccessories and hasAncestorOfClass(part, "Accessory") then
-		return false
+		return true
 	end
 
-	return true
+	return false
 end
 
 local function getFirstPersonTransparency(part: BasePart): number
-	return if CameraConfig.FirstPersonTransparentPartNames[part.Name] then 1 else 0
+	return if shouldHidePart(part) or CameraConfig.FirstPersonTransparentPartNames[part.Name] then 1 else 0
+end
+
+local function shouldHideDecal(decal: Decal): boolean
+	local parent = decal.Parent
+	if parent and parent:IsA("BasePart") and CameraConfig.FirstPersonHiddenPartNames[parent.Name] then
+		return true
+	end
+
+	return CameraConfig.FirstPersonHideAccessories and hasAncestorOfClass(decal, "Accessory")
 end
 
 function FirstPersonBodyVisibilityController:_restoreVisibleParts()
-	for part in pairs(self._visibleParts) do
+	for part, transparency in pairs(self._modifiedParts) do
 		if part.Parent then
-			part.LocalTransparencyModifier = 0
+			part.LocalTransparencyModifier = transparency
 		end
 	end
+	table.clear(self._modifiedParts)
 
-	table.clear(self._visibleParts)
+	for decal, transparency in pairs(self._modifiedDecals) do
+		if decal.Parent then
+			decal.Transparency = transparency
+		end
+	end
+	table.clear(self._modifiedDecals)
 end
 
 function FirstPersonBodyVisibilityController:_setBodyVisible(character: Model)
 	for _, descendant in character:GetDescendants() do
-		if descendant:IsA("BasePart") and shouldShowPart(descendant) then
+		if descendant:IsA("BasePart") then
+			if self._modifiedParts[descendant] == nil then
+				self._modifiedParts[descendant] = descendant.LocalTransparencyModifier
+			end
 			descendant.LocalTransparencyModifier = getFirstPersonTransparency(descendant)
-			self._visibleParts[descendant] = true
+		elseif descendant:IsA("Decal") and shouldHideDecal(descendant) then
+			if self._modifiedDecals[descendant] == nil then
+				self._modifiedDecals[descendant] = descendant.Transparency
+			end
+			descendant.Transparency = 1
 		end
 	end
 end

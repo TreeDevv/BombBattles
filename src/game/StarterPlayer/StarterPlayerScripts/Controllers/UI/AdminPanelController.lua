@@ -511,6 +511,9 @@ function AdminPanelController:_buildPanel()
 			skinId = self._bombSkinInput and self._bombSkinInput.Text or BombSkinConfig.DefaultSkinId,
 		})
 	end)
+	self:_addButton(scroller, "Demo All Explosions", function()
+		self:_runCommand("bomb.demoAllExplosions", {})
+	end)
 	self:_addButtonRow(scroller, {
 		{
 			text = "Set Speed",

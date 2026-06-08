@@ -107,6 +107,9 @@ return table.freeze({
 			NormalJump = table.freeze({
 				MinAirTime = 0.1,
 			}),
+			DoubleJump = table.freeze({
+				MinAirTime = 0.1,
+			}),
 			SlideJump = table.freeze({
 				MinAirTime = 0.14,
 				ModifierDuration = 0.25,

@@ -1325,69 +1325,27 @@ local function createReplayTemplateEffect(
 	return clone
 end
 
-local function getExplosionTemplate(bombType: any): Instance?
-	local names = buildLookupNames(
-		bombType,
-		"Default",
-		"Explosion"
-	)
-
-	local replayAssets = getReplayAssetsFolder()
-	local replayVfx = replayAssets and replayAssets:FindFirstChild("VFX")
-	local replayExplosion = replayVfx and replayVfx:FindFirstChild("Explosion")
-	local replayTemplate = findReplayTemplateInFolder(replayExplosion, names)
-	if replayTemplate then
-		return replayTemplate
-	end
-
-	local assets = getAssetsFolder()
-	local vfx = assets and assets:FindFirstChild("VFX")
-	local explosion = vfx and vfx:FindFirstChild("Explosion")
-	return findReplayTemplateInFolder(explosion, names)
+local function getExplosionTemplate(bombSkinId: any): Instance?
+	local template = BombVisualUtil.GetExplosionTemplate(bombSkinId)
+	return template
 end
 
-local function playReplayExplosionVfx(parent: Instance, bombType: any, position: Vector3): boolean
-	local template = getExplosionTemplate(bombType)
+local function playReplayExplosionVfx(parent: Instance, bombSkinId: any, position: Vector3): (boolean, boolean)
 	local emitModule = getReplayEmitModule()
-	if not (template and emitModule and ensureReplayEmitModuleInitialized(emitModule)) then
-		return false
-	end
-	if type(emitModule.emit) ~= "function" then
-		return false
+	if emitModule and not ensureReplayEmitModuleInitialized(emitModule) then
+		emitModule = nil
 	end
 
-	local clone = template:Clone()
-	clone.Name = "ReplayBombExplosionVFX"
-	placeReplayEffectInstance(clone, position)
-	clone.Parent = parent
-
-	local cleanedUp = false
-	local function cleanup()
-		if cleanedUp then
-			return
-		end
-		cleanedUp = true
-		if clone.Parent then
-			clone:Destroy()
-		end
-	end
-
-	local ok, env = pcall(function()
-		return emitModule.emit(clone)
-	end)
-	if ok and typeof(env) == "table" and env.Finished and type(env.Finished.finally) == "function" then
-		env.Finished:finally(cleanup):catch(function(err)
-			warn("[ReplayClient] Explosion VFX emit failed: " .. tostring(err))
-		end)
-	else
-		if not ok then
-			warn("[ReplayClient] Explosion VFX emit failed: " .. tostring(env))
-		end
-		task.delay(EXPLOSION_VFX_CLEANUP_SECONDS, cleanup)
-	end
-
-	task.delay(EXPLOSION_VFX_CLEANUP_SECONDS, cleanup)
-	return true
+	local result = BombVisualUtil.PlayExplosionEffect({
+		parent = parent,
+		position = position,
+		skinId = bombSkinId,
+		emitModule = emitModule,
+		name = "ReplayBombExplosionVFX",
+		cleanupSeconds = EXPLOSION_VFX_CLEANUP_SECONDS,
+		warnPrefix = "[ReplayClient]",
+	})
+	return result.emitted == true, result.playedSound == true
 end
 
 local function resolveAbilityDefinition(abilityName: any)
@@ -1989,14 +1947,17 @@ local function PlayExplosionEvent(event)
 
 	local anchor = createEffectAnchor(parent, position, "ReplayExplosionAnchor")
 	local bombColor = getBombTypeColor(event.bombType)
-	if not playReplayExplosionVfx(parent, event.bombType, position) then
-		createReplayTemplateEffect(parent, getExplosionTemplate(event.bombType), position, "ReplayExplosionTemplate", 1.1, bombColor)
+	local emittedExplosionVfx, playedAssetSound = playReplayExplosionVfx(parent, event.bombSkinId, position)
+	if not emittedExplosionVfx then
+		createReplayTemplateEffect(parent, getExplosionTemplate(event.bombSkinId), position, "ReplayExplosionTemplate", 1.1, bombColor)
 	end
 	createRingMarker(parent, position, outerRadius, Color3.fromRGB(255, 150, 64), 0.72)
 	createPulseSphere(parent, position, terrainRadius, Color3.fromRGB(255, 96, 54), 0.55)
 	createPulseSphere(parent, position, innerRadius, Color3.fromRGB(255, 218, 83), 0.32)
 	playReplayEventText(parent, event, position)
-	playOptionalEventSound("Explosion", anchor)
+	if not playedAssetSound then
+		playOptionalEventSound("Explosion", anchor)
+	end
 	scheduleDestroy(anchor, 1.4)
 end
 

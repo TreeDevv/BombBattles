@@ -4,7 +4,10 @@ local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local BombService = require(ServerScriptService.Services.BombService)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local DataService = require(ServerScriptService.Services.DataService)
@@ -12,6 +15,11 @@ local ReplayService = require(ServerScriptService.Services.ReplayService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
 local REMOTES_FOLDER_NAME = "Remotes"
+local EXPLOSION_DEMO_FORWARD_DISTANCE = 45
+local EXPLOSION_DEMO_HEIGHT = 45
+local EXPLOSION_DEMO_SPACING = 8
+local EXPLOSION_DEMO_STAGGER_SECONDS = 0.18
+local EXPLOSION_DEMO_FUSE_SECONDS = 1.35
 
 type AdminResult = {
 	ok: boolean,
@@ -23,6 +31,7 @@ local AdminService = {}
 
 local requestRemote: RemoteFunction? = nil
 local lastRequestAtByUserId: { [number]: number } = {}
+local explosionDemoSerial = 0
 
 local function ensureRemotesFolder(): Folder
 	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
@@ -230,6 +239,74 @@ local function setMovementValue(player: Player, walkSpeed: number?, jumpPower: n
 	return true, "Updated movement for " .. player.Name
 end
 
+local function getCharacterRoot(player: Player): BasePart?
+	local character = player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	return if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+end
+
+local function getHorizontalUnit(direction: Vector3, fallback: Vector3): Vector3
+	local horizontal = Vector3.new(direction.X, 0, direction.Z)
+	if horizontal.Magnitude > 0.05 then
+		return horizontal.Unit
+	end
+	return fallback
+end
+
+local function runExplosionDemo(adminPlayer: Player): (boolean, string?)
+	if not BombProjectileService:IsEnabled() then
+		return false, "Bomb projectile service is disabled"
+	end
+
+	local rootPart = getCharacterRoot(adminPlayer)
+	if not rootPart then
+		return false, "Admin character root is not available"
+	end
+
+	local skinIds = BombSkinConfig.GetCatalogIds()
+	if #skinIds == 0 then
+		return false, "No bomb skins are configured"
+	end
+
+	local rootCFrame = rootPart.CFrame
+	local forward = getHorizontalUnit(rootCFrame.LookVector, Vector3.zAxis)
+	local right = getHorizontalUnit(rootCFrame.RightVector, Vector3.xAxis)
+	local center = rootPart.Position
+		+ forward * EXPLOSION_DEMO_FORWARD_DISTANCE
+		+ Vector3.yAxis * EXPLOSION_DEMO_HEIGHT
+	local firstOffset = -((#skinIds - 1) * EXPLOSION_DEMO_SPACING * 0.5)
+
+	explosionDemoSerial += 1
+	local serial = explosionDemoSerial
+	for index, skinId in ipairs(skinIds) do
+		local lineOffset = firstOffset + ((index - 1) * EXPLOSION_DEMO_SPACING)
+		local origin = center + right * lineOffset
+		task.delay((index - 1) * EXPLOSION_DEMO_STAGGER_SECONDS, function()
+			if not adminPlayer.Parent then
+				return
+			end
+
+			BombProjectileService:Launch({
+				owner = adminPlayer,
+				projectileId = ("AdminExplosionDemo_%d_%d_%02d_%s"):format(adminPlayer.UserId, serial, index, skinId),
+				bombType = BombProjectileConfig.BombType.Normal,
+				skinId = skinId,
+				origin = origin,
+				aimDirection = Vector3.new(0, -1, 0),
+				remainingFuse = EXPLOSION_DEMO_FUSE_SECONDS,
+				modifier = {
+					physics = {
+						launchSpeed = 0,
+						upwardVelocity = 0,
+					},
+				},
+			})
+		end)
+	end
+
+	return true, ("Started explosion demo for %d bomb skins"):format(#skinIds)
+end
+
 local function dispatchCommand(adminPlayer: Player, command: string, payload): AdminResult
 	if command == "round.forceStart" then
 		local mapId = if typeof(payload) == "table" then payload.mapId else nil
@@ -272,6 +349,9 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 		return result(ok, message or "", getStatePayload())
 	elseif string.sub(command, 1, 7) == "replay." then
 		return dispatchReplayDebugCommand(adminPlayer, command)
+	elseif command == "bomb.demoAllExplosions" then
+		local ok, message = runExplosionDemo(adminPlayer)
+		return result(ok, message or "", getStatePayload())
 	end
 
 	local targetPlayer = getTargetPlayer(payload)

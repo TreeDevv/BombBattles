@@ -33,6 +33,7 @@ local SLIDE_STEER_DOT_THRESHOLD = 0.15
 local SLIDE_OPPOSITE_DOT_THRESHOLD = -0.35
 local AIR_LAUNCH_SOURCE_DEFAULT = "Default"
 local AIR_LAUNCH_SOURCE_NORMAL_JUMP = "NormalJump"
+local AIR_LAUNCH_SOURCE_DOUBLE_JUMP = "DoubleJump"
 local AIR_LAUNCH_SOURCE_SLIDE_JUMP = "SlideJump"
 local AIR_LAUNCH_SOURCE_KNOCKBACK = "Knockback"
 local LANDING_MODE_NONE = "None"
@@ -128,6 +129,7 @@ MovementController._airControlLaunchSource = AIR_LAUNCH_SOURCE_DEFAULT
 MovementController._airControlLaunchSerial = 0
 MovementController._airControlLaunchedAt = NEVER
 MovementController._airControlForceAirborneUntil = NEVER
+MovementController._normalJumpAirSpeedCap = nil :: number?
 MovementController._lastAirControlLaunchTime = NEVER
 MovementController._groundedCandidateStartTime = NEVER
 MovementController._observedAirControlLaunchSerial = 0
@@ -536,6 +538,47 @@ function MovementController:_getAirControlLaunchProfile(source: string?)
 	return profiles[source] or defaultProfile
 end
 
+function MovementController:_clearNormalJumpAirSpeedCap()
+	self._normalJumpAirSpeedCap = nil
+end
+
+function MovementController:_getIntendedGroundMoveSpeed(): number
+	local speed = MovementConfig.WalkMoveSpeed
+	local humanoid = self._humanoid
+	local hasMoveInput = humanoid ~= nil and humanoid.MoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
+
+	if self._isCrouching then
+		speed = MovementConfig.CrouchMoveSpeed
+	elseif self._sprintHeld and hasMoveInput then
+		speed = MovementConfig.SprintMoveSpeed
+	end
+
+	local adminWalkSpeed = getAdminWalkSpeedOverride()
+	if adminWalkSpeed then
+		speed = adminWalkSpeed
+	end
+
+	return speed
+end
+
+function MovementController:_captureNormalJumpAirSpeedCap()
+	local horizontalSpeed = self:_getHorizontalSpeed()
+	self._normalJumpAirSpeedCap = math.max(horizontalSpeed, self:_getIntendedGroundMoveSpeed())
+end
+
+function MovementController:_getNormalJumpAirSpeedCap(): number?
+	if self._airControlLaunchSource ~= AIR_LAUNCH_SOURCE_NORMAL_JUMP then
+		return nil
+	end
+
+	local speedCap = self._normalJumpAirSpeedCap
+	if typeof(speedCap) ~= "number" or speedCap <= 0 then
+		return nil
+	end
+
+	return speedCap
+end
+
 function MovementController:_setAirControlLaunchState(
 	now: number,
 	source: string?,
@@ -543,6 +586,10 @@ function MovementController:_setAirControlLaunchState(
 	publishAttributes: boolean
 )
 	local launchSource = if typeof(source) == "string" and source ~= "" then source else AIR_LAUNCH_SOURCE_DEFAULT
+	if launchSource ~= AIR_LAUNCH_SOURCE_NORMAL_JUMP then
+		self:_clearNormalJumpAirSpeedCap()
+	end
+
 	local profile = self:_getAirControlLaunchProfile(launchSource)
 	local minAirTime = if typeof(minAirTimeOverride) == "number"
 		then math.max(minAirTimeOverride, 0)
@@ -677,6 +724,7 @@ function MovementController:_calculateAirControlForce()
 	local velocity = rootPart.AssemblyLinearVelocity
 	local horizontalVelocity = flattenVelocity(velocity)
 	local horizontalSpeed = horizontalVelocity.Magnitude
+	local normalJumpAirSpeedCap = self:_getNormalJumpAirSpeedCap()
 	local mass = math.max(rootPart.AssemblyMass, 0)
 	if mass <= 0 then
 		return {
@@ -758,13 +806,24 @@ function MovementController:_calculateAirControlForce()
 		end
 
 		steerForce = inputDirection * mass * steerAcceleration * inputMagnitude * speedBudgetScale * sourceSteerScale
+		if normalJumpAirSpeedCap
+			and horizontalSpeed >= normalJumpAirSpeedCap
+			and horizontalSpeed >= MovementConfig.MinMoveMagnitude
+		then
+			local speedDirection = horizontalVelocity.Unit
+			local speedIncreasingForce = steerForce:Dot(speedDirection)
+			if speedIncreasingForce > 0 then
+				steerForce -= speedDirection * speedIncreasingForce
+			end
+		end
 		force += steerForce
 	end
 
 	local brakeForce = Vector3.zero
-	if horizontalSpeed > airControl.SoftAirSpeedCap and horizontalSpeed >= MovementConfig.MinMoveMagnitude then
+	local softAirSpeedCap = normalJumpAirSpeedCap or airControl.SoftAirSpeedCap
+	if horizontalSpeed > softAirSpeedCap and horizontalSpeed >= MovementConfig.MinMoveMagnitude then
 		local brakeAlpha = math.clamp(
-			(horizontalSpeed - airControl.SoftAirSpeedCap) / math.max(airControl.SoftAirBrakeSpeedRange, 0.001),
+			(horizontalSpeed - softAirSpeedCap) / math.max(airControl.SoftAirBrakeSpeedRange, 0.001),
 			0,
 			1
 		)
@@ -1579,6 +1638,9 @@ function MovementController:_requestGroundJump(now: number): boolean
 	local launchSource = if slideJumpCarry and slideJumpCarry.burst
 		then AIR_LAUNCH_SOURCE_SLIDE_JUMP
 		else AIR_LAUNCH_SOURCE_NORMAL_JUMP
+	if launchSource == AIR_LAUNCH_SOURCE_NORMAL_JUMP then
+		self:_captureNormalJumpAirSpeedCap()
+	end
 	self:_recordAirControlLaunch(now, launchSource)
 	if slideJumpCarry and slideJumpCarry.burst then
 		self:_startSlideJumpBurst(now, slideJumpCarry.direction, slideJumpCarry.speed, slideJumpCarry.burstEndSpeed)
@@ -1616,7 +1678,7 @@ function MovementController:_tryAirJump(now: number): boolean
 	end
 	humanoid.Jump = true
 	humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-	self:_recordAirControlLaunch(now, AIR_LAUNCH_SOURCE_NORMAL_JUMP)
+	self:_recordAirControlLaunch(now, AIR_LAUNCH_SOURCE_DOUBLE_JUMP)
 
 	self._airJumpCount += 1
 	self._lastAirJumpTime = now
@@ -1766,6 +1828,7 @@ function MovementController:_updateLandingState(now: number, isGrounded: boolean
 	local horizontalVelocity = flattenVelocity(velocity)
 	local horizontalSpeed = horizontalVelocity.Magnitude
 	if isGrounded then
+		self:_clearNormalJumpAirSpeedCap()
 		if not self._wasGrounded then
 			self._landingImpactSpeed = self._maxAirDownwardSpeed
 			self._landingHorizontalSpeed = math.max(self._maxAirHorizontalSpeed, horizontalSpeed)
@@ -1831,7 +1894,7 @@ function MovementController:_applyAirUprightStabilization(isGrounded: boolean): 
 	end
 
 	local damping = math.clamp(tonumber(MovementConfig.AirUprightAngularVelocityDamping) or 0, 0, 1)
-	local dampedAngularVelocity = Vector3.new(angularVelocity.X * damping, angularVelocity.Y, angularVelocity.Z * damping)
+	local dampedAngularVelocity = angularVelocity * damping
 	if dampedAngularVelocity ~= angularVelocity then
 		rootPart.AssemblyAngularVelocity = dampedAngularVelocity
 	end
@@ -1947,6 +2010,7 @@ function MovementController:_unbindCharacter()
 	self._airControlLaunchSerial = 0
 	self._airControlLaunchedAt = NEVER
 	self._airControlForceAirborneUntil = NEVER
+	self._normalJumpAirSpeedCap = nil
 	self._maxAirDownwardSpeed = 0
 	self._maxAirHorizontalSpeed = 0
 	self._maxAirHorizontalVelocity = Vector3.zero
@@ -2234,6 +2298,7 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	self._smoothedFacingDirection = parts.controllerManager.FacingDirection
 	self._airJumpCount = 0
 	self._jumpSerial = 0
+	self._normalJumpAirSpeedCap = nil
 
 	character:SetAttribute("Movement_JumpSerial", self._jumpSerial)
 	character:SetAttribute("Movement_LastJumpKind", "")

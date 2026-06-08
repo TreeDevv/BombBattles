@@ -2,7 +2,7 @@ return table.freeze({
 	MaxBombs = 5,
 	RechargeSeconds = 2,
 	CookDelaySeconds = 1,
-	FuseSeconds = 5,
+	FuseSeconds = 4,
 
 	ThrowOffset = Vector3.new(0, 2.2, -2.6),
 	MinAimY = -0.55,

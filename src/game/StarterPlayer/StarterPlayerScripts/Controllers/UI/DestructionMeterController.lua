@@ -38,6 +38,7 @@ type Tier = {
 	threshold: number,
 	multiplier: number,
 	decaySeconds: number,
+	motion: { [string]: number }?,
 }
 
 type VisualState = {
@@ -45,6 +46,8 @@ type VisualState = {
 	meterLabelStrokeColor: Color3?,
 	meterLabelStrokeGradient: ColorSequence?,
 	fillGradient: ColorSequence?,
+	primaryColor: Color3?,
+	accentColor: Color3?,
 }
 
 type Fader = {
@@ -77,12 +80,9 @@ DestructionMeterController._baseVisualState = nil :: VisualState?
 DestructionMeterController._godlyVisualState = nil :: VisualState?
 DestructionMeterController._baseRotation = 0
 DestructionMeterController._baseSize = nil :: UDim2?
-DestructionMeterController._bigSize = nil :: UDim2?
-DestructionMeterController._tierUpSize = nil :: UDim2?
 DestructionMeterController._smallSize = nil :: UDim2?
 DestructionMeterController._labelSize = nil :: UDim2?
 DestructionMeterController._biggerLabelSize = nil :: UDim2?
-DestructionMeterController._tierUpLabelSize = nil :: UDim2?
 DestructionMeterController._tierIndex = 1
 DestructionMeterController._progress = 0
 DestructionMeterController._meterScoreTotal = 0
@@ -110,6 +110,21 @@ end
 local function getTier(index: number): Tier
 	local tiers = getTiers()
 	return tiers[math.clamp(index, 1, #tiers)]
+end
+
+local function getMotionNumber(index: number, key: string, fallback: number): number
+	local tier = getTier(index)
+	local tierMotion = tier.motion
+	if tierMotion and typeof(tierMotion[key]) == "number" then
+		return tierMotion[key]
+	end
+
+	local defaultMotion = DestructionMeterConfig.DefaultMotion
+	if typeof(defaultMotion) == "table" and typeof(defaultMotion[key]) == "number" then
+		return defaultMotion[key]
+	end
+
+	return fallback
 end
 
 local function isGodlyTier(index: number): boolean
@@ -172,6 +187,62 @@ local function getFirstColor(sequence: ColorSequence?): Color3?
 	return if #keypoints > 0 then keypoints[1].Value else nil
 end
 
+local function getLastColor(sequence: ColorSequence?): Color3?
+	if not sequence then
+		return nil
+	end
+
+	local keypoints = sequence.Keypoints
+	return if #keypoints > 0 then keypoints[#keypoints].Value else nil
+end
+
+local function makeSynthesizedGradient(baseColor: Color3): ColorSequence
+	return ColorSequence.new({
+		ColorSequenceKeypoint.new(0, baseColor:Lerp(Color3.new(0, 0, 0), 0.25)),
+		ColorSequenceKeypoint.new(0.5, baseColor:Lerp(Color3.new(1, 1, 1), 0.45)),
+		ColorSequenceKeypoint.new(1, baseColor),
+	})
+end
+
+local function isNearWhite(color: Color3): boolean
+	return color.R >= 0.9 and color.G >= 0.9 and color.B >= 0.9
+end
+
+local function getTierFillColor(sequence: ColorSequence?, fallback: Color3?): Color3?
+	if not sequence then
+		return fallback
+	end
+
+	local closestColor = nil
+	local closestDistance = math.huge
+	for _, keypoint in ipairs(sequence.Keypoints) do
+		if not isNearWhite(keypoint.Value) then
+			local distance = math.abs(keypoint.Time - 0.5)
+			if distance < closestDistance then
+				closestDistance = distance
+				closestColor = keypoint.Value
+			end
+		end
+	end
+
+	return closestColor or fallback
+end
+
+local function retintFillGradient(template: ColorSequence?, primaryColor: Color3?, accentColor: Color3?): ColorSequence?
+	if not (template and primaryColor) then
+		return template
+	end
+
+	local keypoints = {}
+	for _, keypoint in ipairs(template.Keypoints) do
+		local centerWeight = math.sin(math.clamp(keypoint.Time, 0, 1) * math.pi)
+		local color = Color3.new(1, 1, 1):Lerp(primaryColor, centerWeight)
+		table.insert(keypoints, ColorSequenceKeypoint.new(keypoint.Time, color))
+	end
+
+	return ColorSequence.new(keypoints)
+end
+
 local function captureVisualState(root: Instance?): VisualState
 	local labelGradient = getLabelGradient(root)
 	local labelStroke = getLabelStroke(root)
@@ -183,6 +254,8 @@ local function captureVisualState(root: Instance?): VisualState
 		meterLabelStrokeColor = if labelStroke then labelStroke.Color else nil,
 		meterLabelStrokeGradient = cloneColorSequence(if labelStrokeGradient then labelStrokeGradient.Color else nil),
 		fillGradient = cloneColorSequence(if fillGradient then fillGradient.Color else nil),
+		primaryColor = getFirstColor(if labelGradient then labelGradient.Color else nil),
+		accentColor = getLastColor(if labelGradient then labelGradient.Color else nil),
 	}
 end
 
@@ -196,7 +269,7 @@ local function getSequenceFromTierLabel(label: TextLabel?, fallback: ColorSequen
 		return cloneColorSequence(gradient.Color)
 	end
 
-	return ColorSequence.new(label.TextColor3)
+	return makeSynthesizedGradient(label.TextColor3)
 end
 
 local function getStrokeSequenceFromTierLabel(label: TextLabel?, fallback: ColorSequence?): ColorSequence?
@@ -210,7 +283,7 @@ local function getStrokeSequenceFromTierLabel(label: TextLabel?, fallback: Color
 		return cloneColorSequence(gradient.Color)
 	end
 	if stroke then
-		return ColorSequence.new(stroke.Color)
+		return makeSynthesizedGradient(stroke.Color)
 	end
 	return fallback
 end
@@ -453,44 +526,67 @@ function DestructionMeterController:_updateMultiplierLabel(state: VisualState?)
 end
 
 function DestructionMeterController:_buildTierVisualState(tierIndex: number): VisualState?
-	if tierIndex <= 1 then
-		return self._baseVisualState
-	end
-	if isGodlyTier(tierIndex) then
-		return self._godlyVisualState or self._baseVisualState
-	end
-
 	local tier = getTier(tierIndex)
 	local tierLabel = self._bonusLabels[tier.id]
-	local fallback = self._baseVisualState or {}
+	local fallback = if isGodlyTier(tierIndex) and self._godlyVisualState
+		then self._godlyVisualState
+		else self._baseVisualState or {}
 	local labelGradient = getSequenceFromTierLabel(tierLabel, fallback.meterLabelGradient)
+	local strokeGradient = getStrokeSequenceFromTierLabel(tierLabel, fallback.meterLabelStrokeGradient)
+	local primaryColor = getFirstColor(labelGradient) or fallback.primaryColor
+	local accentColor = getLastColor(labelGradient) or fallback.accentColor or primaryColor
+	local fillColor = getTierFillColor(labelGradient, primaryColor)
+	local fillTemplate = if tierIndex <= 1
+		then self._baseVisualState and self._baseVisualState.fillGradient or fallback.fillGradient
+		else self._godlyVisualState and self._godlyVisualState.fillGradient or fallback.fillGradient
 
 	return {
 		meterLabelGradient = labelGradient,
 		meterLabelStrokeColor = getStrokeColorFromTierLabel(tierLabel, fallback.meterLabelStrokeColor),
-		meterLabelStrokeGradient = getStrokeSequenceFromTierLabel(tierLabel, fallback.meterLabelStrokeGradient),
-		fillGradient = labelGradient or fallback.fillGradient,
+		meterLabelStrokeGradient = strokeGradient,
+		fillGradient = retintFillGradient(fillTemplate, fillColor, fillColor),
+		primaryColor = primaryColor,
+		accentColor = accentColor,
 	}
+end
+
+function DestructionMeterController:_applyParticleVisuals(state: VisualState?)
+	local colorSequence = if state then state.meterLabelGradient or state.fillGradient else nil
+	local color = if state then state.accentColor or state.primaryColor else nil
+	local godly = isGodlyTier(self._tierIndex)
+
+	for _, emitter in ipairs(self._emitters) do
+		if colorSequence and emitter.SetColor then
+			emitter:SetColor(colorSequence)
+		elseif color and emitter.SetColor then
+			emitter:SetColor(color)
+		end
+
+		if godly then
+			if emitter.Enable then
+				emitter:Enable()
+			end
+		elseif emitter.Disable then
+			emitter:Disable()
+		end
+	end
 end
 
 function DestructionMeterController:_applyTierVisuals()
 	local state = self:_buildTierVisualState(self._tierIndex)
 	self:_applyVisualState(state)
 	self:_updateMultiplierLabel(state)
+	self:_applyParticleVisuals(state)
 
-	local godly = isGodlyTier(self._tierIndex)
 	if self._cover then
-		self._cover.Visible = godly
-		if not godly then
-			self._cover.BackgroundTransparency = 1
-		end
+		self._cover.Visible = false
+		self._cover.BackgroundTransparency = 1
 	end
 
 	for index, configuredTier in ipairs(getTiers()) do
 		local bonusLabel = self._bonusLabels[configuredTier.id]
 		if bonusLabel then
-			local shouldShow = index < self._tierIndex or (godly and index == #getTiers())
-			bonusLabel.Visible = shouldShow
+			bonusLabel.Visible = index == self._tierIndex
 		end
 	end
 end
@@ -584,7 +680,7 @@ function DestructionMeterController:_hideImmediate()
 		end
 	end
 	if self._cover then
-		self._cover.Visible = isGodlyTier(self._tierIndex)
+		self._cover.Visible = false
 		self._cover.BackgroundTransparency = 1
 	end
 	self:_setFadeAlpha(1)
@@ -733,15 +829,21 @@ function DestructionMeterController:_playCoverFlash()
 
 	cover.Visible = true
 	cover.BackgroundTransparency = 0
-	cover.Size = UDim2.fromScale(math.max(self:_getProgressRatio(), 0.18), 1)
+	cover.Size = UDim2.fromScale(
+		math.max(self:_getProgressRatio(), getMotionNumber(self._tierIndex, "coverMinRatio", 0.16)),
+		1
+	)
 
-	local tween = self:_trackTween(TweenService:Create(cover, COVER_FADE_TWEEN, {
+	local tween = self:_trackTween(TweenService:Create(cover, TweenInfo.new(
+		getMotionNumber(self._tierIndex, "coverFlashSeconds", COVER_FADE_TWEEN.Time),
+		Enum.EasingStyle.Quad
+	), {
 		BackgroundTransparency = 1,
 		Size = UDim2.fromScale(0, 1),
 	}))
 	tween.Completed:Once(function()
 		if cover.Parent then
-			cover.Visible = isGodlyTier(self._tierIndex)
+			cover.Visible = false
 			cover.BackgroundTransparency = 1
 		end
 	end)
@@ -754,10 +856,15 @@ function DestructionMeterController:_playMeterPulse(tierUp: boolean)
 	end
 
 	local tweenInfo = if tierUp then TIER_UP_TWEEN else METER_BUMP_TWEEN
-	local size = if tierUp
-		then self._tierUpSize or scaleUDim2(meter.Size, 1.32)
-		else self._bigSize or scaleUDim2(meter.Size, 1.2)
-	local rotationJitter = if tierUp then math.random(-9, 9) else math.random(-5, 5)
+	local scale = if tierUp
+		then getMotionNumber(self._tierIndex, "tierUpScale", 1.32)
+		else getMotionNumber(self._tierIndex, "bumpScale", 1.2)
+	local size = scaleUDim2(self._baseSize or meter.Size, scale)
+	local rotation = if tierUp
+		then getMotionNumber(self._tierIndex, "tierUpRotation", 9)
+		else getMotionNumber(self._tierIndex, "rotation", 5)
+	local rotationRange = math.max(0, math.floor(rotation + 0.5))
+	local rotationJitter = math.random(-rotationRange, rotationRange)
 	self:_trackTween(TweenService:Create(meter, tweenInfo, {
 		Rotation = self._baseRotation + rotationJitter,
 		Size = size,
@@ -792,7 +899,7 @@ function DestructionMeterController:_playBonusPop(tierIndex: number)
 	end)
 end
 
-function DestructionMeterController:_runBumpSequence(tieredUp: boolean, previousTierIndex: number?)
+function DestructionMeterController:_runBumpSequence(tieredUp: boolean)
 	self:_cancelTweens()
 	self:_clearActiveClones()
 	self._visible = true
@@ -807,20 +914,17 @@ function DestructionMeterController:_runBumpSequence(tieredUp: boolean, previous
 	end
 
 	self:_playCoverFlash()
-	self:_playLabelFlash(if tieredUp then 1.8 else 1.5)
+	self:_playLabelFlash(if tieredUp
+		then getMotionNumber(self._tierIndex, "tierUpLabelFlashScale", 1.8)
+		else getMotionNumber(self._tierIndex, "labelFlashScale", 1.5)
+	)
 	self:_playMeterPulse(tieredUp)
 
 	if tieredUp then
-		local firstUnlockedIndex = previousTierIndex or math.max(1, self._tierIndex - 1)
-		for index = firstUnlockedIndex, math.max(firstUnlockedIndex, self._tierIndex - 1) do
-			self:_playBonusPop(index)
-		end
-		if isGodlyTier(self._tierIndex) then
-			self:_playBonusPop(self._tierIndex)
-		end
-		self:_emitParticles(DestructionMeterConfig.TierUpParticleBurst or 6)
+		self:_playBonusPop(self._tierIndex)
+		self:_emitParticles(getMotionNumber(self._tierIndex, "tierUpParticles", DestructionMeterConfig.TierUpParticleBurst or 6))
 	else
-		self:_emitParticles(2)
+		self:_emitParticles(getMotionNumber(self._tierIndex, "normalParticles", 2))
 	end
 end
 
@@ -830,7 +934,6 @@ function DestructionMeterController:_addScore(value: number)
 	end
 
 	local tier = getTier(self._tierIndex)
-	local previousTierIndex = self._tierIndex
 	local earnedScore = value * tier.multiplier
 	self._progress += earnedScore
 	self._meterScoreTotal += earnedScore
@@ -854,7 +957,7 @@ function DestructionMeterController:_addScore(value: number)
 	self:_applyTierVisuals()
 	self:_setFillRatio(self:_getProgressRatio(), true)
 	self:_tweenDisplayedScore(self._meterScoreTotal)
-	self:_runBumpSequence(tieredUp, previousTierIndex)
+	self:_runBumpSequence(tieredUp)
 end
 
 function DestructionMeterController:_getChipStartPosition(worldPosition: Vector3?): Vector2
@@ -904,7 +1007,10 @@ function DestructionMeterController:_spawnChip(
 
 		local start = self:_getChipStartPosition(worldPosition)
 		local target = getAbsoluteCenter(bar) - chipLayer.AbsolutePosition
-		local control = (start + target) * 0.5 + Vector2.new(math.random(-90, 90), -math.random(85, 145))
+		local arcSide = math.max(0, math.floor(getMotionNumber(self._tierIndex, "chipArcSide", 90) + 0.5))
+		local arcMin = math.max(1, math.floor(getMotionNumber(self._tierIndex, "chipArcMin", 85) + 0.5))
+		local arcMax = math.max(arcMin, math.floor(getMotionNumber(self._tierIndex, "chipArcMax", 145) + 0.5))
+		local control = (start + target) * 0.5 + Vector2.new(math.random(-arcSide, arcSide), -math.random(arcMin, arcMax))
 		local driver = Instance.new("NumberValue")
 		driver.Value = 0
 
@@ -1132,22 +1238,20 @@ function DestructionMeterController:_bindParticles()
 			table.insert(self._emitters, emitter)
 		end
 	end
+
+	self:_applyParticleVisuals(self:_buildTierVisualState(self._tierIndex))
 end
 
 function DestructionMeterController:_cacheSizing(meter: Frame, label: TextLabel?)
 	self._baseRotation = meter.Rotation
 	self._baseSize = meter.Size
-	self._bigSize = scaleUDim2(meter.Size, 1.2)
-	self._tierUpSize = scaleUDim2(meter.Size, 1.32)
 	self._smallSize = scaleUDim2(meter.Size, 0.9)
 	if label then
 		self._labelSize = label.Size
 		self._biggerLabelSize = scaleUDim2(label.Size, 1.5)
-		self._tierUpLabelSize = scaleUDim2(label.Size, 1.8)
 	else
 		self._labelSize = nil
 		self._biggerLabelSize = nil
-		self._tierUpLabelSize = nil
 	end
 end
 

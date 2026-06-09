@@ -26,6 +26,7 @@ export type AbilityActivationResult =
 	| {
 		state: AbilityReplicatedState?,
 		effect: AbilityActivationEffect?,
+		cooldownSeconds: number?,
 		[string]: any,
 	}
 
@@ -41,6 +42,7 @@ export type AbilityControllerLike = {
 export type AbilityServiceLike = {
 	RunHook: (any, string, any?) -> AbilityHookResult,
 	FireEffect: (any, string, any?) -> (),
+	SetSlotValues: (any, Player, AbilitySlot, { [string]: any }) -> boolean,
 	SetEquippedAbility: (any, Player, AbilitySlot, AbilityId) -> boolean,
 	SetLoadout: (any, Player, AbilityLoadout) -> boolean,
 	GetPlayerState: (any, Player) -> AbilityState?,
@@ -53,6 +55,8 @@ export type ClientActivateRequestedContext = {
 	abilityId: AbilityId,
 	definition: AbilityDefinition,
 	slotState: AbilitySlotState?,
+	inputState: Enum.UserInputState?,
+	inputObject: InputObject?,
 }
 
 export type ClientEffectContext = {

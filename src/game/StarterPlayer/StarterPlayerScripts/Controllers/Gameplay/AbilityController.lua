@@ -138,6 +138,14 @@ local function getCooldownRemaining(slotState: AbilitySlotState?): number
 	return math.max(slotState.cooldownEndsAt - getServerTime(), 0)
 end
 
+local function publishDebugState()
+	LocalPlayer:SetAttribute("AbilityController_Loaded", AbilityController.Loaded)
+	for _, slot in ipairs(AbilityConfig.SlotOrder) do
+		LocalPlayer:SetAttribute("AbilityController_" .. slot .. "AbilityId", getEquippedAbilityId(slot))
+		LocalPlayer:SetAttribute("AbilityController_" .. slot .. "CooldownRemaining", getCooldownRemaining(getSlotState(slot)))
+	end
+end
+
 local function setCooldownCover(button: ImageButton, visible: boolean, progress: number)
 	local cover = button:FindFirstChild("CooldownCover")
 	if cover and cover:IsA("GuiObject") then
@@ -161,8 +169,23 @@ end
 
 function AbilityController:_bindButton(slot: string, button: ImageButton)
 	self._buttons[slot] = button
-	table.insert(self._buttonConnections, button.Activated:Connect(function()
-		self:ActivateSlot(slot)
+	table.insert(self._buttonConnections, button.InputBegan:Connect(function(inputObject: InputObject)
+		if
+			inputObject.UserInputType == Enum.UserInputType.MouseButton1
+			or inputObject.UserInputType == Enum.UserInputType.Touch
+			or inputObject.KeyCode == Enum.KeyCode.ButtonA
+		then
+			self:ActivateSlot(slot, Enum.UserInputState.Begin, inputObject)
+		end
+	end))
+	table.insert(self._buttonConnections, button.InputEnded:Connect(function(inputObject: InputObject)
+		if
+			inputObject.UserInputType == Enum.UserInputType.MouseButton1
+			or inputObject.UserInputType == Enum.UserInputType.Touch
+			or inputObject.KeyCode == Enum.KeyCode.ButtonA
+		then
+			self:ActivateSlot(slot, Enum.UserInputState.End, inputObject)
+		end
 	end))
 end
 
@@ -223,14 +246,17 @@ function AbilityController:_bindReplica(replica: any)
 	self.Loaded = true
 	self.StateReceived:Fire(self._data)
 	self:_updateButtons()
+	publishDebugState()
 
 	replica:ListenToRaw(function(action, path, ...)
 		if action == "SetValue" then
 			self.StateUpdated:Fire(path, ...)
 			self:_updateButtons()
+			publishDebugState()
 		elseif action == "SetValues" then
 			self.StateUpdated:Fire(path, ...)
 			self:_updateButtons()
+			publishDebugState()
 		end
 	end)
 end
@@ -277,9 +303,13 @@ function AbilityController:_bindInputs()
 		ContextActionService:UnbindAction(input.actionName)
 		ContextActionService:BindAction(
 			input.actionName,
-			function(_actionName: string, inputState: Enum.UserInputState)
-				if inputState == Enum.UserInputState.Begin then
-					self:ActivateSlot(slot)
+			function(_actionName: string, inputState: Enum.UserInputState, inputObject: InputObject)
+				if
+					inputState == Enum.UserInputState.Begin
+					or inputState == Enum.UserInputState.End
+					or inputState == Enum.UserInputState.Cancel
+				then
+					self:ActivateSlot(slot, inputState, inputObject)
 				end
 				return Enum.ContextActionResult.Pass
 			end,
@@ -315,7 +345,7 @@ function AbilityController:SendMessage(slot: string, messageType: string, payloa
 	return true
 end
 
-function AbilityController:ActivateSlot(slot: string): boolean
+function AbilityController:ActivateSlot(slot: string, inputState: Enum.UserInputState?, inputObject: InputObject?): boolean
 	local slotState = getSlotState(slot)
 	local abilityId = getEquippedAbilityId(slot)
 	if abilityId == "" then
@@ -324,6 +354,11 @@ function AbilityController:ActivateSlot(slot: string): boolean
 
 	local definition = AbilityConfig.GetDefinition(abilityId)
 	local behavior = getClientBehavior(abilityId, definition)
+	if inputState and inputState ~= Enum.UserInputState.Begin then
+		if not (behavior and behavior.HandlesInputState == true) then
+			return false
+		end
+	end
 	if behavior and type(behavior.OnActivateRequested) == "function" then
 		local ok, handled = pcall(function()
 			return behavior.OnActivateRequested({
@@ -333,6 +368,8 @@ function AbilityController:ActivateSlot(slot: string): boolean
 				abilityId = abilityId,
 				definition = definition,
 				slotState = slotState,
+				inputState = inputState,
+				inputObject = inputObject,
 			})
 		end)
 		if not ok then
@@ -368,6 +405,7 @@ function AbilityController:GetSlotState(slot: string): AbilitySlotState?
 end
 
 function AbilityController:OnStart()
+	publishDebugState()
 	for _, connection in ipairs(self._hudConnections) do
 		connection:Disconnect()
 	end

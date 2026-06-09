@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
+local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local MovementConfig = require(ReplicatedStorage.Shared.Config.MovementConfig)
 
@@ -17,6 +18,7 @@ local AIR_CONTROL_FORCE_AIRBORNE_UNTIL_ATTR = "AirControl_ForceAirborneUntil"
 local AIR_CONTROL_LAUNCH_SOURCE_ATTR = "AirControl_LaunchSource"
 local AIR_CONTROL_LAUNCH_SERIAL_ATTR = "AirControl_LaunchSerial"
 local AIR_CONTROL_LAUNCHED_AT_ATTR = "AirControl_LaunchedAt"
+local GRAVITY_BOOTS_ACTIVE_UNTIL_ATTR = "GravityBoots_ActiveUntil"
 local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 1
 local CONTROLLER_LOOKUP_TIMEOUT = 0.75
 local CONTROLLER_BIND_RETRY_TIMEOUT = 20
@@ -50,6 +52,9 @@ local MovementController = {}
 
 MovementController._character = nil :: Model?
 MovementController._characterConnection = nil :: RBXScriptConnection?
+MovementController._fallingDownStateConnection = nil :: RBXScriptConnection?
+MovementController._fallingDownSyncedStateConnection = nil :: RBXScriptConnection?
+MovementController._fallingDownSyncedState = nil :: Instance?
 MovementController._jumpRequestConnection = nil :: RBXScriptConnection?
 MovementController._heartbeatConnection = nil :: RBXScriptConnection?
 MovementController._warnedCharacters = {} :: { [Model]: boolean }
@@ -134,6 +139,10 @@ MovementController._lastAirControlLaunchTime = NEVER
 MovementController._groundedCandidateStartTime = NEVER
 MovementController._observedAirControlLaunchSerial = 0
 MovementController._lastObservedKnockbackUntil = NEVER
+MovementController._gravityBootsActive = false
+MovementController._gravityBootsAirSteeringScale = 1
+MovementController._gravityBootsAirBrakeScale = 1
+MovementController._gravityBootsAirGravityScaleMultiplier = 1
 MovementController._maxAirDownwardSpeed = 0
 MovementController._maxAirHorizontalSpeed = 0
 MovementController._maxAirHorizontalVelocity = Vector3.zero
@@ -346,6 +355,53 @@ local function getGroundSensor(controllerManager: any): any
 	return nil
 end
 
+local function getFallingDownSyncedState(character: Model): Instance?
+	local abilityManagerActor = character:FindFirstChild("AbilityManagerActor")
+	local abilities = abilityManagerActor and abilityManagerActor:FindFirstChild("Abilities")
+	local fallingDown = abilities and abilities:FindFirstChild("FallingDown")
+	return fallingDown and fallingDown:FindFirstChild("SyncedState") or nil
+end
+
+local function disableFallingDownSyncedState(instance: Instance): string
+	if instance:IsA("ValueBase") then
+		local ok = pcall(function()
+			(instance :: any).Value = "Disabled"
+		end)
+		return if ok then "Disabled" else instance.ClassName
+	end
+
+	if instance:IsA("Configuration") then
+		local enabledOk = pcall(function()
+			instance:SetAttribute("Enabled", false)
+		end)
+		pcall(function()
+			instance:SetAttribute("Active", false)
+		end)
+		return if enabledOk then "Disabled" else instance.ClassName
+	end
+
+	return instance.ClassName
+end
+
+local function disableFallingDownRuntimeState(character: Model, humanoid: Humanoid?): (boolean, string, Instance?)
+	local humanoidDisabled = false
+	if humanoid then
+		humanoidDisabled = pcall(function()
+			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+		end)
+	end
+
+	local syncedState = getFallingDownSyncedState(character)
+	local syncedValue = "Missing"
+	if syncedState then
+		syncedValue = disableFallingDownSyncedState(syncedState)
+	end
+
+	character:SetAttribute("Movement_FallingDownStateDisabled", humanoidDisabled)
+	character:SetAttribute("Movement_FallingDownSyncedState", syncedValue)
+	return humanoidDisabled, syncedValue, syncedState
+end
+
 local function getMovementParts(character: Model)
 	local controllerManager = waitForDescendantOfClass(
 		character,
@@ -369,7 +425,7 @@ local function getMovementParts(character: Model)
 		humanoid.AutoRotate = false
 	end
 	if humanoid then
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+		disableFallingDownRuntimeState(character, humanoid)
 	end
 
 	controllerManager.BaseMoveSpeed = MovementConfig.WalkMoveSpeed
@@ -579,6 +635,34 @@ function MovementController:_getNormalJumpAirSpeedCap(): number?
 	return speedCap
 end
 
+function MovementController:_getGravityBootsAirControlBuff()
+	local character = self._character
+	if not character then
+		return nil
+	end
+
+	local definition = AbilityConfig.GetDefinition("GravityBoots")
+	if not definition then
+		return nil
+	end
+
+	local attribute = definition.activeUntilAttribute
+	if typeof(attribute) ~= "string" or attribute == "" then
+		attribute = GRAVITY_BOOTS_ACTIVE_UNTIL_ATTR
+	end
+
+	local activeUntil = character:GetAttribute(attribute)
+	if typeof(activeUntil) ~= "number" or activeUntil <= workspace:GetServerTimeNow() then
+		return nil
+	end
+
+	return {
+		steeringScale = math.max(tonumber(definition.airSteeringScale) or 1, 0),
+		brakeScale = math.max(tonumber(definition.airBrakeScale) or 1, 0),
+		gravityScaleMultiplier = math.clamp(tonumber(definition.airGravityScaleMultiplier) or 1, 0, 1),
+	}
+end
+
 function MovementController:_setAirControlLaunchState(
 	now: number,
 	source: string?,
@@ -706,6 +790,11 @@ function MovementController:_getAirControlMoveDirection(): (Vector3, number)
 end
 
 function MovementController:_calculateAirControlForce()
+	self._gravityBootsActive = false
+	self._gravityBootsAirSteeringScale = 1
+	self._gravityBootsAirBrakeScale = 1
+	self._gravityBootsAirGravityScaleMultiplier = 1
+
 	local rootPart = self._rootPart
 	if not (rootPart and rootPart.Parent) then
 		return {
@@ -739,6 +828,14 @@ function MovementController:_calculateAirControlForce()
 		}
 	end
 
+	local gravityBootsBuff = self:_getGravityBootsAirControlBuff()
+	if gravityBootsBuff then
+		self._gravityBootsActive = true
+		self._gravityBootsAirSteeringScale = gravityBootsBuff.steeringScale
+		self._gravityBootsAirBrakeScale = gravityBootsBuff.brakeScale
+		self._gravityBootsAirGravityScaleMultiplier = gravityBootsBuff.gravityScaleMultiplier
+	end
+
 	local verticalSpeed = velocity.Y
 	local state
 	if math.abs(verticalSpeed) <= airControl.ApexVelocityThreshold then
@@ -754,6 +851,9 @@ function MovementController:_calculateAirControlForce()
 		- math.clamp(math.abs(verticalSpeed) / math.max(airControl.GravityBlendVelocityRange, 0.001), 0, 1)
 	local gravityScale = baseGravityScale + ((airControl.ApexGravityScale - baseGravityScale) * smoothstep(apexAlpha))
 	gravityScale = math.clamp(gravityScale, 0, 1)
+	if gravityBootsBuff then
+		gravityScale = math.clamp(gravityScale * gravityBootsBuff.gravityScaleMultiplier, 0, 1)
+	end
 	local force = Vector3.yAxis * mass * workspace.Gravity * (1 - gravityScale)
 
 	local fallBrakeForce = Vector3.zero
@@ -804,6 +904,9 @@ function MovementController:_calculateAirControlForce()
 				sourceSteerScale = sourceSteerScale * (tonumber(profile.SideSteeringScale) or 1)
 			end
 		end
+		if gravityBootsBuff then
+			sourceSteerScale *= gravityBootsBuff.steeringScale
+		end
 
 		steerForce = inputDirection * mass * steerAcceleration * inputMagnitude * speedBudgetScale * sourceSteerScale
 		if normalJumpAirSpeedCap
@@ -829,6 +932,9 @@ function MovementController:_calculateAirControlForce()
 		)
 		local profile, modifierActive = self:_getActiveAirControlProfile(os.clock())
 		local sourceBrakeScale = if modifierActive then tonumber(profile.OverspeedBrakeScale) or 1 else 1
+		if gravityBootsBuff then
+			sourceBrakeScale *= gravityBootsBuff.brakeScale
+		end
 		brakeForce = -horizontalVelocity.Unit
 			* mass
 			* airControl.SoftAirBrakeAcceleration
@@ -892,6 +998,14 @@ function MovementController:_publishJump(kind: string)
 	character:SetAttribute("Movement_JumpSerial", self._jumpSerial)
 	character:SetAttribute("Movement_LastJumpKind", kind)
 	character:SetAttribute("Movement_AirJumpCount", self._airJumpCount)
+end
+
+function MovementController:RecordExternalAirControlLaunch(source: string?, minAirTimeOverride: number?)
+	self:_recordAirControlLaunch(os.clock(), source, minAirTimeOverride)
+end
+
+function MovementController:PublishExternalJump(kind: string)
+	self:_publishJump(kind)
 end
 
 function MovementController:_isGroundSlide(): boolean
@@ -1933,6 +2047,10 @@ function MovementController:_setDebugAttributes(data)
 	character:SetAttribute("Movement_AirControlHorizontalSpeed", data.airControlHorizontalSpeed)
 	character:SetAttribute("Movement_AirControlLaunchSource", data.airControlLaunchSource)
 	character:SetAttribute("Movement_AirControlForceAirborneUntil", data.airControlForceAirborneUntil)
+	character:SetAttribute("Movement_GravityBootsActive", data.gravityBootsActive)
+	character:SetAttribute("Movement_GravityBootsAirSteeringScale", data.gravityBootsAirSteeringScale)
+	character:SetAttribute("Movement_GravityBootsAirBrakeScale", data.gravityBootsAirBrakeScale)
+	character:SetAttribute("Movement_GravityBootsAirGravityScaleMultiplier", data.gravityBootsAirGravityScaleMultiplier)
 	character:SetAttribute("Movement_AirUprightStabilized", data.airUprightStabilized)
 	character:SetAttribute("Movement_AirUprightTiltDegrees", data.airUprightTiltDegrees)
 	character:SetAttribute("Movement_AirUprightAngularVelocity", data.airUprightAngularVelocity)
@@ -1950,8 +2068,63 @@ function MovementController:_setDebugAttributes(data)
 	character:SetAttribute("Movement_CCLAirMoveSuppressed", self._cclAirMoveSuppressed)
 end
 
+function MovementController:_bindFallingDownStateWatcher(character: Model)
+	if self._fallingDownStateConnection then
+		self._fallingDownStateConnection:Disconnect()
+		self._fallingDownStateConnection = nil
+	end
+	if self._fallingDownSyncedStateConnection then
+		self._fallingDownSyncedStateConnection:Disconnect()
+		self._fallingDownSyncedStateConnection = nil
+	end
+	self._fallingDownSyncedState = nil
+
+	local function refresh()
+		local _humanoidDisabled, _syncedValue, syncedState = disableFallingDownRuntimeState(character, self._humanoid)
+		if syncedState ~= self._fallingDownSyncedState then
+			if self._fallingDownSyncedStateConnection then
+				self._fallingDownSyncedStateConnection:Disconnect()
+				self._fallingDownSyncedStateConnection = nil
+			end
+			self._fallingDownSyncedState = syncedState
+			if syncedState and syncedState:IsA("Configuration") then
+				self._fallingDownSyncedStateConnection = syncedState:GetAttributeChangedSignal("Enabled"):Connect(function()
+					if self._character == character and character.Parent and syncedState:GetAttribute("Enabled") ~= false then
+						disableFallingDownRuntimeState(character, self._humanoid)
+					end
+				end)
+			end
+		end
+	end
+
+	refresh()
+	self._fallingDownStateConnection = character.DescendantAdded:Connect(function(descendant)
+		if
+			descendant.Name == "AbilityManagerActor"
+			or descendant.Name == "Abilities"
+			or descendant.Name == "FallingDown"
+			or descendant.Name == "SyncedState"
+		then
+			task.defer(function()
+				if self._character == character and character.Parent then
+					refresh()
+				end
+			end)
+		end
+	end)
+end
+
 function MovementController:_unbindCharacter()
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
+	if self._fallingDownStateConnection then
+		self._fallingDownStateConnection:Disconnect()
+		self._fallingDownStateConnection = nil
+	end
+	if self._fallingDownSyncedStateConnection then
+		self._fallingDownSyncedStateConnection:Disconnect()
+		self._fallingDownSyncedStateConnection = nil
+	end
+	self._fallingDownSyncedState = nil
 	self:_setCCLAirMoveSuppressed(false)
 	self:_setGroundControllerTuning(false)
 	self:_destroyAirControlForce()
@@ -2006,6 +2179,10 @@ function MovementController:_unbindCharacter()
 	self._groundedCandidateStartTime = NEVER
 	self._observedAirControlLaunchSerial = 0
 	self._lastObservedKnockbackUntil = NEVER
+	self._gravityBootsActive = false
+	self._gravityBootsAirSteeringScale = 1
+	self._gravityBootsAirBrakeScale = 1
+	self._gravityBootsAirGravityScaleMultiplier = 1
 	self._airControlLaunchSource = AIR_LAUNCH_SOURCE_DEFAULT
 	self._airControlLaunchSerial = 0
 	self._airControlLaunchedAt = NEVER
@@ -2238,6 +2415,10 @@ function MovementController:_step(dt: number)
 		airControlHorizontalSpeed = self._airControlHorizontalSpeed,
 		airControlLaunchSource = self._airControlLaunchSource,
 		airControlForceAirborneUntil = self._airControlForceAirborneUntil,
+		gravityBootsActive = self._gravityBootsActive,
+		gravityBootsAirSteeringScale = self._gravityBootsAirSteeringScale,
+		gravityBootsAirBrakeScale = self._gravityBootsAirBrakeScale,
+		gravityBootsAirGravityScaleMultiplier = self._gravityBootsAirGravityScaleMultiplier,
 		airUprightStabilized = airUprightStabilized,
 		airUprightTiltDegrees = airUprightTiltDegrees,
 		airUprightAngularVelocity = airUprightAngularVelocity,
@@ -2299,6 +2480,7 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	self._airJumpCount = 0
 	self._jumpSerial = 0
 	self._normalJumpAirSpeedCap = nil
+	self:_bindFallingDownStateWatcher(character)
 
 	character:SetAttribute("Movement_JumpSerial", self._jumpSerial)
 	character:SetAttribute("Movement_LastJumpKind", "")
@@ -2320,6 +2502,10 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	character:SetAttribute("Movement_AirControlHorizontalSpeed", 0)
 	character:SetAttribute("Movement_AirControlLaunchSource", AIR_LAUNCH_SOURCE_DEFAULT)
 	character:SetAttribute("Movement_AirControlForceAirborneUntil", 0)
+	character:SetAttribute("Movement_GravityBootsActive", false)
+	character:SetAttribute("Movement_GravityBootsAirSteeringScale", 1)
+	character:SetAttribute("Movement_GravityBootsAirBrakeScale", 1)
+	character:SetAttribute("Movement_GravityBootsAirGravityScaleMultiplier", 1)
 	character:SetAttribute("Movement_AirUprightStabilized", false)
 	character:SetAttribute("Movement_AirUprightTiltDegrees", 0)
 	character:SetAttribute("Movement_AirUprightAngularVelocity", Vector3.zero)

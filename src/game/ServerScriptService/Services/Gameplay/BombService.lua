@@ -393,16 +393,26 @@ local function createProjectileId(player: Player): string
 	return string.format("%d:%d", player.UserId, nextProjectileId)
 end
 
-local function getDamageForDistance(distance: number, directDamage: number, nearMax: number, nearMin: number, outerMax: number, outerMin: number): number
-	if distance <= BombConfig.InnerRadius then
+local function getDamageForDistance(
+	distance: number,
+	innerRadius: number,
+	nearRadius: number,
+	outerRadius: number,
+	directDamage: number,
+	nearMax: number,
+	nearMin: number,
+	outerMax: number,
+	outerMin: number
+): number
+	if distance <= innerRadius then
 		return directDamage
 	end
-	if distance <= BombConfig.NearRadius then
-		local alpha = (distance - BombConfig.InnerRadius) / math.max(BombConfig.NearRadius - BombConfig.InnerRadius, 0.001)
+	if distance <= nearRadius then
+		local alpha = (distance - innerRadius) / math.max(nearRadius - innerRadius, 0.001)
 		return nearMax + (nearMin - nearMax) * alpha
 	end
-	if distance <= BombConfig.OuterRadius then
-		local alpha = (distance - BombConfig.NearRadius) / math.max(BombConfig.OuterRadius - BombConfig.NearRadius, 0.001)
+	if distance <= outerRadius then
+		local alpha = (distance - nearRadius) / math.max(outerRadius - nearRadius, 0.001)
 		return outerMax + (outerMin - outerMax) * alpha
 	end
 
@@ -435,7 +445,15 @@ local function markCharacterKnockback(character: Model?)
 	end)
 end
 
-local function applyKnockback(character: Model?, rootPart: BasePart, origin: Vector3, distance: number, multiplier: number?)
+local function readPositiveNumber(value: any, fallback: number): number
+	return if typeof(value) == "number" and value == value and value > 0 then value else fallback
+end
+
+local function readNonNegativeNumber(value: any, fallback: number): number
+	return if typeof(value) == "number" and value == value and value >= 0 then value else fallback
+end
+
+local function applyKnockback(character: Model?, rootPart: BasePart, origin: Vector3, distance: number, multiplier: number?, explosionConfig)
 	local away = rootPart.Position - origin
 	if away.Magnitude < 0.05 then
 		away = Vector3.yAxis
@@ -443,15 +461,20 @@ local function applyKnockback(character: Model?, rootPart: BasePart, origin: Vec
 		away = away.Unit
 	end
 
-	local radiusAlpha = math.clamp(1 - (distance / BombConfig.OuterRadius), 0, 1)
-	local scale = math.max(radiusAlpha, BombConfig.KnockbackMinScale) * (multiplier or 1)
+	explosionConfig = explosionConfig or {}
+	local outerRadius = readPositiveNumber(explosionConfig.outerRadius, BombConfig.OuterRadius)
+	local knockbackMinScale = readNonNegativeNumber(explosionConfig.knockbackMinScale, BombConfig.KnockbackMinScale)
+	local knockbackHorizontal = readNonNegativeNumber(explosionConfig.knockbackHorizontal, BombConfig.KnockbackHorizontal)
+	local knockbackVertical = readNonNegativeNumber(explosionConfig.knockbackVertical, BombConfig.KnockbackVertical)
+	local radiusAlpha = math.clamp(1 - (distance / outerRadius), 0, 1)
+	local scale = math.max(radiusAlpha, knockbackMinScale) * (multiplier or 1)
 	if scale <= 0 then
 		return
 	end
 	local velocityDelta = Vector3.new(
-		away.X * BombConfig.KnockbackHorizontal * scale,
-		BombConfig.KnockbackVertical * scale,
-		away.Z * BombConfig.KnockbackHorizontal * scale
+		away.X * knockbackHorizontal * scale,
+		knockbackVertical * scale,
+		away.Z * knockbackHorizontal * scale
 	)
 
 	rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
@@ -466,14 +489,66 @@ local function shouldSuppressBombEffect(result): boolean
 	return result.kind == RESULT_KIND.Block or result.kind == RESULT_KIND.Absorb
 end
 
-local function applyOwnerKnockback(owner: Player, origin: Vector3)
+local function resolveExplosionConfig(override)
+	override = if typeof(override) == "table" then override else {}
+	return {
+		innerRadius = readPositiveNumber(override.innerRadius, BombConfig.InnerRadius),
+		nearRadius = readPositiveNumber(override.nearRadius, BombConfig.NearRadius),
+		outerRadius = readPositiveNumber(override.outerRadius, BombConfig.OuterRadius),
+		terrainRadius = readPositiveNumber(override.terrainRadius, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius),
+		playerDirectDamage = readNonNegativeNumber(override.playerDirectDamage, BombConfig.PlayerDirectDamage),
+		playerNearDamageMax = readNonNegativeNumber(override.playerNearDamageMax, BombConfig.PlayerNearDamageMax),
+		playerNearDamageMin = readNonNegativeNumber(override.playerNearDamageMin, BombConfig.PlayerNearDamageMin),
+		playerOuterDamageMax = readNonNegativeNumber(override.playerOuterDamageMax, BombConfig.PlayerOuterDamageMax),
+		playerOuterDamageMin = readNonNegativeNumber(override.playerOuterDamageMin, BombConfig.PlayerOuterDamageMin),
+		anchorDirectDamage = readNonNegativeNumber(override.anchorDirectDamage, BombConfig.AnchorDirectDamage),
+		anchorNearDamageMax = readNonNegativeNumber(override.anchorNearDamageMax, BombConfig.AnchorNearDamageMax),
+		anchorNearDamageMin = readNonNegativeNumber(override.anchorNearDamageMin, BombConfig.AnchorNearDamageMin),
+		anchorOuterDamageMax = readNonNegativeNumber(override.anchorOuterDamageMax, BombConfig.AnchorOuterDamageMax),
+		anchorOuterDamageMin = readNonNegativeNumber(override.anchorOuterDamageMin, BombConfig.AnchorOuterDamageMin),
+		knockbackHorizontal = readNonNegativeNumber(override.knockbackHorizontal, BombConfig.KnockbackHorizontal),
+		knockbackVertical = readNonNegativeNumber(override.knockbackVertical, BombConfig.KnockbackVertical),
+		knockbackMinScale = readNonNegativeNumber(override.knockbackMinScale, BombConfig.KnockbackMinScale),
+		explosionVisualScale = readPositiveNumber(override.explosionVisualScale, 1),
+		chargeScale = readPositiveNumber(override.chargeScale, 1),
+	}
+end
+
+local function applyExplosionResult(config, result)
+	if typeof(result) ~= "table" then
+		return config
+	end
+
+	config.innerRadius = readPositiveNumber(result.innerRadius, config.innerRadius)
+	config.nearRadius = readPositiveNumber(result.nearRadius, config.nearRadius)
+	config.outerRadius = readPositiveNumber(result.outerRadius, config.outerRadius)
+	config.terrainRadius = readPositiveNumber(result.terrainRadius, config.terrainRadius)
+	config.playerDirectDamage = readNonNegativeNumber(result.playerDirectDamage, config.playerDirectDamage)
+	config.playerNearDamageMax = readNonNegativeNumber(result.playerNearDamageMax, config.playerNearDamageMax)
+	config.playerNearDamageMin = readNonNegativeNumber(result.playerNearDamageMin, config.playerNearDamageMin)
+	config.playerOuterDamageMax = readNonNegativeNumber(result.playerOuterDamageMax, config.playerOuterDamageMax)
+	config.playerOuterDamageMin = readNonNegativeNumber(result.playerOuterDamageMin, config.playerOuterDamageMin)
+	config.anchorDirectDamage = readNonNegativeNumber(result.anchorDirectDamage, config.anchorDirectDamage)
+	config.anchorNearDamageMax = readNonNegativeNumber(result.anchorNearDamageMax, config.anchorNearDamageMax)
+	config.anchorNearDamageMin = readNonNegativeNumber(result.anchorNearDamageMin, config.anchorNearDamageMin)
+	config.anchorOuterDamageMax = readNonNegativeNumber(result.anchorOuterDamageMax, config.anchorOuterDamageMax)
+	config.anchorOuterDamageMin = readNonNegativeNumber(result.anchorOuterDamageMin, config.anchorOuterDamageMin)
+	config.knockbackHorizontal = readNonNegativeNumber(result.knockbackHorizontal, config.knockbackHorizontal)
+	config.knockbackVertical = readNonNegativeNumber(result.knockbackVertical, config.knockbackVertical)
+	config.knockbackMinScale = readNonNegativeNumber(result.knockbackMinScale, config.knockbackMinScale)
+	config.explosionVisualScale = readPositiveNumber(result.explosionVisualScale, config.explosionVisualScale)
+	config.chargeScale = readPositiveNumber(result.chargeScale, config.chargeScale)
+	return config
+end
+
+local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConfig)
 	local character, humanoid, rootPart = getCharacterParts(owner)
 	if not (humanoid and rootPart and humanoid.Health > 0) then
 		return
 	end
 
 	local distance = (rootPart.Position - origin).Magnitude
-	if distance <= BombConfig.OuterRadius then
+	if distance <= explosionConfig.outerRadius then
 		local hookResult = AbilityService:RunHook("OnBeforeOwnerBombKnockback", {
 			owner = owner,
 			character = character,
@@ -481,6 +556,7 @@ local function applyOwnerKnockback(owner: Player, origin: Vector3)
 			rootPart = rootPart,
 			origin = origin,
 			distance = distance,
+			explosion = explosionConfig,
 		})
 		if shouldSuppressBombEffect(hookResult) or hookResult.skipKnockback == true then
 			return
@@ -489,14 +565,15 @@ local function applyOwnerKnockback(owner: Player, origin: Vector3)
 		local knockbackMultiplier = if typeof(hookResult.knockbackMultiplier) == "number"
 			then math.max(hookResult.knockbackMultiplier, 0)
 			else 1
-		applyKnockback(character, rootPart, origin, distance, knockbackMultiplier)
+		applyKnockback(character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)
 	end
 end
 
-local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: string?)
+local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
 	local ownerTeam = getTeamName(owner)
 	local hitUserIds = {}
 	local killedUserIds = {}
+	local baseDamageMultiplier = readNonNegativeNumber(damageMultiplier, 1)
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		if player == owner then
@@ -514,12 +591,16 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: stri
 		local distance = (rootPart.Position - origin).Magnitude
 		local damage = getDamageForDistance(
 			distance,
-			BombConfig.PlayerDirectDamage,
-			BombConfig.PlayerNearDamageMax,
-			BombConfig.PlayerNearDamageMin,
-			BombConfig.PlayerOuterDamageMax,
-			BombConfig.PlayerOuterDamageMin
+			explosionConfig.innerRadius,
+			explosionConfig.nearRadius,
+			explosionConfig.outerRadius,
+			explosionConfig.playerDirectDamage,
+			explosionConfig.playerNearDamageMax,
+			explosionConfig.playerNearDamageMin,
+			explosionConfig.playerOuterDamageMax,
+			explosionConfig.playerOuterDamageMin
 		)
+		damage = damage * baseDamageMultiplier
 		if damage <= 0 then
 			continue
 		end
@@ -533,6 +614,7 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: stri
 			origin = origin,
 			distance = distance,
 			damage = damage,
+			explosion = explosionConfig,
 		})
 		if shouldSuppressBombEffect(hookResult) then
 			continue
@@ -576,16 +658,17 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: stri
 			})
 		end
 		if hookResult.skipKnockback ~= true then
-			applyKnockback(character, rootPart, origin, distance, knockbackMultiplier)
+			applyKnockback(character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)
 		end
 	end
 
 	return hitUserIds, killedUserIds
 end
 
-local function damageEnemyAnchors(owner: Player, origin: Vector3, sourceId: string?)
+local function damageEnemyAnchors(owner: Player, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
 	local ownerTeam = getTeamName(owner)
 	local bypassTeamProtection = isStudioBombTeamProtectionBypassEnabled()
+	local baseDamageMultiplier = readNonNegativeNumber(damageMultiplier, 1)
 
 	for _, core in ipairs(CollectionService:GetTagged(RoundConfig.Tags.TeamCore)) do
 		local trackedCore = RoundService:GetTrackedCore(core)
@@ -603,12 +686,16 @@ local function damageEnemyAnchors(owner: Player, origin: Vector3, sourceId: stri
 
 		local damage = getDamageForDistance(
 			(position - origin).Magnitude,
-			BombConfig.AnchorDirectDamage,
-			BombConfig.AnchorNearDamageMax,
-			BombConfig.AnchorNearDamageMin,
-			BombConfig.AnchorOuterDamageMax,
-			BombConfig.AnchorOuterDamageMin
+			explosionConfig.innerRadius,
+			explosionConfig.nearRadius,
+			explosionConfig.outerRadius,
+			explosionConfig.anchorDirectDamage,
+			explosionConfig.anchorNearDamageMax,
+			explosionConfig.anchorNearDamageMin,
+			explosionConfig.anchorOuterDamageMax,
+			explosionConfig.anchorOuterDamageMin
 		)
+		damage = damage * baseDamageMultiplier
 		if damage > 0 then
 			local hookResult = AbilityService:RunHook("OnBeforeCoreBombDamage", {
 				owner = owner,
@@ -616,6 +703,7 @@ local function damageEnemyAnchors(owner: Player, origin: Vector3, sourceId: stri
 				origin = origin,
 				position = position,
 				damage = damage,
+				explosion = explosionConfig,
 			})
 			if shouldSuppressBombEffect(hookResult) then
 				continue
@@ -669,7 +757,7 @@ local function getProjectilePhysicsVelocity(state: ProjectileState): Vector3
 	return Vector3.zero
 end
 
-local function explode(owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?)
+local function explode(owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionOverride)
 	if projectileId then
 		local state = activeProjectiles[projectileId]
 		if state then
@@ -684,14 +772,24 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		bombSkinId = BombSkinConfig.DefaultSkinId
 	end
 
+	local explosionConfig = resolveExplosionConfig(explosionOverride)
+	local playerDamageMultiplier = 1
+	local coreDamageMultiplier = 1
+
 	local explosionResult = AbilityService:RunHook("OnBeforeExplosion", {
 		owner = owner,
 		position = position,
 		source = source,
 		projectileId = projectileId,
-		innerRadius = BombConfig.InnerRadius,
-		outerRadius = BombConfig.OuterRadius,
-		terrainRadius = BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius,
+		innerRadius = explosionConfig.innerRadius,
+		nearRadius = explosionConfig.nearRadius,
+		outerRadius = explosionConfig.outerRadius,
+		terrainRadius = explosionConfig.terrainRadius,
+		playerDamageMultiplier = playerDamageMultiplier,
+		coreDamageMultiplier = coreDamageMultiplier,
+		explosionVisualScale = explosionConfig.explosionVisualScale,
+		chargeScale = explosionConfig.chargeScale,
+		explosion = explosionConfig,
 	})
 	if shouldSuppressBombEffect(explosionResult) then
 		return
@@ -702,6 +800,15 @@ local function explode(owner: Player, position: Vector3, source: string, project
 	if typeof(explosionResult.owner) == "Instance" and explosionResult.owner:IsA("Player") then
 		owner = explosionResult.owner
 	end
+	if typeof(explosionResult.explosion) == "table" then
+		for key, value in pairs(explosionResult.explosion) do
+			explosionConfig[key] = value
+		end
+		explosionConfig = applyExplosionResult(explosionConfig, explosionResult.explosion)
+	end
+	explosionConfig = applyExplosionResult(explosionConfig, explosionResult)
+	playerDamageMultiplier = readNonNegativeNumber(explosionResult.playerDamageMultiplier, playerDamageMultiplier)
+	coreDamageMultiplier = readNonNegativeNumber(explosionResult.coreDamageMultiplier, coreDamageMultiplier)
 	local impactTimestamp = workspace:GetServerTimeNow()
 
 	local hitUserIds = {}
@@ -709,16 +816,16 @@ local function explode(owner: Player, position: Vector3, source: string, project
 	local debrisPayloads = {}
 
 	if isActivePlayer(owner) then
-		debrisPayloads = DestructionService:DestroySphere(position, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius, {
+		debrisPayloads = DestructionService:DestroySphere(position, explosionConfig.terrainRadius, {
 			sourceType = "Bomb",
 			sourceId = projectileId,
 			bombId = projectileId,
 			ownerUserId = owner.UserId,
 			timestamp = impactTimestamp,
 		})
-		applyOwnerKnockback(owner, position)
-		hitUserIds, killedUserIds = damageEnemyPlayers(owner, position, projectileId)
-		damageEnemyAnchors(owner, position, projectileId)
+		applyOwnerKnockback(owner, position, explosionConfig)
+		hitUserIds, killedUserIds = damageEnemyPlayers(owner, position, projectileId, playerDamageMultiplier, explosionConfig)
+		damageEnemyAnchors(owner, position, projectileId, coreDamageMultiplier, explosionConfig)
 	end
 
 	fireEffect("Explode", {
@@ -727,9 +834,12 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		bombSkinId = bombSkinId,
 		position = position,
 		source = source,
-		innerRadius = BombConfig.InnerRadius,
-		outerRadius = BombConfig.OuterRadius,
-		terrainRadius = BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius,
+		innerRadius = explosionConfig.innerRadius,
+		nearRadius = explosionConfig.nearRadius,
+		outerRadius = explosionConfig.outerRadius,
+		terrainRadius = explosionConfig.terrainRadius,
+		explosionVisualScale = explosionConfig.explosionVisualScale,
+		chargeScale = explosionConfig.chargeScale,
 		hitUserIds = hitUserIds,
 	})
 	sendWorldText("BombExploded", owner, position, {
@@ -738,6 +848,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		sourceType = "Bomb",
 		bombType = BombProjectileConfig.BombType.Normal,
 		bombSkinId = bombSkinId,
+		chargeScale = explosionConfig.chargeScale,
 	})
 	if #debrisPayloads > 0 then
 		fireEffect("TerrainDebris", {
@@ -756,10 +867,15 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		bombType = BombProjectileConfig.BombType.Normal,
 		bombSkinId = bombSkinId,
 		position = position,
-		innerRadius = BombConfig.InnerRadius,
-		outerRadius = BombConfig.OuterRadius,
-		terrainRadius = BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius,
-		radius = BombConfig.OuterRadius,
+		innerRadius = explosionConfig.innerRadius,
+		nearRadius = explosionConfig.nearRadius,
+		outerRadius = explosionConfig.outerRadius,
+		terrainRadius = explosionConfig.terrainRadius,
+		explosionVisualScale = explosionConfig.explosionVisualScale,
+		chargeScale = explosionConfig.chargeScale,
+		playerDamageMultiplier = playerDamageMultiplier,
+		coreDamageMultiplier = coreDamageMultiplier,
+		radius = explosionConfig.outerRadius,
 		hitUserIds = hitUserIds,
 		killedUserIds = killedUserIds,
 	})

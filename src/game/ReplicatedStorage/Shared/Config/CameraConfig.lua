@@ -66,6 +66,11 @@ return table.freeze({
 	ThrowShakeFadeOutTime = 0.18,
 	ThrowShakePositionInfluence = Vector3.new(0.04, 0.05, 0),
 	ThrowShakeRotationInfluence = Vector3.new(0.25, 0.08, 0.45),
+	AirBurstShakeMagnitude = 1.25,
+	AirBurstShakeRoughness = 11,
+	AirBurstShakeFadeOutTime = 0.2,
+	AirBurstShakePositionInfluence = Vector3.new(0.03, 0.11, 0),
+	AirBurstShakeRotationInfluence = Vector3.new(0.45, 0.04, 0.2),
 
 	FallLagDelay = 0.35,
 	FallLagFullTime = 1.1,

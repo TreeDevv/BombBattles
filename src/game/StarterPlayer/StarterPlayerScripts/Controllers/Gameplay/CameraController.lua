@@ -327,6 +327,17 @@ function CameraController:PlayBombThrowPunch()
 	)
 end
 
+function CameraController:PlayAirBurstPunch()
+	self:_getCameraShaker():ShakeOnce(
+		CameraConfig.AirBurstShakeMagnitude,
+		CameraConfig.AirBurstShakeRoughness,
+		0,
+		CameraConfig.AirBurstShakeFadeOutTime,
+		CameraConfig.AirBurstShakePositionInfluence,
+		CameraConfig.AirBurstShakeRotationInfluence
+	)
+end
+
 function CameraController:PlayExplosionShake(origin: Vector3, radius: number?)
 	if typeof(origin) ~= "Vector3" then
 		return

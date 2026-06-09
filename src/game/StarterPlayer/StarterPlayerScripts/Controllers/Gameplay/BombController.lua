@@ -67,6 +67,15 @@ type TrajectoryPreview = {
 	emitters: { ParticleEmitter },
 }
 
+type AbilityTrajectoryPreviewOptions = {
+	launchSpeed: number?,
+	upwardVelocity: number?,
+	gravity: number?,
+	maxFlightSeconds: number?,
+	maxPreviewTime: number?,
+	color: Color3?,
+}
+
 local BombController = {}
 BombController.HoldStarted = Signal.new()
 BombController.HoldReleased = Signal.new()
@@ -102,12 +111,16 @@ BombController._previewing = false
 BombController._releasePending = false
 BombController._releaseFallbackSerial = 0
 BombController._started = false
+BombController._primaryBombInputSuppressed = false
+BombController._abilityThrowActive = false
+BombController._abilityReleaseCallback = nil :: (() -> ())?
 BombController._lastDebugLogTimes = {} :: { [string]: number }
 BombController._heldBombs = {} :: {
 	[Player]: {
 		instance: Instance,
 		rootPart: BasePart,
 		skinId: string?,
+		visualScale: number?,
 		highlight: Highlight?,
 		pulseConnection: RBXScriptConnection?,
 		fuseStartedAt: number?,
@@ -116,6 +129,7 @@ BombController._heldBombs = {} :: {
 }
 BombController._heldBombWanted = {} :: { [Player]: boolean }
 BombController._heldBombSkinIds = {} :: { [Player]: string }
+BombController._heldBombVisualScales = {} :: { [Player]: number }
 BombController._heldBombPulseTimes = {} :: {
 	[Player]: {
 		fuseStartedAt: number,
@@ -280,8 +294,26 @@ local function getThrowOrigin(rootPart: BasePart): Vector3
 	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
 end
 
-local function calculateTrajectory(origin: Vector3, aimDirection: Vector3)
+local function calculateTrajectoryWithConfig(
+	origin: Vector3,
+	aimDirection: Vector3,
+	launchSpeed: number,
+	upwardVelocity: number,
+	gravity: number,
+	maxFlightSeconds: number
+)
 	return BombTrajectory.CreatePath(
+		origin,
+		aimDirection,
+		launchSpeed,
+		upwardVelocity,
+		gravity,
+		maxFlightSeconds
+	)
+end
+
+local function calculateTrajectory(origin: Vector3, aimDirection: Vector3)
+	return calculateTrajectoryWithConfig(
 		origin,
 		aimDirection,
 		BombConfig.ProjectileLaunchSpeed,
@@ -747,6 +779,7 @@ end
 function BombController:_hideHeldBomb(player: Player)
 	self._heldBombWanted[player] = nil
 	self._heldBombSkinIds[player] = nil
+	self._heldBombVisualScales[player] = nil
 	self._heldBombPulseTimes[player] = nil
 	self:_destroyHeldBomb(player)
 end
@@ -758,7 +791,8 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 
 	local held = self._heldBombs[player]
 	local skinId = self._heldBombSkinIds[player] or getPlayerBombSkinId(player)
-	if held and held.instance.Parent and held.skinId == skinId then
+	local visualScale = math.max(tonumber(self._heldBombVisualScales[player]) or BombConfig.HeldVisualScale, 0.05)
+	if held and held.instance.Parent and held.skinId == skinId and math.abs((held.visualScale or BombConfig.HeldVisualScale) - visualScale) <= 0.075 then
 		return
 	end
 	self:_destroyHeldBomb(player)
@@ -778,7 +812,7 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 		vfx = true,
 		fuseSpark = false,
 		trail = false,
-	}, BombConfig.HeldVisualScale)
+	}, visualScale)
 	if not rootPart then
 		instance:Destroy()
 		return
@@ -815,6 +849,7 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 		instance = instance,
 		rootPart = rootPart,
 		skinId = skinId,
+		visualScale = visualScale,
 		highlight = nil,
 		pulseConnection = nil,
 		fuseStartedAt = nil,
@@ -846,6 +881,21 @@ function BombController:_setHeldBombEffects(player: Player, fuseSpark: boolean, 
 		fuseSpark = fuseSpark,
 		trail = trail,
 	})
+end
+
+function BombController:SetLocalHeldBombVisualScale(scale: number)
+	local visualScale = math.max(tonumber(scale) or 1, 0.05) * BombConfig.HeldVisualScale
+	self._heldBombVisualScales[LocalPlayer] = visualScale
+	if self._heldBombWanted[LocalPlayer] == true then
+		self:_ensureHeldBomb(LocalPlayer, 0)
+	end
+end
+
+function BombController:ResetLocalHeldBombVisualScale()
+	self._heldBombVisualScales[LocalPlayer] = nil
+	if self._heldBombWanted[LocalPlayer] == true then
+		self:_ensureHeldBomb(LocalPlayer, 0)
+	end
 end
 
 function BombController:_destroyHipBomb(player: Player)
@@ -1037,6 +1087,8 @@ function BombController:_clearBombAnimationState()
 	self._holding = false
 	self._releasePending = false
 	self._releaseFallbackSerial += 1
+	self._abilityThrowActive = false
+	self._abilityReleaseCallback = nil
 	self:_disconnectReleaseMarker()
 	self:_disconnectAnimationConnections()
 	self:_stopBombTracks()
@@ -1045,6 +1097,9 @@ end
 
 function BombController:_canBeginBombHold(ignoreHolding: boolean?): boolean
 	if not self._started then
+		return false
+	end
+	if self._primaryBombInputSuppressed and not ignoreHolding then
 		return false
 	end
 	if self._beginRemote == nil or self._releaseRemote == nil then
@@ -1075,7 +1130,16 @@ function BombController:_cancelHold()
 end
 
 function BombController:_cancelHoldIfInvalid()
-	if self._holding and not self:_canBeginBombHold(true) then
+	if not self._holding then
+		return
+	end
+
+	if self._abilityThrowActive then
+		local _, humanoid, rootPart = getCharacterParts()
+		if not (self._started and isRoundActiveForLocalPlayer() and humanoid and humanoid.Health > 0 and rootPart) then
+			self:_cancelHold()
+		end
+	elseif not self:_canBeginBombHold(true) then
 		self:_cancelHold()
 	end
 end
@@ -1288,7 +1352,10 @@ function BombController:_fireReleaseFromAnimation()
 	self:_disconnectReleaseMarker()
 	self:_stopPreview()
 
-	if self._releaseRemote then
+	local abilityReleaseCallback = self._abilityReleaseCallback
+	if abilityReleaseCallback then
+		abilityReleaseCallback()
+	elseif self._releaseRemote then
 		local rootPart = getRootPart()
 		if rootPart then
 			self._releaseRemote:FireServer({
@@ -1328,6 +1395,43 @@ function BombController:_playRelease()
 	end)
 end
 
+function BombController:_showTrajectoryPreview(trajectory: BombTrajectory.Path, maxPreviewTime: number, color: Color3): boolean
+	maxPreviewTime = math.min(maxPreviewTime, trajectory.duration)
+	if maxPreviewTime <= 0 then
+		if self._trajectoryPreview then
+			setTrajectoryPreviewEnabled(self._trajectoryPreview, false)
+		end
+		return false
+	end
+
+	local preview = self:_ensureTrajectoryPreview()
+	if not preview then
+		return false
+	end
+
+	local origin = trajectory.origin
+	local hit, endElapsed = findPreviewTrajectoryHit(trajectory, maxPreviewTime)
+	local endAlpha = math.clamp(endElapsed / trajectory.duration, 0, 1)
+	local endPosition = if hit then hit.Position else BombTrajectory.Evaluate(trajectory, endAlpha)
+	local startVelocity = BombTrajectory.GetVelocity(trajectory, 0)
+	local endVelocity = BombTrajectory.GetVelocity(trajectory, endAlpha)
+	local reversePathDirection = origin - endPosition
+
+	preview.startPart.CFrame = cframeFromRightVector(origin, getUnitOrFallback(-startVelocity, reversePathDirection))
+	preview.endPart.CFrame = cframeFromRightVector(endPosition, getUnitOrFallback(-endVelocity, reversePathDirection))
+
+	local startCurveSize = startVelocity.Magnitude * endElapsed / 3
+	local endCurveSize = endVelocity.Magnitude * endElapsed / 3
+	for _, beam in ipairs(preview.beams) do
+		beam.CurveSize0 = endCurveSize
+		beam.CurveSize1 = startCurveSize
+	end
+
+	tintTrajectoryPreview(preview, color)
+	setTrajectoryPreviewEnabled(preview, true)
+	return true
+end
+
 function BombController:_updatePreview()
 	if not self._holding and not isCooking() then
 		self:_stopPreview()
@@ -1357,32 +1461,9 @@ function BombController:_updatePreview()
 		return
 	end
 
-	local preview = self:_ensureTrajectoryPreview()
-	if not preview then
-		return
-	end
-
 	local dangerAlpha = 1 - math.clamp(remaining / BombConfig.FuseSeconds, 0, 1)
 	local color = BombConfig.PreviewColor:Lerp(BombConfig.PreviewDangerColor, dangerAlpha)
-	local hit, endElapsed = findPreviewTrajectoryHit(trajectory, maxPreviewTime)
-	local endAlpha = math.clamp(endElapsed / trajectory.duration, 0, 1)
-	local endPosition = if hit then hit.Position else BombTrajectory.Evaluate(trajectory, endAlpha)
-	local startVelocity = BombTrajectory.GetVelocity(trajectory, 0)
-	local endVelocity = BombTrajectory.GetVelocity(trajectory, endAlpha)
-	local reversePathDirection = origin - endPosition
-
-	preview.startPart.CFrame = cframeFromRightVector(origin, getUnitOrFallback(-startVelocity, reversePathDirection))
-	preview.endPart.CFrame = cframeFromRightVector(endPosition, getUnitOrFallback(-endVelocity, reversePathDirection))
-
-	local startCurveSize = startVelocity.Magnitude * endElapsed / 3
-	local endCurveSize = endVelocity.Magnitude * endElapsed / 3
-	for _, beam in ipairs(preview.beams) do
-		beam.CurveSize0 = endCurveSize
-		beam.CurveSize1 = startCurveSize
-	end
-
-	tintTrajectoryPreview(preview, color)
-	setTrajectoryPreviewEnabled(preview, true)
+	self:_showTrajectoryPreview(trajectory, maxPreviewTime, color)
 end
 
 function BombController:_requestBegin()
@@ -1414,6 +1495,120 @@ function BombController:_requestRelease()
 	return true
 end
 
+function BombController:GetThrowAimDirection(): Vector3
+	return getMouseAimDirection()
+end
+
+function BombController:GetThrowOrigin(): Vector3?
+	local rootPart = getRootPart()
+	return if rootPart then getThrowOrigin(rootPart) else nil
+end
+
+function BombController:ShowAbilityTrajectoryPreview(options: AbilityTrajectoryPreviewOptions?): boolean
+	local rootPart = getRootPart()
+	if not rootPart then
+		self:HideAbilityTrajectoryPreview()
+		return false
+	end
+
+	options = options or {}
+	local origin = getThrowOrigin(rootPart)
+	local launchSpeed = if typeof(options.launchSpeed) == "number"
+		then math.max(options.launchSpeed, 0.001)
+		else BombConfig.ProjectileLaunchSpeed
+	local upwardVelocity = if typeof(options.upwardVelocity) == "number"
+		then math.max(options.upwardVelocity, 0)
+		else BombConfig.ProjectileUpwardVelocity
+	local gravity = if typeof(options.gravity) == "number"
+		then math.max(options.gravity, 0.001)
+		else workspace.Gravity * BombConfig.ProjectileGravityScale
+	local maxFlightSeconds = if typeof(options.maxFlightSeconds) == "number"
+		then math.max(options.maxFlightSeconds, 0.001)
+		else BombConfig.ProjectileMaxFlightSeconds
+	local trajectory = calculateTrajectoryWithConfig(
+		origin,
+		getMouseAimDirection(),
+		launchSpeed,
+		upwardVelocity,
+		gravity,
+		maxFlightSeconds
+	)
+	local maxPreviewTime = if typeof(options.maxPreviewTime) == "number"
+		then math.min(math.max(options.maxPreviewTime, 0), trajectory.duration)
+		else math.min(trajectory.duration, BombConfig.PreviewMaxSeconds)
+	local color = if typeof(options.color) == "Color3" then options.color else BombConfig.PreviewColor
+
+	return self:_showTrajectoryPreview(trajectory, maxPreviewTime, color)
+end
+
+function BombController:HideAbilityTrajectoryPreview()
+	if self._previewing then
+		return
+	end
+	if self._trajectoryPreview then
+		setTrajectoryPreviewEnabled(self._trajectoryPreview, false)
+	end
+end
+
+function BombController:_canBeginAbilityThrowHold(): boolean
+	if not self._started then
+		return false
+	end
+	if self._holding or self._releasePending or isCooking() then
+		return false
+	end
+	if not isRoundActiveForLocalPlayer() then
+		return false
+	end
+
+	local _, humanoid, rootPart = getCharacterParts()
+	return humanoid ~= nil and humanoid.Health > 0 and rootPart ~= nil
+end
+
+function BombController:SetPrimaryBombInputSuppressed(suppressed: boolean)
+	self._primaryBombInputSuppressed = suppressed == true
+end
+
+function BombController:BeginAbilityThrowHold(): boolean
+	if not self:_canBeginAbilityThrowHold() then
+		return false
+	end
+
+	self._holding = true
+	self._abilityThrowActive = true
+	self._abilityReleaseCallback = nil
+	self:_showHeldBomb(LocalPlayer, nil)
+	self:_setHeldBombEffects(LocalPlayer, false, false)
+	self:_playThrow()
+	self.HoldStarted:Fire()
+	return true
+end
+
+function BombController:ReleaseAbilityThrowHold(releaseCallback: () -> ()): boolean
+	if not (self._abilityThrowActive and self._holding) then
+		return false
+	end
+
+	self._holding = false
+	self._abilityReleaseCallback = releaseCallback
+	self:_setHeldBombEffects(LocalPlayer, true, false)
+	self:_playRelease()
+	self.HoldReleased:Fire()
+	return true
+end
+
+function BombController:CancelAbilityThrowHold(): boolean
+	if not self._abilityThrowActive then
+		return false
+	end
+
+	self:ResetLocalHeldBombVisualScale()
+	self:_clearBombAnimationState()
+	self:_stopPreview()
+	self.HoldReleased:Fire()
+	return true
+end
+
 function BombController:BeginBombHold(): boolean
 	return self:_requestBegin()
 end
@@ -1427,6 +1622,10 @@ function BombController:IsHoldingBomb(): boolean
 end
 
 function BombController:_handleAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
+	if self._primaryBombInputSuppressed then
+		return Enum.ContextActionResult.Sink
+	end
+
 	if inputState == Enum.UserInputState.Begin then
 		self:BeginBombHold()
 	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
@@ -1500,7 +1699,7 @@ function BombController:_getExplosionVfxFolder(): Folder
 	return folder
 end
 
-function BombController:_playExplosionEffect(position: Vector3, skinId: any)
+function BombController:_playExplosionEffect(position: Vector3, skinId: any, visualScale: number?)
 	local emitModule = self:_getEmitModule()
 	if emitModule and not self:_ensureEmitModuleInitialized(emitModule) then
 		emitModule = nil
@@ -1513,6 +1712,7 @@ function BombController:_playExplosionEffect(position: Vector3, skinId: any)
 		emitModule = emitModule,
 		name = "BombExplosionVFX",
 		cleanupSeconds = EXPLOSION_VFX_CLEANUP_SECONDS,
+		visualScale = visualScale,
 		warnPrefix = "[BombController]",
 	})
 	if not result.template and not self._warnedMissingExplosionVfx then
@@ -2131,7 +2331,7 @@ function BombController:_bindEffects()
 				if typeof(payload.outerRadius) == "number" then payload.outerRadius else BombConfig.OuterRadius
 			)
 			self:_playHitFlashes(payload.hitUserIds)
-			self:_playExplosionEffect(payload.position, payload.bombSkinId)
+			self:_playExplosionEffect(payload.position, payload.bombSkinId, payload.explosionVisualScale)
 		elseif effectName == "TerrainDebris" and typeof(payload) == "table" then
 			self:_playTerrainDebris(payload.payloads)
 		elseif effectName == "Cook" and typeof(payload) == "table" then

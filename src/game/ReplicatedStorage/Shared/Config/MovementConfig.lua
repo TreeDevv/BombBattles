@@ -131,6 +131,17 @@ return table.freeze({
 				ModifierDuration = 0.25,
 				OverspeedBrakeScale = 0.65,
 			}),
+			AirBurst = table.freeze({
+				MinAirTime = 0.24,
+				ModifierDuration = 0.24,
+				OverspeedBrakeScale = 0.7,
+			}),
+			GrappleHook = table.freeze({
+				MinAirTime = 0.2,
+				ModifierDuration = 0.3,
+				SteeringScale = 0.45,
+				OverspeedBrakeScale = 0.5,
+			}),
 		}),
 	}),
 

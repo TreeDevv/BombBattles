@@ -256,6 +256,27 @@ local function getSlotState(player: Player, slot: string): AbilitySlotState?
 	return if typeof(slots) == "table" then slots[slot] else nil
 end
 
+local function publishPlayerDebugState(player: Player)
+	local replica = getReplica(player)
+	player:SetAttribute("AbilityService_StateCreated", replica ~= nil)
+	if not replica then
+		return
+	end
+
+	local slots = replica.Data.slots
+	for _, slot in ipairs(AbilityConfig.SlotOrder) do
+		local slotState = if typeof(slots) == "table" then slots[slot] else nil
+		player:SetAttribute(
+			"AbilityService_" .. slot .. "AbilityId",
+			if typeof(slotState) == "table" and typeof(slotState.abilityId) == "string" then slotState.abilityId else ""
+		)
+		player:SetAttribute(
+			"AbilityService_" .. slot .. "CooldownEndsAt",
+			if typeof(slotState) == "table" and typeof(slotState.cooldownEndsAt) == "number" then slotState.cooldownEndsAt else 0
+		)
+	end
+end
+
 local function getBehavior(abilityId: string, definition: AbilityDefinition?): ServerBehavior?
 	local behaviorId = AbilityConfig.GetBehaviorId(abilityId)
 	if behaviorId == "" and definition and typeof(definition.id) == "string" then
@@ -369,6 +390,7 @@ local function setSlotValues(player: Player, slot: string, values: { [string]: a
 	local replica = getReplica(player)
 	if replica then
 		replica:SetValues({ "slots", slot }, values)
+		publishPlayerDebugState(player)
 	end
 end
 
@@ -425,7 +447,9 @@ local function activate(player: Player, resolved: ResolvedAbilityRequest, curren
 		return
 	end
 
-	local cooldownSeconds = math.max(tonumber(resolved.definition.cooldownSeconds) or 0, 0)
+	local cooldownSeconds = if typeof(behaviorResult) == "table" and typeof(behaviorResult.cooldownSeconds) == "number"
+		then math.max(behaviorResult.cooldownSeconds, 0)
+		else math.max(tonumber(resolved.definition.cooldownSeconds) or 0, 0)
 	local durationSeconds = math.max(tonumber(resolved.definition.durationSeconds) or 0, 0)
 	local state = if typeof(behaviorResult) == "table" and typeof(behaviorResult.state) == "table"
 		then behaviorResult.state
@@ -593,11 +617,13 @@ function AbilityService:OnStart()
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		createReplica(player)
+		publishPlayerDebugState(player)
 	end
 end
 
 function AbilityService:OnPlayerAdded(player: Player)
 	createReplica(player)
+	publishPlayerDebugState(player)
 end
 
 function AbilityService:OnPlayerRemoving(player: Player)
@@ -651,6 +677,20 @@ function AbilityService:FireEffect(effectName: string, payload: any?)
 	fireAbilityEffect(effectName, payload)
 end
 
+function AbilityService:SetSlotValues(player: Player, slot: string, values: { [string]: any }): boolean
+	if not AbilityConfig.IsKnownSlot(slot) then
+		return false
+	end
+	local state = self:GetPlayerState(player)
+	local slots = state and state.slots
+	if typeof(slots) ~= "table" or typeof(slots[slot]) ~= "table" then
+		return false
+	end
+
+	setSlotValues(player, slot, values)
+	return true
+end
+
 function AbilityService:SetEquippedAbility(player: Player, slot: string, abilityId: string): boolean
 	if not AbilityConfig.IsKnownSlot(slot) then
 		return false
@@ -667,6 +707,7 @@ function AbilityService:SetEquippedAbility(player: Player, slot: string, ability
 
 	local replica = createReplica(player)
 	replica:SetValue({ "slots", slot }, AbilityConfig.BuildSlotState(slot, resolvedAbilityId))
+	publishPlayerDebugState(player)
 	return true
 end
 
@@ -678,6 +719,7 @@ function AbilityService:SetLoadout(player: Player, loadout: AbilityLoadout): boo
 		replica:SetValue({ "slots", slot }, AbilityConfig.BuildSlotState(slot, abilityId))
 	end
 
+	publishPlayerDebugState(player)
 	return true
 end
 

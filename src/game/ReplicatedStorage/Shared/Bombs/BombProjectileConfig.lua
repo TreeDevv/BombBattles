@@ -7,6 +7,7 @@ BombProjectileConfig.Enabled = true
 BombProjectileConfig.BombType = {
 	Normal = "NormalBomb",
 	Bouncy = "BouncyBomb",
+	Drill = "DrillBomb",
 }
 
 BombProjectileConfig.SnapshotHz = 20
@@ -119,6 +120,27 @@ BombProjectileConfig.BombTypes = table.freeze({
 	}),
 	[BombProjectileConfig.BombType.Bouncy] = table.freeze({
 		physics = BOUNCY_PHYSICS,
+		fuse = table.freeze({
+			seconds = BombConfig.FuseSeconds,
+			explodeAfterSettled = false,
+			armAfterSettled = false,
+		}),
+		collision = table.freeze({
+			respectCanCollide = true,
+			ignoreWater = true,
+			directHitExplodes = false,
+		}),
+		explosion = table.freeze({
+			innerRadius = BombConfig.InnerRadius,
+			outerRadius = BombConfig.OuterRadius,
+			terrainRadius = BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius,
+		}),
+		visuals = table.freeze({
+			spinRadiansPerSecond = BombConfig.VisualSpinRadiansPerSecond,
+		}),
+	}),
+	[BombProjectileConfig.BombType.Drill] = table.freeze({
+		physics = NORMAL_PHYSICS,
 		fuse = table.freeze({
 			seconds = BombConfig.FuseSeconds,
 			explodeAfterSettled = false,

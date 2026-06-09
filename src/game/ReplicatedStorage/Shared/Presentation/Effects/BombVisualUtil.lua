@@ -160,6 +160,64 @@ local function scaleVisual(visual: Instance, rootPart: BasePart, scale: number)
 	end
 end
 
+local function scaleNumberSequence(sequence: NumberSequence, scale: number): NumberSequence
+	local keypoints = {}
+	for _, keypoint in ipairs(sequence.Keypoints) do
+		table.insert(keypoints, NumberSequenceKeypoint.new(
+			keypoint.Time,
+			keypoint.Value * scale,
+			keypoint.Envelope * scale
+		))
+	end
+	return NumberSequence.new(keypoints)
+end
+
+local function getEffectPivot(instance: Instance): CFrame?
+	if instance:IsA("Model") then
+		return instance:GetPivot()
+	elseif instance:IsA("BasePart") then
+		return instance.CFrame
+	end
+
+	local firstPart = getFirstBasePart(instance)
+	return if firstPart then firstPart.CFrame else nil
+end
+
+local function scaleEffectInstance(instance: Instance, scale: number)
+	if math.abs(scale - 1) < 0.001 then
+		return
+	end
+
+	local pivot = getEffectPivot(instance)
+	if not pivot then
+		return
+	end
+
+	for _, part in ipairs(getBaseParts(instance)) do
+		local relativeCFrame = pivot:ToObjectSpace(part.CFrame)
+		local relativeRotation = relativeCFrame - relativeCFrame.Position
+		part.Size = part.Size * scale
+		part.CFrame = pivot * CFrame.new(relativeCFrame.Position * scale) * relativeRotation
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("Attachment") then
+			descendant.Position = descendant.Position * scale
+		elseif descendant:IsA("ParticleEmitter") then
+			descendant.Size = scaleNumberSequence(descendant.Size, scale)
+			descendant.Speed = NumberRange.new(descendant.Speed.Min * scale, descendant.Speed.Max * scale)
+			descendant.Acceleration = descendant.Acceleration * scale
+		elseif descendant:IsA("Beam") then
+			descendant.Width0 = descendant.Width0 * scale
+			descendant.Width1 = descendant.Width1 * scale
+		elseif descendant:IsA("Trail") then
+			descendant.WidthScale = scaleNumberSequence(descendant.WidthScale, scale)
+		elseif descendant:IsA("PointLight") or descendant:IsA("SpotLight") or descendant:IsA("SurfaceLight") then
+			descendant.Range = descendant.Range * scale
+		end
+	end
+end
+
 local function pivotVisualToRoot(visual: Instance, rootPart: BasePart)
 	if visual:IsA("Model") then
 		visual:PivotTo(rootPart.CFrame)
@@ -321,6 +379,8 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 	local clone = template:Clone()
 	clone.Name = if typeof(options.name) == "string" and options.name ~= "" then options.name else "BombExplosionVFX"
 	BombVisualUtil.PlaceEffectInstance(clone, position)
+	local visualScale = if typeof(options.visualScale) == "number" then math.max(options.visualScale, 0.05) else 1
+	scaleEffectInstance(clone, visualScale)
 	clone.Parent = parent
 	result.instance = clone
 

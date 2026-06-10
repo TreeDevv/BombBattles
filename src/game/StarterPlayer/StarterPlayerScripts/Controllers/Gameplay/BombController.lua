@@ -74,6 +74,8 @@ type AbilityTrajectoryPreviewOptions = {
 	maxFlightSeconds: number?,
 	maxPreviewTime: number?,
 	color: Color3?,
+	aimDirection: Vector3?,
+	aimDirections: { Vector3 }?,
 }
 
 local BombController = {}
@@ -105,6 +107,7 @@ BombController._animationConnections = {} :: { RBXScriptConnection }
 BombController._releaseMarkerConnection = nil :: RBXScriptConnection?
 BombController._previewFolder = nil :: Folder?
 BombController._trajectoryPreview = nil :: TrajectoryPreview?
+BombController._extraTrajectoryPreviews = {} :: { TrajectoryPreview }
 BombController._warnedMissingTrajectoryPreview = false
 BombController._holding = false
 BombController._previewing = false
@@ -152,6 +155,7 @@ BombController._projectileVisuals = {} :: {
 		acceleration: Vector3?,
 		settled: boolean?,
 		spin: number,
+		spinLocked: boolean?,
 		ownsInstance: boolean,
 		skinId: string?,
 		highlight: Highlight?,
@@ -682,13 +686,7 @@ function BombController:_warnMissingTrajectoryPreview(reason: string)
 	warn("[BombController] Missing or malformed trajectory preview VFX: " .. reason)
 end
 
-function BombController:_ensureTrajectoryPreview(): TrajectoryPreview?
-	if self._trajectoryPreview and self._trajectoryPreview.model.Parent then
-		return self._trajectoryPreview
-	end
-
-	self._trajectoryPreview = nil
-
+function BombController:_createTrajectoryPreview(name: string): TrajectoryPreview?
 	local template = getTrajectoryLineAsset()
 	if not template then
 		self:_warnMissingTrajectoryPreview("ReplicatedStorage.Assets.VFX.Trajectory.TrajectoryLine was not found")
@@ -696,7 +694,7 @@ function BombController:_ensureTrajectoryPreview(): TrajectoryPreview?
 	end
 
 	local clone = template:Clone()
-	clone.Name = TRAJECTORY_PREVIEW_NAME
+	clone.Name = name
 
 	local startPart = getNamedBasePart(clone, "Start")
 	local endPart = getNamedBasePart(clone, "End")
@@ -749,9 +747,42 @@ function BombController:_ensureTrajectoryPreview(): TrajectoryPreview?
 
 	setTrajectoryPreviewEnabled(preview, false)
 	clone.Parent = self:_getPreviewFolder()
-	self._trajectoryPreview = preview
 
 	return preview
+end
+
+function BombController:_ensureTrajectoryPreview(): TrajectoryPreview?
+	if self._trajectoryPreview and self._trajectoryPreview.model.Parent then
+		return self._trajectoryPreview
+	end
+
+	self._trajectoryPreview = self:_createTrajectoryPreview(TRAJECTORY_PREVIEW_NAME)
+	return self._trajectoryPreview
+end
+
+function BombController:_ensureTrajectoryPreviewAt(index: number): TrajectoryPreview?
+	if index <= 1 then
+		return self:_ensureTrajectoryPreview()
+	end
+
+	local existing = self._extraTrajectoryPreviews[index - 1]
+	if existing and existing.model.Parent then
+		return existing
+	end
+
+	local preview = self:_createTrajectoryPreview(TRAJECTORY_PREVIEW_NAME .. tostring(index))
+	self._extraTrajectoryPreviews[index - 1] = preview
+	return preview
+end
+
+function BombController:_hideExtraTrajectoryPreviews(startIndex: number?)
+	local first = math.max(startIndex or 1, 1)
+	for index = first, #self._extraTrajectoryPreviews do
+		local preview = self._extraTrajectoryPreviews[index]
+		if preview then
+			setTrajectoryPreviewEnabled(preview, false)
+		end
+	end
 end
 
 function BombController:_destroyHeldBomb(player: Player)
@@ -1395,16 +1426,23 @@ function BombController:_playRelease()
 	end)
 end
 
-function BombController:_showTrajectoryPreview(trajectory: BombTrajectory.Path, maxPreviewTime: number, color: Color3): boolean
+function BombController:_showTrajectoryPreview(
+	trajectory: BombTrajectory.Path,
+	maxPreviewTime: number,
+	color: Color3,
+	previewIndex: number?
+): boolean
+	local index = math.max(math.floor(previewIndex or 1), 1)
 	maxPreviewTime = math.min(maxPreviewTime, trajectory.duration)
 	if maxPreviewTime <= 0 then
-		if self._trajectoryPreview then
-			setTrajectoryPreviewEnabled(self._trajectoryPreview, false)
+		local existing = if index <= 1 then self._trajectoryPreview else self._extraTrajectoryPreviews[index - 1]
+		if existing then
+			setTrajectoryPreviewEnabled(existing, false)
 		end
 		return false
 	end
 
-	local preview = self:_ensureTrajectoryPreview()
+	local preview = self:_ensureTrajectoryPreviewAt(index)
 	if not preview then
 		return false
 	end
@@ -1525,20 +1563,40 @@ function BombController:ShowAbilityTrajectoryPreview(options: AbilityTrajectoryP
 	local maxFlightSeconds = if typeof(options.maxFlightSeconds) == "number"
 		then math.max(options.maxFlightSeconds, 0.001)
 		else BombConfig.ProjectileMaxFlightSeconds
-	local trajectory = calculateTrajectoryWithConfig(
-		origin,
-		getMouseAimDirection(),
-		launchSpeed,
-		upwardVelocity,
-		gravity,
-		maxFlightSeconds
-	)
-	local maxPreviewTime = if typeof(options.maxPreviewTime) == "number"
-		then math.min(math.max(options.maxPreviewTime, 0), trajectory.duration)
-		else math.min(trajectory.duration, BombConfig.PreviewMaxSeconds)
 	local color = if typeof(options.color) == "Color3" then options.color else BombConfig.PreviewColor
 
-	return self:_showTrajectoryPreview(trajectory, maxPreviewTime, color)
+	local aimDirections = {}
+	if typeof(options.aimDirections) == "table" then
+		for _, aimDirection in ipairs(options.aimDirections) do
+			if typeof(aimDirection) == "Vector3" and aimDirection.Magnitude > 0.05 then
+				table.insert(aimDirections, sanitizeAimDirection(aimDirection, getMouseAimDirection()))
+			end
+		end
+	elseif typeof(options.aimDirection) == "Vector3" and options.aimDirection.Magnitude > 0.05 then
+		table.insert(aimDirections, sanitizeAimDirection(options.aimDirection, getMouseAimDirection()))
+	end
+	if #aimDirections == 0 then
+		table.insert(aimDirections, getMouseAimDirection())
+	end
+
+	local anyShown = false
+	for index, aimDirection in ipairs(aimDirections) do
+		local trajectory = calculateTrajectoryWithConfig(
+			origin,
+			aimDirection,
+			launchSpeed,
+			upwardVelocity,
+			gravity,
+			maxFlightSeconds
+		)
+		local maxPreviewTime = if typeof(options.maxPreviewTime) == "number"
+			then math.min(math.max(options.maxPreviewTime, 0), trajectory.duration)
+			else math.min(trajectory.duration, BombConfig.PreviewMaxSeconds)
+		anyShown = self:_showTrajectoryPreview(trajectory, maxPreviewTime, color, index) or anyShown
+	end
+	self:_hideExtraTrajectoryPreviews(#aimDirections)
+
+	return anyShown
 end
 
 function BombController:HideAbilityTrajectoryPreview()
@@ -1548,6 +1606,7 @@ function BombController:HideAbilityTrajectoryPreview()
 	if self._trajectoryPreview then
 		setTrajectoryPreviewEnabled(self._trajectoryPreview, false)
 	end
+	self:_hideExtraTrajectoryPreviews(1)
 end
 
 function BombController:_canBeginAbilityThrowHold(): boolean
@@ -1946,6 +2005,7 @@ function BombController:_createProjectileVisual(projectileId: string, skinId: an
 		acceleration = nil,
 		settled = false,
 		spin = 0,
+		spinLocked = false,
 		ownsInstance = true,
 		skinId = resolvedSkinId,
 		highlight = nil,
@@ -2018,7 +2078,9 @@ function BombController:_playThrowEffect(payload)
 	local rootPart = visual.rootPart
 
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
-		visual.spin += deltaTime * BombConfig.VisualSpinRadiansPerSecond
+		if not visual.spinLocked then
+			visual.spin += deltaTime * BombConfig.VisualSpinRadiansPerSecond
+		end
 		if visual.customProjectile then
 			local position = visual.position or visual.targetPosition or rootPart.Position
 			local velocity = visual.velocity or visual.targetVelocity or Vector3.zero
@@ -2125,6 +2187,9 @@ function BombController:_handleProjectileSnapshot(payload)
 	visual.customProjectile = true
 	visual.targetPosition = payload.position
 	visual.targetVelocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else Vector3.zero
+	if payload.attached == true then
+		visual.spinLocked = true
+	end
 	if typeof(payload.acceleration) == "Vector3" then
 		visual.acceleration = payload.acceleration
 	end
@@ -2135,6 +2200,47 @@ function BombController:_handleProjectileSnapshot(payload)
 	if visual.velocity == nil or visual.settled then
 		visual.velocity = visual.targetVelocity
 	end
+end
+
+function BombController:_handleProjectileAttach(payload)
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
+		return
+	end
+	if payload.customProjectile ~= true or typeof(payload.position) ~= "Vector3" then
+		return
+	end
+
+	local projectileId = payload.projectileId
+	local visual = self._projectileVisuals[projectileId]
+	if not visual then
+		self:_playThrowEffect({
+			player = payload.player,
+			projectileId = projectileId,
+			customProjectile = true,
+			position = payload.position,
+			velocity = Vector3.zero,
+			acceleration = Vector3.zero,
+			startedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
+			fuseStartedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
+			remainingFuse = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds,
+			bombSkinId = payload.bombSkinId,
+		})
+		visual = self._projectileVisuals[projectileId]
+		if not visual then
+			return
+		end
+	end
+
+	visual.customProjectile = true
+	visual.targetPosition = payload.position
+	visual.targetVelocity = Vector3.zero
+	visual.position = payload.position
+	visual.velocity = Vector3.zero
+	visual.acceleration = Vector3.zero
+	visual.settled = true
+	visual.spinLocked = true
+	self:_setProjectileVisualCFrame(visual, payload.position, if typeof(payload.normal) == "Vector3" then payload.normal else Vector3.yAxis, visual.spin)
+	self:_playImpactEffect(payload.position)
 end
 
 function BombController:_handleProjectileSettle(payload)
@@ -2310,6 +2416,8 @@ function BombController:_bindEffects()
 			self:_playThrowEffect(payload)
 		elseif effectName == "ProjectileSnapshot" and typeof(payload) == "table" then
 			self:_handleProjectileSnapshot(payload)
+		elseif effectName == "ProjectileAttach" and typeof(payload) == "table" then
+			self:_handleProjectileAttach(payload)
 		elseif effectName == "Impact" and typeof(payload) == "table" then
 			self:_handleProjectileImpact(payload)
 		elseif effectName == "Settle" and typeof(payload) == "table" then

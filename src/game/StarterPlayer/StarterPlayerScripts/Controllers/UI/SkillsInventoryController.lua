@@ -1,6 +1,7 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
@@ -20,6 +21,12 @@ local SKILLS_LABEL_TEXT = "SKILLS"
 local HUD_TOGGLE_DEBOUNCE_SECONDS = 0.08
 local TILE_SLOT_NAME = "SkillsInventoryTileSlot"
 local TILE_SCALE_NAME = "SkillsInventoryVisualScale"
+local TILE_HOVER_SIZE_FACTOR = 1.01
+local TILE_PRESSED_SIZE_FACTOR = 0.9
+local TILE_TWEEN_INFO = TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local CLICK_SOUND_NAME = "UIButtonClickSound"
+local CLICK_SOUND_ID = "rbxassetid://5852470908"
+local CLICK_SOUND_VOLUME = 0.6
 
 local OWNED_KEY = Schema.OwnedAbilities and Schema.OwnedAbilities.key or "ownedAbilities"
 local LOADOUT_KEY = Schema.AbilityLoadout and Schema.AbilityLoadout.key or "abilityLoadout"
@@ -29,6 +36,7 @@ type TileRecord = {
 	layoutObject: GuiObject,
 	abilityId: string,
 	slot: string,
+	normalSize: UDim2,
 }
 
 type TileButtonRecord = {
@@ -48,6 +56,7 @@ SkillsInventoryController._right = nil :: Instance?
 SkillsInventoryController._topbar = nil :: Instance?
 SkillsInventoryController._containers = {} :: { [string]: GuiObject }
 SkillsInventoryController._tilesByAbilityId = {} :: { [string]: TileRecord }
+SkillsInventoryController._tileTweens = {} :: { [ImageButton]: Tween }
 SkillsInventoryController._selectedSlot = AbilityConfig.Slots.Offensive
 SkillsInventoryController._selectedAbilityId = ""
 SkillsInventoryController._remote = nil :: RemoteEvent?
@@ -118,6 +127,30 @@ local function setBuyPrice(button: ImageButton?, price: number)
 	if statNumber then
 		statNumber.Text = tostring(math.max(math.floor(price), 0))
 	end
+end
+
+local function scaleUDim2(size: UDim2, factor: number): UDim2
+	return UDim2.fromScale(size.X.Scale * factor, size.Y.Scale * factor)
+end
+
+local function getClickSound(): Sound
+	local existing = PlayerGui:FindFirstChild(CLICK_SOUND_NAME)
+	if existing and existing:IsA("Sound") then
+		return existing
+	end
+
+	local clickSound = Instance.new("Sound")
+	clickSound.Name = CLICK_SOUND_NAME
+	clickSound.SoundId = CLICK_SOUND_ID
+	clickSound.Volume = CLICK_SOUND_VOLUME
+	clickSound.Parent = PlayerGui
+	return clickSound
+end
+
+local function playClick()
+	local clickSound = getClickSound()
+	clickSound.TimePosition = 0
+	clickSound:Play()
 end
 
 local function getRemote(): RemoteEvent?
@@ -284,11 +317,41 @@ local function removeRuntimeTileScales(scroller: ScrollingFrame)
 	end
 end
 
+function SkillsInventoryController:_cancelTileTween(button: ImageButton)
+	local tween = self._tileTweens[button]
+	if tween then
+		tween:Cancel()
+		self._tileTweens[button] = nil
+	end
+end
+
+function SkillsInventoryController:_tweenTileButton(button: ImageButton, size: UDim2)
+	self:_cancelTileTween(button)
+
+	local tween = TweenService:Create(button, TILE_TWEEN_INFO, { Size = size })
+	self._tileTweens[button] = tween
+	tween.Completed:Once(function()
+		if self._tileTweens[button] == tween then
+			self._tileTweens[button] = nil
+		end
+	end)
+	tween:Play()
+end
+
 function SkillsInventoryController:_disconnectHud()
 	disconnectAll(self._hudConnections)
 end
 
 function SkillsInventoryController:_disconnectTiles()
+	for button, tween in pairs(self._tileTweens) do
+		tween:Cancel()
+		self._tileTweens[button] = nil
+	end
+
+	for _, record in pairs(self._tilesByAbilityId) do
+		record.button.Size = record.normalSize
+	end
+
 	disconnectAll(self._tileConnections)
 	table.clear(self._tilesByAbilityId)
 end
@@ -490,27 +553,39 @@ function SkillsInventoryController:_bindRightPanel()
 end
 
 function SkillsInventoryController:_bindTileButton(button: ImageButton, abilityId: string)
+	local normalSize = button.Size
+	local bigSize = scaleUDim2(normalSize, TILE_HOVER_SIZE_FACTOR)
+	local smallSize = scaleUDim2(normalSize, TILE_PRESSED_SIZE_FACTOR)
+
 	button.Active = true
 	button.Selectable = true
 	button.AutoButtonColor = true
+	button:SetAttribute("defaultSize", normalSize)
 	button:SetAttribute("Hovered", false)
 	button:SetAttribute("Pressed", false)
 
 	track(self._tileConnections, button.MouseEnter:Connect(function()
 		button:SetAttribute("Hovered", true)
+		self:_tweenTileButton(button, bigSize)
 	end))
+
 	track(self._tileConnections, button.MouseLeave:Connect(function()
 		button:SetAttribute("Hovered", false)
 		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, normalSize)
 	end))
+
 	track(self._tileConnections, button.MouseButton1Down:Connect(function()
 		button:SetAttribute("Pressed", true)
+		self:_tweenTileButton(button, smallSize)
 	end))
 	track(self._tileConnections, button.MouseButton1Up:Connect(function()
 		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, bigSize)
 	end))
 	track(self._tileConnections, button.Activated:Connect(function()
 		button:SetAttribute("Pressed", false)
+		playClick()
 		self:_selectAbility(abilityId)
 	end))
 	track(self._tileConnections, button.MouseButton1Click:Connect(function()
@@ -566,6 +641,7 @@ function SkillsInventoryController:_populateSlot(slot: string, container: GuiObj
 			layoutObject = layoutObject,
 			abilityId = definition.id,
 			slot = slot,
+			normalSize = button.Size,
 		}
 
 		self:_bindTileButton(button, definition.id)

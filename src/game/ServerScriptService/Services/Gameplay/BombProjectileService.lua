@@ -19,6 +19,14 @@ type HandlerTable = {
 	explode: ((owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionConfig: { [string]: any }?) -> ())?,
 }
 
+type ProjectileAttachment = {
+	instance: BasePart?,
+	localPosition: Vector3?,
+	position: Vector3,
+	normal: Vector3,
+	targetKind: string?,
+}
+
 type ProjectileState = {
 	id: string,
 	owner: Player,
@@ -42,6 +50,7 @@ type ProjectileState = {
 	groundRollDirection: Vector3,
 	physicalProjectile: Instance?,
 	physicalRoot: BasePart?,
+	attached: ProjectileAttachment?,
 	destroyed: boolean,
 	nextSnapshotAt: number,
 	lastImpactAt: number,
@@ -55,6 +64,7 @@ local heartbeatConnection: RBXScriptConnection? = nil
 local accumulator = 0
 local explodeProjectile
 local redirectProjectile
+local fireSnapshot
 
 local function now(): number
 	return workspace:GetServerTimeNow()
@@ -183,8 +193,8 @@ local function getPartContactRadius(part: BasePart): number
 	return math.clamp(math.max(part.Size.X, part.Size.Y, part.Size.Z) * 0.5, 0.35, 3)
 end
 
-local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vector3): Vector3?
-	if state.collision.playerContactExplodes ~= true then
+local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vector3)
+	if state.collision.playerContactExplodes ~= true and state.collision.playerContactImpacts ~= true then
 		return nil
 	end
 
@@ -208,7 +218,12 @@ local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vect
 			local contactPoint = closestPointOnSegment(state.position, nextPosition, descendant.Position)
 			local contactRadius = sweepRadius + getPartContactRadius(descendant)
 			if (descendant.Position - contactPoint).Magnitude <= contactRadius then
-				return contactPoint
+				local normal = if state.velocity.Magnitude > 0.05 then -state.velocity.Unit else Vector3.yAxis
+				return {
+					position = contactPoint,
+					normal = normal,
+					hitInstance = descendant,
+				}
 			end
 		end
 	end
@@ -317,6 +332,71 @@ local function getPhysicalVelocity(state: ProjectileState): Vector3
 	return state.velocity
 end
 
+local function getAttachedPosition(state: ProjectileState): Vector3
+	local attachment = state.attached
+	if not attachment then
+		return state.position
+	end
+
+	local instance = attachment.instance
+	if instance and instance.Parent and attachment.localPosition then
+		attachment.position = instance.CFrame:PointToWorldSpace(attachment.localPosition)
+	end
+
+	return attachment.position
+end
+
+local function getAttachNormal(result): Vector3
+	local normal = if typeof(result) == "table" then result.normal else nil
+	if typeof(normal) == "Vector3" and normal.Magnitude > 0.05 then
+		return normal.Unit
+	end
+	return Vector3.yAxis
+end
+
+local function attachProjectile(state: ProjectileState, result, currentTime: number): boolean
+	if typeof(result) ~= "table" then
+		return false
+	end
+
+	local position = readFiniteVector(result.position, state.position)
+	local instance = if typeof(result.attachInstance) == "Instance" and result.attachInstance:IsA("BasePart")
+		then result.attachInstance
+		else nil
+	local normal = getAttachNormal(result)
+
+	destroyPhysicalProjectile(state)
+	state.position = position
+	state.lastPosition = position
+	state.velocity = Vector3.zero
+	state.settled = true
+	state.grounded = false
+	state.attached = {
+		instance = instance,
+		localPosition = if instance then instance.CFrame:PointToObjectSpace(position) else nil,
+		position = position,
+		normal = normal,
+		targetKind = if typeof(result.targetKind) == "string" then result.targetKind else nil,
+	}
+
+	fireEffect("ProjectileAttach", {
+		player = state.owner,
+		projectileId = state.id,
+		customProjectile = true,
+		bombSkinId = state.skinId,
+		position = position,
+		velocity = Vector3.zero,
+		remainingFuse = math.max(state.explodeAt - currentTime, 0),
+		serverTime = currentTime,
+		attached = true,
+		attachInstance = instance,
+		targetKind = state.attached.targetKind,
+		normal = normal,
+	})
+	fireSnapshot(state, currentTime, true)
+	return true
+end
+
 local function spawnPhysicalProjectile(state: ProjectileState): Instance?
 	if state.physicalProjectile and state.physicalProjectile.Parent then
 		return state.physicalProjectile
@@ -406,12 +486,15 @@ local function getAcceleration(physics: ProjectilePhysics.PhysicsConfig, hasImpa
 	return Vector3.new(0, -ProjectilePhysics.GetGravity(physics, hasImpacted), 0)
 end
 
-local function fireSnapshot(state: ProjectileState, currentTime: number, force: boolean?)
+fireSnapshot = function(state: ProjectileState, currentTime: number, force: boolean?)
 	local interval = 1 / math.max(BombProjectileConfig.SnapshotHz, 1)
 	if not force and currentTime < state.nextSnapshotAt then
 		return
 	end
 
+	if state.attached then
+		state.position = getAttachedPosition(state)
+	end
 	state.nextSnapshotAt = currentTime + interval
 	fireEffect("ProjectileSnapshot", {
 		player = state.owner,
@@ -425,6 +508,8 @@ local function fireSnapshot(state: ProjectileState, currentTime: number, force: 
 		remainingFuse = math.max(state.explodeAt - currentTime, 0),
 		settled = state.settled,
 		grounded = state.grounded,
+		attached = state.attached ~= nil,
+		targetKind = if state.attached then state.attached.targetKind else nil,
 		radius = state.physics.radius,
 		visuals = state.visuals,
 		visualScale = state.visuals.visualScale,
@@ -467,6 +552,9 @@ local function fireImpact(
 		explodeProjectile(state, explodePosition)
 		return false
 	end
+	if impactResult.kind == RESULT_KIND.AttachProjectile and attachProjectile(state, impactResult, currentTime) then
+		return false
+	end
 	if impactResult.kind == RESULT_KIND.RedirectProjectile and redirectProjectile(state, impactResult, currentTime) then
 		return false
 	end
@@ -496,6 +584,82 @@ local function fireImpact(
 	if state.collision.directHitExplodes == true and not state.destroyed then
 		state.position = hitPosition
 		explodeProjectile(state, hitPosition)
+		return false
+	end
+
+	return true
+end
+
+local function fireContactImpact(state: ProjectileState, contact): boolean
+	if typeof(contact) ~= "table" or typeof(contact.position) ~= "Vector3" then
+		return true
+	end
+
+	local currentTime = now()
+	if currentTime - state.lastImpactAt < 0.035 then
+		return true
+	end
+
+	local hitNormal = if typeof(contact.normal) == "Vector3" and contact.normal.Magnitude > 0.05
+		then contact.normal.Unit
+		else Vector3.yAxis
+	local incomingVelocity = state.velocity
+	local impactResult = AbilityService:RunHook("OnBeforeProjectileImpact", {
+		projectileId = state.id,
+		owner = state.owner,
+		position = contact.position,
+		normal = hitNormal,
+		incomingVelocity = incomingVelocity,
+		hit = nil,
+		hitInstance = contact.hitInstance,
+		customProjectile = true,
+		playerContact = true,
+	})
+	local handled = impactResult.kind ~= nil and impactResult.kind ~= RESULT_KIND.Continue
+	if not handled and state.collision.playerContactExplodes ~= true then
+		return true
+	end
+	state.lastImpactAt = currentTime
+
+	if impactResult.kind == RESULT_KIND.DestroyProjectile or impactResult.kind == RESULT_KIND.Absorb then
+		BombProjectileService:DestroyProjectile(state.id, "Impact")
+		return false
+	end
+	if impactResult.kind == RESULT_KIND.Block then
+		return true
+	end
+	if impactResult.kind == RESULT_KIND.ExplodeProjectile then
+		local explodePosition = if typeof(impactResult.position) == "Vector3" then impactResult.position else contact.position
+		explodeProjectile(state, explodePosition)
+		return false
+	end
+	if impactResult.kind == RESULT_KIND.AttachProjectile and attachProjectile(state, impactResult, currentTime) then
+		return false
+	end
+	if impactResult.kind == RESULT_KIND.RedirectProjectile and redirectProjectile(state, impactResult, currentTime) then
+		return false
+	end
+
+	fireEffect("Impact", {
+		player = state.owner,
+		projectileId = state.id,
+		customProjectile = true,
+		bombSkinId = state.skinId,
+		position = contact.position,
+		projectilePosition = state.position,
+		impactNormal = hitNormal,
+		impactVelocity = incomingVelocity,
+		postImpactVelocity = state.velocity,
+		acceleration = getAcceleration(state.physics, state.hasImpacted),
+		hitInstance = contact.hitInstance,
+		settled = state.settled,
+		physicalProjectile = state.physicalProjectile,
+		playerContact = true,
+	})
+
+	if state.collision.playerContactExplodes == true and not state.destroyed then
+		state.position = contact.position
+		explodeProjectile(state, contact.position)
 		return false
 	end
 
@@ -627,6 +791,7 @@ function redirectProjectile(state: ProjectileState, result, currentTime: number)
 	state.settled = false
 	state.hasImpacted = false
 	state.grounded = false
+	state.attached = nil
 	state.groundRollDirection = resolveGroundRollDirection(state.owner, aimDirection)
 
 	local remainingFuse = math.max(state.explodeAt - currentTime, 0)
@@ -682,6 +847,9 @@ local function handleStepHook(state: ProjectileState, nextPosition: Vector3, cur
 		end
 		return false
 	end
+	if stepResult.kind == RESULT_KIND.AttachProjectile then
+		return not attachProjectile(state, stepResult, currentTime)
+	end
 	if stepResult.kind == RESULT_KIND.DeferProjectile and typeof(stepResult.deferSeconds) == "number" then
 		state.explodeAt += math.clamp(stepResult.deferSeconds, 0, BombConfig.FuseSeconds)
 		return true
@@ -696,7 +864,13 @@ end
 function explodeProjectile(state: ProjectileState, position: Vector3?)
 	activeProjectiles[state.id] = nil
 	state.destroyed = true
-	state.position = if typeof(position) == "Vector3" then position else getPhysicalPosition(state)
+	if typeof(position) == "Vector3" then
+		state.position = position
+	elseif state.attached then
+		state.position = getAttachedPosition(state)
+	else
+		state.position = getPhysicalPosition(state)
+	end
 	destroyPhysicalProjectile(state)
 	explode(state.owner, state.position, "Projectile", state.id, state.skinId, state.explosion)
 end
@@ -727,6 +901,18 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	end
 	if currentTime >= state.explodeAt then
 		explodeProjectile(state)
+		return
+	end
+
+	if state.attached then
+		state.position = getAttachedPosition(state)
+		state.velocity = Vector3.zero
+		if not handleStepHook(state, state.position, currentTime) then
+			return
+		end
+		if not state.destroyed then
+			fireSnapshot(state, currentTime, false)
+		end
 		return
 	end
 
@@ -766,10 +952,23 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		return
 	end
 
-	local playerContactPosition = findSweptPlayerContact(state, predictedPosition)
-	if playerContactPosition then
-		state.position = playerContactPosition
-		explodeProjectile(state)
+	local playerContact = findSweptPlayerContact(state, predictedPosition)
+	if playerContact then
+		if state.collision.playerContactImpacts == true then
+			if not fireContactImpact(state, playerContact) then
+				return
+			end
+			if state.destroyed or state.attached then
+				return
+			end
+		elseif typeof(playerContact.position) == "Vector3" then
+			state.position = playerContact.position
+			explodeProjectile(state)
+			return
+		end
+	end
+
+	if state.destroyed then
 		return
 	end
 
@@ -895,6 +1094,7 @@ function BombProjectileService:ApplyExternalVelocity(projectileId: string, veloc
 	state.velocity = velocity
 	state.settled = false
 	state.grounded = false
+	state.attached = nil
 
 	if state.physicalProjectile and state.physicalProjectile.Parent then
 		setPhysicalMotion(state.physicalProjectile, velocity, Vector3.zero)
@@ -1000,6 +1200,7 @@ function BombProjectileService:Launch(request): boolean
 		groundRollDirection = groundRollDirection,
 		physicalProjectile = nil,
 		physicalRoot = nil,
+		attached = nil,
 		destroyed = false,
 		nextSnapshotAt = launchTime,
 		lastImpactAt = 0,
@@ -1047,7 +1248,7 @@ function BombProjectileService:DestroyProjectile(projectileId: string, reason: s
 
 	activeProjectiles[projectileId] = nil
 	state.destroyed = true
-	state.position = getPhysicalPosition(state)
+	state.position = if state.attached then getAttachedPosition(state) else getPhysicalPosition(state)
 	destroyPhysicalProjectile(state)
 	fireEffect("ProjectileDestroy", {
 		player = state.owner,
@@ -1086,7 +1287,7 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 		local radius = if typeof(state.physics.radius) == "number" then state.physics.radius else nil
 		local sizeScale = if radius and typeof(defaultRadius) == "number" and defaultRadius > 0 then radius / defaultRadius else nil
 
-		local position = if state.physicalProjectile then getPhysicalPosition(state) else state.position
+		local position = if state.attached then getAttachedPosition(state) elseif state.physicalProjectile then getPhysicalPosition(state) else state.position
 		local velocity = if state.physicalProjectile then getPhysicalVelocity(state) else state.velocity
 
 		table.insert(snapshots, {
@@ -1101,6 +1302,7 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 			fuseStartedAt = state.fuseStartedAt,
 			fuseEndsAt = state.explodeAt,
 			settled = state.settled,
+			attached = state.attached ~= nil,
 		})
 	end
 

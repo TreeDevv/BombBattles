@@ -26,6 +26,16 @@ local function shouldPlayClick(button)
 end
 
 local function shouldBindButton(button)
+	if button.Name == "IndexButton" then
+		local ancestor = button.Parent
+		while ancestor and ancestor ~= playerGui do
+			if ancestor.Name == "SkillsInventory" then
+				return false
+			end
+			ancestor = ancestor.Parent
+		end
+	end
+
 	local parent = button.Parent
 	local grandparent = parent and parent.Parent
 	if button.Name == "Bomb" and parent and parent.Name == "Buttons" and grandparent and grandparent.Name == "HUD" then

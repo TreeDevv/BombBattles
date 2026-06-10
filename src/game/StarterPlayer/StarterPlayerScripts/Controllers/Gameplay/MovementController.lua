@@ -72,6 +72,7 @@ MovementController._humanoid = nil :: Humanoid?
 MovementController._rootPart = nil :: BasePart?
 MovementController._smoothedMoveDirection = Vector3.zero
 MovementController._smoothedFacingDirection = Vector3.zero
+MovementController._smoothedFacingYaw = nil :: number?
 MovementController._sprintHeld = false
 MovementController._crouchHeld = false
 MovementController._crouchPressConsumedBySlide = false
@@ -134,7 +135,6 @@ MovementController._airControlLaunchSource = AIR_LAUNCH_SOURCE_DEFAULT
 MovementController._airControlLaunchSerial = 0
 MovementController._airControlLaunchedAt = NEVER
 MovementController._airControlForceAirborneUntil = NEVER
-MovementController._normalJumpAirSpeedCap = nil :: number?
 MovementController._lastAirControlLaunchTime = NEVER
 MovementController._groundedCandidateStartTime = NEVER
 MovementController._observedAirControlLaunchSerial = 0
@@ -187,6 +187,19 @@ end
 
 local function flattenVelocity(velocity: Vector3): Vector3
 	return Vector3.new(velocity.X, 0, velocity.Z)
+end
+
+local function directionToYaw(direction: Vector3): number?
+	local flat = flattenDirection(direction)
+	if flat.Magnitude <= 0 then
+		return nil
+	end
+
+	return math.atan2(-flat.X, -flat.Z)
+end
+
+local function yawToDirection(yaw: number): Vector3
+	return Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
 end
 
 local function getTiltDegrees(cframe: CFrame): number
@@ -311,6 +324,11 @@ end
 
 local function smoothVector(current: Vector3, target: Vector3, responsiveness: number, dt: number): Vector3
 	return current:Lerp(target, exponentialAlpha(responsiveness, dt))
+end
+
+local function smoothYaw(current: number, target: number, responsiveness: number, dt: number): number
+	local delta = math.atan2(math.sin(target - current), math.cos(target - current))
+	return current + (delta * exponentialAlpha(responsiveness, dt))
 end
 
 local function getDescendantOfClass(parent: Instance, className: string): Instance?
@@ -594,10 +612,6 @@ function MovementController:_getAirControlLaunchProfile(source: string?)
 	return profiles[source] or defaultProfile
 end
 
-function MovementController:_clearNormalJumpAirSpeedCap()
-	self._normalJumpAirSpeedCap = nil
-end
-
 function MovementController:_getIntendedGroundMoveSpeed(): number
 	local speed = MovementConfig.WalkMoveSpeed
 	local humanoid = self._humanoid
@@ -615,24 +629,6 @@ function MovementController:_getIntendedGroundMoveSpeed(): number
 	end
 
 	return speed
-end
-
-function MovementController:_captureNormalJumpAirSpeedCap()
-	local horizontalSpeed = self:_getHorizontalSpeed()
-	self._normalJumpAirSpeedCap = math.max(horizontalSpeed, self:_getIntendedGroundMoveSpeed())
-end
-
-function MovementController:_getNormalJumpAirSpeedCap(): number?
-	if self._airControlLaunchSource ~= AIR_LAUNCH_SOURCE_NORMAL_JUMP then
-		return nil
-	end
-
-	local speedCap = self._normalJumpAirSpeedCap
-	if typeof(speedCap) ~= "number" or speedCap <= 0 then
-		return nil
-	end
-
-	return speedCap
 end
 
 function MovementController:_getGravityBootsAirControlBuff()
@@ -670,9 +666,6 @@ function MovementController:_setAirControlLaunchState(
 	publishAttributes: boolean
 )
 	local launchSource = if typeof(source) == "string" and source ~= "" then source else AIR_LAUNCH_SOURCE_DEFAULT
-	if launchSource ~= AIR_LAUNCH_SOURCE_NORMAL_JUMP then
-		self:_clearNormalJumpAirSpeedCap()
-	end
 
 	local profile = self:_getAirControlLaunchProfile(launchSource)
 	local minAirTime = if typeof(minAirTimeOverride) == "number"
@@ -789,7 +782,7 @@ function MovementController:_getAirControlMoveDirection(): (Vector3, number)
 	return flatDirection.Unit, magnitude
 end
 
-function MovementController:_calculateAirControlForce()
+function MovementController:_calculateAirControlForce(dt: number)
 	self._gravityBootsActive = false
 	self._gravityBootsAirSteeringScale = 1
 	self._gravityBootsAirBrakeScale = 1
@@ -813,7 +806,6 @@ function MovementController:_calculateAirControlForce()
 	local velocity = rootPart.AssemblyLinearVelocity
 	local horizontalVelocity = flattenVelocity(velocity)
 	local horizontalSpeed = horizontalVelocity.Magnitude
-	local normalJumpAirSpeedCap = self:_getNormalJumpAirSpeedCap()
 	local mass = math.max(rootPart.AssemblyMass, 0)
 	if mass <= 0 then
 		return {
@@ -908,22 +900,20 @@ function MovementController:_calculateAirControlForce()
 			sourceSteerScale *= gravityBootsBuff.steeringScale
 		end
 
-		steerForce = inputDirection * mass * steerAcceleration * inputMagnitude * speedBudgetScale * sourceSteerScale
-		if normalJumpAirSpeedCap
-			and horizontalSpeed >= normalJumpAirSpeedCap
-			and horizontalSpeed >= MovementConfig.MinMoveMagnitude
-		then
-			local speedDirection = horizontalVelocity.Unit
-			local speedIncreasingForce = steerForce:Dot(speedDirection)
-			if speedIncreasingForce > 0 then
-				steerForce -= speedDirection * speedIncreasingForce
-			end
+		local wishSpeed = self:_getIntendedGroundMoveSpeed() * inputMagnitude
+		local currentWishSpeed = horizontalVelocity:Dot(inputDirection)
+		local addSpeed = wishSpeed - currentWishSpeed
+		if addSpeed > 0 then
+			local minDt = 1 / 240
+			local acceleration = steerAcceleration * inputMagnitude * speedBudgetScale * sourceSteerScale
+			local accelerationSpeed = math.min(acceleration * math.max(dt, minDt), addSpeed)
+			steerForce = inputDirection * mass * (accelerationSpeed / math.max(dt, minDt))
 		end
 		force += steerForce
 	end
 
 	local brakeForce = Vector3.zero
-	local softAirSpeedCap = normalJumpAirSpeedCap or airControl.SoftAirSpeedCap
+	local softAirSpeedCap = airControl.SoftAirSpeedCap
 	if horizontalSpeed > softAirSpeedCap and horizontalSpeed >= MovementConfig.MinMoveMagnitude then
 		local brakeAlpha = math.clamp(
 			(horizontalSpeed - softAirSpeedCap) / math.max(airControl.SoftAirBrakeSpeedRange, 0.001),
@@ -955,7 +945,7 @@ function MovementController:_calculateAirControlForce()
 	}
 end
 
-function MovementController:_updateAirControl(now: number, isGrounded: boolean)
+function MovementController:_updateAirControl(now: number, isGrounded: boolean, dt: number)
 	local humanoid = self._humanoid
 	if isGrounded or not humanoid or humanoid.Health <= 0 then
 		self:_setAirControlEnabled(false)
@@ -968,7 +958,7 @@ function MovementController:_updateAirControl(now: number, isGrounded: boolean)
 		return
 	end
 
-	local data = self:_calculateAirControlForce()
+	local data = self:_calculateAirControlForce(dt)
 	vectorForce.Force = data.force
 	self._airControlForceVector = data.force
 	self._airControlSteerForce = data.steerForce
@@ -1752,9 +1742,6 @@ function MovementController:_requestGroundJump(now: number): boolean
 	local launchSource = if slideJumpCarry and slideJumpCarry.burst
 		then AIR_LAUNCH_SOURCE_SLIDE_JUMP
 		else AIR_LAUNCH_SOURCE_NORMAL_JUMP
-	if launchSource == AIR_LAUNCH_SOURCE_NORMAL_JUMP then
-		self:_captureNormalJumpAirSpeedCap()
-	end
 	self:_recordAirControlLaunch(now, launchSource)
 	if slideJumpCarry and slideJumpCarry.burst then
 		self:_startSlideJumpBurst(now, slideJumpCarry.direction, slideJumpCarry.speed, slideJumpCarry.burstEndSpeed)
@@ -1942,7 +1929,6 @@ function MovementController:_updateLandingState(now: number, isGrounded: boolean
 	local horizontalVelocity = flattenVelocity(velocity)
 	local horizontalSpeed = horizontalVelocity.Magnitude
 	if isGrounded then
-		self:_clearNormalJumpAirSpeedCap()
 		if not self._wasGrounded then
 			self._landingImpactSpeed = self._maxAirDownwardSpeed
 			self._landingHorizontalSpeed = math.max(self._maxAirHorizontalSpeed, horizontalSpeed)
@@ -1970,6 +1956,45 @@ function MovementController:_updateLandingState(now: number, isGrounded: boolean
 		end
 		self:_clearLandingRecovery()
 	end
+end
+
+function MovementController:_applyAirFacingYaw(isGrounded: boolean): boolean
+	if isGrounded then
+		return false
+	end
+
+	local rootPart = self._rootPart
+	local humanoid = self._humanoid
+	local facingDirection = self._smoothedFacingDirection
+	if not (
+		rootPart
+		and rootPart.Parent
+		and humanoid
+		and humanoid.Health > 0
+		and facingDirection.Magnitude >= MovementConfig.MinMoveMagnitude
+	) then
+		return false
+	end
+
+	local currentYaw = directionToYaw(rootPart.CFrame.LookVector)
+	local targetYaw = directionToYaw(facingDirection)
+	if not (currentYaw and targetYaw) then
+		return false
+	end
+
+	local yawDelta = math.atan2(math.sin(targetYaw - currentYaw), math.cos(targetYaw - currentYaw))
+	if math.abs(yawDelta) <= 1e-4 then
+		return false
+	end
+
+	local linearVelocity = rootPart.AssemblyLinearVelocity
+	local angularVelocity = rootPart.AssemblyAngularVelocity
+	local position = rootPart.Position
+	local rotation = rootPart.CFrame - position
+	rootPart.CFrame = (CFrame.fromAxisAngle(Vector3.yAxis, yawDelta) * rotation) + position
+	rootPart.AssemblyLinearVelocity = linearVelocity
+	rootPart.AssemblyAngularVelocity = angularVelocity
+	return true
 end
 
 function MovementController:_applyAirUprightStabilization(isGrounded: boolean): (number, Vector3, boolean)
@@ -2141,6 +2166,7 @@ function MovementController:_unbindCharacter()
 	self._rootPart = nil
 	self._smoothedMoveDirection = Vector3.zero
 	self._smoothedFacingDirection = Vector3.zero
+	self._smoothedFacingYaw = nil
 	self._sprintHeld = false
 	self._crouchHeld = false
 	self._crouchPressConsumedBySlide = false
@@ -2187,7 +2213,6 @@ function MovementController:_unbindCharacter()
 	self._airControlLaunchSerial = 0
 	self._airControlLaunchedAt = NEVER
 	self._airControlForceAirborneUntil = NEVER
-	self._normalJumpAirSpeedCap = nil
 	self._maxAirDownwardSpeed = 0
 	self._maxAirHorizontalSpeed = 0
 	self._maxAirHorizontalVelocity = Vector3.zero
@@ -2369,24 +2394,26 @@ function MovementController:_step(dt: number)
 		then getCameraFacingDirection()
 		else if hasMoveInput then targetMoveDirection.Unit else Vector3.zero
 
-	if targetFacingDirection.Magnitude >= MovementConfig.MinMoveMagnitude then
-		if self._smoothedFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude then
-			self._smoothedFacingDirection = targetFacingDirection
-		else
-			self._smoothedFacingDirection = smoothVector(
-				self._smoothedFacingDirection,
-				targetFacingDirection,
-				MovementConfig.FacingResponsiveness,
-				dt
-			)
+	local targetFacingYaw = directionToYaw(targetFacingDirection)
+	if targetFacingYaw then
+		local smoothedFacingYaw = self._smoothedFacingYaw
+		if smoothedFacingYaw == nil then
+			local currentFacingDirection = flattenDirection(controllerManager.FacingDirection)
+			if currentFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and self._rootPart then
+				currentFacingDirection = flattenDirection(self._rootPart.CFrame.LookVector)
+			end
+			smoothedFacingYaw = directionToYaw(currentFacingDirection) or targetFacingYaw
 		end
 
-		if self._smoothedFacingDirection.Magnitude >= MovementConfig.MinMoveMagnitude then
-			controllerManager.FacingDirection = self._smoothedFacingDirection.Unit
-		end
+		smoothedFacingYaw = smoothYaw(smoothedFacingYaw, targetFacingYaw, MovementConfig.FacingResponsiveness, dt)
+		local smoothedFacingDirection = yawToDirection(smoothedFacingYaw)
+		self._smoothedFacingYaw = smoothedFacingYaw
+		self._smoothedFacingDirection = smoothedFacingDirection
+		controllerManager.FacingDirection = smoothedFacingDirection
 	end
 
-	self:_updateAirControl(now, isGrounded)
+	self:_applyAirFacingYaw(isGrounded)
+	self:_updateAirControl(now, isGrounded, dt)
 	local airUprightTiltDegrees, airUprightAngularVelocity, airUprightStabilized =
 		self:_applyAirUprightStabilization(isGrounded)
 
@@ -2476,10 +2503,13 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	self._wasGrounded = self._isGrounded
 	self._lastGroundedTime = if self._isGrounded then os.clock() else NEVER
 	self._smoothedMoveDirection = parts.controllerManager.MovingDirection
-	self._smoothedFacingDirection = parts.controllerManager.FacingDirection
+	self._smoothedFacingDirection = flattenDirection(parts.controllerManager.FacingDirection)
+	if self._smoothedFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and parts.rootPart then
+		self._smoothedFacingDirection = flattenDirection(parts.rootPart.CFrame.LookVector)
+	end
+	self._smoothedFacingYaw = directionToYaw(self._smoothedFacingDirection)
 	self._airJumpCount = 0
 	self._jumpSerial = 0
-	self._normalJumpAirSpeedCap = nil
 	self:_bindFallingDownStateWatcher(character)
 
 	character:SetAttribute("Movement_JumpSerial", self._jumpSerial)

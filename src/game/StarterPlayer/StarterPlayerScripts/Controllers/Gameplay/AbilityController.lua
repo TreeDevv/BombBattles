@@ -2,6 +2,7 @@ local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
@@ -18,16 +19,26 @@ local EFFECT_REMOTE_NAME = AbilityConfig.EffectRemoteName
 local ACTIVATE_MESSAGE = AbilityConfig.MessageTypes.Activate
 local RENDER_STEP_NAME = "BombBattlesAbilityButtons"
 local RENDER_PRIORITY = Enum.RenderPriority.Last.Value
+local SIZE_TWEEN = TweenInfo.new(0.24, Enum.EasingStyle.Back)
+local FADE_TWEEN = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
+local HELD_GROW_TWEEN = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local HELD_PULSE_TWEEN = TweenInfo.new(0.52, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true)
+local READY_COLOR = Color3.fromRGB(255, 255, 255)
+local HELD_COLOR = Color3.fromRGB(255, 255, 255)
+local HELD_SCALE = 1.15
+local HELD_PULSE_SCALE = 1.22
+local PREDICTION_TIMEOUT_SECONDS = 1.25
+local FLIPBOOK_LIFETIME = 0.357
 
 local SLOT_INPUTS = {
 	[AbilityConfig.Slots.Offensive] = {
 		actionName = "BombBattlesOffensiveAbility",
-		keys = { Enum.KeyCode.Q, Enum.KeyCode.ButtonL1 },
+		keys = { Enum.KeyCode.E, Enum.KeyCode.ButtonL1 },
 		buttonName = "OffensiveAbility",
 	},
 	[AbilityConfig.Slots.Defensive] = {
 		actionName = "BombBattlesDefensiveAbility",
-		keys = { Enum.KeyCode.E, Enum.KeyCode.ButtonR1 },
+		keys = { Enum.KeyCode.Q, Enum.KeyCode.ButtonR1 },
 		buttonName = "DefensiveAbility",
 	},
 }
@@ -37,6 +48,39 @@ type AbilityEffectPayload = AbilityTypes.AbilityEffectPayload
 type AbilitySlotState = AbilityTypes.AbilitySlotState
 type AbilityState = AbilityTypes.AbilityState
 type ClientBehavior = AbilityTypes.ClientBehavior
+type PredictedCooldown = {
+	abilityId: string,
+	startedAt: number,
+	endsAt: number,
+	duration: number,
+	expiresAt: number,
+}
+type ButtonVisual = {
+	button: ImageButton,
+	slot: string,
+	normalSize: UDim2,
+	hovering: boolean,
+	pressing: boolean,
+	held: boolean,
+	heldAbilityId: string,
+	heldSerial: number,
+	heldGrowTween: Tween?,
+	heldPulseTween: Tween?,
+	heldColorTween: Tween?,
+	onCooldown: boolean,
+	cooldownAuthoritative: boolean,
+	cooldownAbilityId: string,
+	cooldownEndsAt: number,
+	cooldownDuration: number,
+	cooldownCover: GuiObject?,
+	keybindCover: GuiObject?,
+	progressValue: NumberValue?,
+	progressLabel: TextLabel?,
+	leftGradient: UIGradient?,
+	rightGradient: UIGradient?,
+	explodeEffect: ImageLabel?,
+	cooldownEffect: Frame?,
+}
 
 local AbilityController = {}
 
@@ -49,10 +93,12 @@ AbilityController._effectRemote = nil :: RemoteEvent?
 AbilityController._effectConnection = nil :: RBXScriptConnection?
 AbilityController._hudConnections = {} :: { RBXScriptConnection }
 AbilityController._buttons = {} :: { [string]: ImageButton }
+AbilityController._buttonVisuals = {} :: { [string]: ButtonVisual }
 AbilityController._buttonConnections = {} :: { RBXScriptConnection }
 AbilityController._data = nil :: AbilityState?
 AbilityController._clientSequence = 0
 AbilityController._behaviors = {} :: { [string]: ClientBehavior }
+AbilityController._predictedCooldowns = {} :: { [string]: PredictedCooldown }
 
 local function getRemote(name: string): RemoteEvent?
 	local remotes = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, 10)
@@ -138,6 +184,397 @@ local function getCooldownRemaining(slotState: AbilitySlotState?): number
 	return math.max(slotState.cooldownEndsAt - getServerTime(), 0)
 end
 
+local function getDefinitionCooldown(definition: AbilityDefinition?): number
+	return if definition and typeof(definition.cooldownSeconds) == "number" then math.max(definition.cooldownSeconds, 0) else 0
+end
+
+local function scaleUDim2(value: UDim2, factor: number): UDim2
+	return UDim2.new(value.X.Scale * factor, value.X.Offset * factor, value.Y.Scale * factor, value.Y.Offset * factor)
+end
+
+local function findChild(parent: Instance?, childName: string, recursive: boolean?): Instance?
+	return if parent then parent:FindFirstChild(childName, recursive == true) else nil
+end
+
+local function findFirstGuiObject(parent: Instance?, childName: string): GuiObject?
+	local child = findChild(parent, childName, true)
+	return if child and child:IsA("GuiObject") then child else nil
+end
+
+local function findFirstTextLabel(parent: Instance?, childName: string): TextLabel?
+	local child = findChild(parent, childName, true)
+	return if child and child:IsA("TextLabel") then child else nil
+end
+
+local function getDefaultSize(button: GuiObject): UDim2
+	local value = button:GetAttribute("defaultSize")
+	return if typeof(value) == "UDim2" then value else button.Size
+end
+
+local function findButtonControls(button: ImageButton): Instance?
+	local parent = button.Parent
+	if parent then
+		local controls = parent:FindFirstChild("ButtonControls")
+		if controls then
+			return controls
+		end
+	end
+
+	local hud = button:FindFirstAncestor("HUD") or button:FindFirstAncestor("ScreenGui")
+	return findChild(hud, "ButtonControls", true)
+end
+
+local function findExplodeEffect(button: ImageButton): ImageLabel?
+	local controls = findButtonControls(button)
+	local template = findChild(controls, "Flipbook", true)
+	return if template and template:IsA("ImageLabel") then template else nil
+end
+
+local function findCooldownEffect(button: ImageButton): Frame?
+	local controls = findButtonControls(button)
+	local template = findChild(controls, "CooldownEffect", true)
+	return if template and template:IsA("Frame") then template else nil
+end
+
+local function setGuiTransparency(guiObject: GuiObject?, value: number, tween: boolean)
+	if not guiObject then
+		return
+	end
+
+	if guiObject:IsA("ImageLabel") or guiObject:IsA("ImageButton") then
+		local properties = { ImageTransparency = value }
+		if tween then
+			TweenService:Create(guiObject, FADE_TWEEN, properties):Play()
+		else
+			guiObject.ImageTransparency = value
+		end
+	elseif guiObject:IsA("TextLabel") or guiObject:IsA("TextButton") then
+		local properties = { TextTransparency = value }
+		if tween then
+			TweenService:Create(guiObject, FADE_TWEEN, properties):Play()
+		else
+			guiObject.TextTransparency = value
+		end
+	else
+		local properties = { BackgroundTransparency = value }
+		if tween then
+			TweenService:Create(guiObject, FADE_TWEEN, properties):Play()
+		else
+			guiObject.BackgroundTransparency = value
+		end
+	end
+end
+
+local function findCooldownGradient(cover: GuiObject?): UIGradient?
+	if not cover then
+		return nil
+	end
+
+	local gradient = cover:FindFirstChildWhichIsA("UIGradient", true)
+	if gradient then
+		return gradient
+	end
+
+	local fillTimer = cover:FindFirstAncestor("FillTimer")
+	if fillTimer then
+		return fillTimer:FindFirstChildWhichIsA("UIGradient", true)
+	end
+
+	return nil
+end
+
+local function setCooldownCoverVisual(cover: GuiObject?, visible: boolean, progress: number)
+	if not cover then
+		return
+	end
+
+	cover.Visible = visible
+	cover.BackgroundTransparency = 1
+	if cover:IsA("ImageLabel") or cover:IsA("ImageButton") then
+		cover.ImageTransparency = if visible then 0.25 else 1
+	end
+
+	local gradient = findCooldownGradient(cover)
+	if gradient then
+		gradient.Offset = Vector2.new(0, math.clamp(progress, 0, 1) - 0.5)
+	end
+end
+
+local function updateCircleMeter(visual: ButtonVisual, progress: number)
+	progress = math.clamp(progress, 0, 1)
+	if visual.progressValue then
+		visual.progressValue.Value = progress
+	end
+	if visual.rightGradient then
+		visual.rightGradient.Rotation = math.clamp(progress * 360, 0, 180)
+	end
+	if visual.leftGradient then
+		visual.leftGradient.Rotation = math.clamp(progress * 360, 180, 360)
+	end
+end
+
+local function playFlipbook(visual: ButtonVisual)
+	local template = visual.explodeEffect
+	local keybind = findChild(visual.button, "Keybind")
+	if not (template and keybind and keybind:IsA("ImageLabel")) then
+		return
+	end
+
+	local clone = template:Clone()
+	clone.Parent = visual.button
+	clone.ImageColor3 = keybind.ImageColor3
+
+	local playSprite = clone:FindFirstChild("PlaySprite")
+	if playSprite and playSprite:IsA("LocalScript") then
+		playSprite.Enabled = true
+	end
+
+	task.delay(FLIPBOOK_LIFETIME, function()
+		if clone.Parent then
+			clone:Destroy()
+		end
+	end)
+end
+
+local function playCooldownFinishedEffect(visual: ButtonVisual)
+	local template = visual.cooldownEffect
+	local keybind = findChild(visual.button, "Keybind")
+	if not (template and keybind and keybind:IsA("ImageLabel")) then
+		return
+	end
+
+	local clone = template:Clone()
+	clone.Parent = visual.button
+	clone.Size = UDim2.fromScale(0, 0)
+	clone.BackgroundTransparency = 0
+	clone.BackgroundColor3 = keybind.ImageColor3
+
+	local stroke = clone:FindFirstChildWhichIsA("UIStroke")
+	if stroke then
+		stroke.Color = keybind.ImageColor3
+		stroke.Transparency = 0
+	end
+
+	TweenService:Create(clone, TweenInfo.new(0.2, Enum.EasingStyle.Quad), {
+		Size = UDim2.fromScale(1.1, 1.1),
+		BackgroundTransparency = 1,
+	}):Play()
+
+	if stroke then
+		TweenService:Create(stroke, TweenInfo.new(0.4, Enum.EasingStyle.Quad), {
+			Thickness = 0,
+			Transparency = 1,
+		}):Play()
+	end
+
+	task.delay(0.3, function()
+		if clone.Parent then
+			clone:Destroy()
+		end
+	end)
+end
+
+local function setButtonSize(visual: ButtonVisual, size: UDim2)
+	TweenService:Create(visual.button, SIZE_TWEEN, {
+		Size = size,
+	}):Play()
+end
+
+local function cancelTween(tween: Tween?)
+	if tween then
+		tween:Cancel()
+	end
+end
+
+local function getRestingSize(visual: ButtonVisual): UDim2
+	return if visual.hovering then scaleUDim2(visual.normalSize, 1.1) else visual.normalSize
+end
+
+local function stopHeldVisual(visual: ButtonVisual)
+	if not visual.held and not (visual.heldGrowTween or visual.heldPulseTween or visual.heldColorTween) then
+		return
+	end
+
+	visual.held = false
+	visual.heldAbilityId = ""
+	visual.heldSerial += 1
+	cancelTween(visual.heldGrowTween)
+	cancelTween(visual.heldPulseTween)
+	cancelTween(visual.heldColorTween)
+	visual.heldGrowTween = nil
+	visual.heldPulseTween = nil
+	visual.heldColorTween = nil
+
+	if visual.button.Parent and not visual.onCooldown then
+		TweenService:Create(visual.button, SIZE_TWEEN, {
+			Size = getRestingSize(visual),
+			ImageColor3 = READY_COLOR,
+		}):Play()
+	end
+end
+
+local function startHeldVisual(visual: ButtonVisual)
+	if visual.held or visual.onCooldown or getEquippedAbilityId(visual.slot) == "" then
+		return
+	end
+
+	visual.held = true
+	visual.heldAbilityId = getEquippedAbilityId(visual.slot)
+	visual.heldSerial += 1
+	local serial = visual.heldSerial
+	cancelTween(visual.heldGrowTween)
+	cancelTween(visual.heldPulseTween)
+	cancelTween(visual.heldColorTween)
+
+	local heldSize = scaleUDim2(visual.normalSize, HELD_SCALE)
+	local pulseSize = scaleUDim2(visual.normalSize, HELD_PULSE_SCALE)
+
+	visual.heldGrowTween = TweenService:Create(visual.button, HELD_GROW_TWEEN, {
+		Size = heldSize,
+		ImageColor3 = HELD_COLOR,
+	})
+	visual.heldGrowTween.Completed:Once(function()
+		if serial ~= visual.heldSerial or not visual.held or visual.onCooldown or not visual.button.Parent then
+			return
+		end
+
+		visual.heldPulseTween = TweenService:Create(visual.button, HELD_PULSE_TWEEN, {
+			Size = pulseSize,
+		})
+		visual.heldPulseTween:Play()
+	end)
+	visual.heldGrowTween:Play()
+
+	visual.heldColorTween = TweenService:Create(visual.button, FADE_TWEEN, {
+		ImageColor3 = HELD_COLOR,
+	})
+	visual.heldColorTween:Play()
+end
+
+local function setButtonCooldownState(
+	visual: ButtonVisual,
+	abilityId: string,
+	remaining: number,
+	cooldown: number,
+	authoritative: boolean
+)
+	local button = visual.button
+	local onCooldown = abilityId ~= "" and remaining > 0 and cooldown > 0
+	local progress = if onCooldown then math.clamp(remaining / math.max(cooldown, 0.001), 0, 1) else 0
+	if visual.held and visual.heldAbilityId ~= abilityId then
+		stopHeldVisual(visual)
+	end
+
+	if onCooldown and not visual.onCooldown then
+		stopHeldVisual(visual)
+		visual.cooldownAuthoritative = authoritative
+		visual.cooldownAbilityId = abilityId
+		visual.cooldownEndsAt = getServerTime() + remaining
+		visual.cooldownDuration = cooldown
+		button:SetAttribute("OnCooldown", true)
+		TweenService:Create(button, SIZE_TWEEN, {
+			Size = scaleUDim2(getDefaultSize(button), 0.9),
+			ImageColor3 = READY_COLOR,
+		}):Play()
+		setGuiTransparency(visual.keybindCover, 0.25, true)
+		playFlipbook(visual)
+	elseif not onCooldown and visual.onCooldown then
+		local shouldPlayCooldownEffect = visual.cooldownAuthoritative
+		visual.cooldownAuthoritative = false
+		visual.cooldownAbilityId = ""
+		visual.cooldownEndsAt = 0
+		visual.cooldownDuration = 0
+		button:SetAttribute("OnCooldown", false)
+		setButtonSize(visual, if visual.hovering then scaleUDim2(visual.normalSize, 1.1) else visual.normalSize)
+		setGuiTransparency(visual.keybindCover, 1, true)
+		if shouldPlayCooldownEffect then
+			playCooldownFinishedEffect(visual)
+		end
+	elseif onCooldown then
+		visual.cooldownAuthoritative = visual.cooldownAuthoritative or authoritative
+		visual.cooldownEndsAt = getServerTime() + remaining
+		visual.cooldownDuration = cooldown
+	elseif abilityId == "" then
+		stopHeldVisual(visual)
+	end
+
+	visual.onCooldown = onCooldown
+	setCooldownCoverVisual(visual.cooldownCover, onCooldown, progress)
+	updateCircleMeter(visual, progress)
+	if visual.progressLabel then
+		visual.progressLabel.Text = if onCooldown then string.format("%.1fs", remaining) else ""
+	end
+end
+
+local function createButtonVisual(slot: string, button: ImageButton): ButtonVisual
+	button:SetAttribute("defaultSize", button.Size)
+	button.AutoButtonColor = false
+
+	local cooldownCover = findFirstGuiObject(button, "CooldownCover")
+	local keybind = findChild(button, "Keybind")
+	local keybindCover = findFirstGuiObject(keybind, "CooldownCover")
+	local roundMeter = findChild(button, "RoundMeter", true) or findChild(button, "FillTimer", true) or button
+	local leftCircle = findChild(roundMeter, "LHalf", true)
+	local rightCircle = findChild(roundMeter, "RHalf", true)
+	leftCircle = findChild(leftCircle, "Circle", true) or findChild(button, "LeftCircle", true)
+	rightCircle = findChild(rightCircle, "Circle", true) or findChild(button, "RightCircle", true)
+	local progressValue = findChild(roundMeter, "Progress", true)
+
+	return {
+		button = button,
+		slot = slot,
+		normalSize = button.Size,
+		hovering = false,
+		pressing = false,
+		held = false,
+		heldAbilityId = "",
+		heldSerial = 0,
+		heldGrowTween = nil,
+		heldPulseTween = nil,
+		heldColorTween = nil,
+		onCooldown = false,
+		cooldownAuthoritative = false,
+		cooldownAbilityId = "",
+		cooldownEndsAt = 0,
+		cooldownDuration = 0,
+		cooldownCover = cooldownCover,
+		keybindCover = keybindCover,
+		progressValue = if progressValue and progressValue:IsA("NumberValue") then progressValue else nil,
+		progressLabel = findFirstTextLabel(roundMeter, "ProgressLabel")
+			or findFirstTextLabel(button, "CooldownLabel")
+			or findFirstTextLabel(button, "TimerLabel"),
+		leftGradient = if leftCircle then leftCircle:FindFirstChildWhichIsA("UIGradient", true) else nil,
+		rightGradient = if rightCircle then rightCircle:FindFirstChildWhichIsA("UIGradient", true) else nil,
+		explodeEffect = findExplodeEffect(button),
+		cooldownEffect = findCooldownEffect(button),
+	}
+end
+
+local function getEffectiveCooldown(
+	slot: string,
+	abilityId: string,
+	definition: AbilityDefinition?,
+	slotState: AbilitySlotState?
+): (number, number, boolean)
+	local cooldown = getDefinitionCooldown(definition)
+	local serverRemaining = getCooldownRemaining(slotState)
+	if serverRemaining > 0 then
+		AbilityController._predictedCooldowns[slot] = nil
+		return serverRemaining, cooldown, true
+	end
+
+	local predicted = AbilityController._predictedCooldowns[slot]
+	local currentTime = getServerTime()
+	if predicted and predicted.abilityId == abilityId and predicted.endsAt > currentTime and predicted.expiresAt > currentTime then
+		return predicted.endsAt - currentTime, predicted.duration, false
+	end
+
+	if predicted then
+		AbilityController._predictedCooldowns[slot] = nil
+	end
+	return 0, cooldown, false
+end
+
 local function publishDebugState()
 	LocalPlayer:SetAttribute("AbilityController_Loaded", AbilityController.Loaded)
 	for _, slot in ipairs(AbilityConfig.SlotOrder) do
@@ -146,35 +583,56 @@ local function publishDebugState()
 	end
 end
 
-local function setCooldownCover(button: ImageButton, visible: boolean, progress: number)
-	local cover = button:FindFirstChild("CooldownCover")
-	if cover and cover:IsA("GuiObject") then
-		cover.Visible = visible
-		cover.BackgroundTransparency = 1
-		if cover:IsA("ImageLabel") or cover:IsA("ImageButton") then
-			cover.ImageTransparency = if visible then math.clamp(0.18 + (progress * 0.55), 0, 1) else 1
-		end
-	end
-
-	button:SetAttribute("OnCooldown", visible)
-end
-
 function AbilityController:_disconnectButtons()
+	for _, visual in pairs(self._buttonVisuals) do
+		stopHeldVisual(visual)
+	end
 	for _, connection in ipairs(self._buttonConnections) do
 		connection:Disconnect()
 	end
 	self._buttonConnections = {}
 	self._buttons = {}
+	self._buttonVisuals = {}
+end
+
+function AbilityController:_setSlotHeld(slot: string, held: boolean)
+	local visual = self._buttonVisuals[slot]
+	if not visual then
+		return
+	end
+
+	visual.pressing = held
+	if held then
+		startHeldVisual(visual)
+	else
+		stopHeldVisual(visual)
+	end
 end
 
 function AbilityController:_bindButton(slot: string, button: ImageButton)
 	self._buttons[slot] = button
+	local visual = createButtonVisual(slot, button)
+	self._buttonVisuals[slot] = visual
+
+	table.insert(self._buttonConnections, button.MouseEnter:Connect(function()
+		visual.hovering = true
+		if not visual.onCooldown then
+			setButtonSize(visual, scaleUDim2(visual.normalSize, 1.1))
+		end
+	end))
+	table.insert(self._buttonConnections, button.MouseLeave:Connect(function()
+		visual.hovering = false
+		if not visual.onCooldown and not visual.held then
+			setButtonSize(visual, visual.normalSize)
+		end
+	end))
 	table.insert(self._buttonConnections, button.InputBegan:Connect(function(inputObject: InputObject)
 		if
 			inputObject.UserInputType == Enum.UserInputType.MouseButton1
 			or inputObject.UserInputType == Enum.UserInputType.Touch
 			or inputObject.KeyCode == Enum.KeyCode.ButtonA
 		then
+			self:_setSlotHeld(slot, true)
 			self:ActivateSlot(slot, Enum.UserInputState.Begin, inputObject)
 		end
 	end))
@@ -184,6 +642,7 @@ function AbilityController:_bindButton(slot: string, button: ImageButton)
 			or inputObject.UserInputType == Enum.UserInputType.Touch
 			or inputObject.KeyCode == Enum.KeyCode.ButtonA
 		then
+			self:_setSlotHeld(slot, false)
 			self:ActivateSlot(slot, Enum.UserInputState.End, inputObject)
 		end
 	end))
@@ -219,9 +678,7 @@ function AbilityController:_updateButtons()
 		local abilityId = getEquippedAbilityId(slot)
 		local definition = AbilityConfig.GetDefinition(abilityId)
 		local slotState = getSlotState(slot)
-		local remaining = getCooldownRemaining(slotState)
-		local cooldown = if definition and typeof(definition.cooldownSeconds) == "number" then definition.cooldownSeconds else 0
-		local progress = if cooldown > 0 then math.clamp(remaining / cooldown, 0, 1) else 0
+		local remaining, cooldown, authoritative = getEffectiveCooldown(slot, abilityId, definition, slotState)
 		local icon = button:FindFirstChild("Icon")
 		if icon and (icon:IsA("ImageLabel") or icon:IsA("ImageButton")) then
 			local image = if definition and typeof(definition.icon) == "string" then definition.icon else ""
@@ -233,7 +690,10 @@ function AbilityController:_updateButtons()
 		button:SetAttribute("AbilityId", abilityId)
 		button:SetAttribute("CooldownRemaining", remaining)
 		button:SetAttribute("AbilityDisplayName", if definition then definition.displayName else "")
-		setCooldownCover(button, remaining > 0, progress)
+		local visual = self._buttonVisuals[slot]
+		if visual then
+			setButtonCooldownState(visual, abilityId, remaining, cooldown, authoritative)
+		end
 	end
 end
 
@@ -309,6 +769,11 @@ function AbilityController:_bindInputs()
 					or inputState == Enum.UserInputState.End
 					or inputState == Enum.UserInputState.Cancel
 				then
+					if inputState == Enum.UserInputState.Begin then
+						self:_setSlotHeld(slot, true)
+					else
+						self:_setSlotHeld(slot, false)
+					end
 					self:ActivateSlot(slot, inputState, inputObject)
 				end
 				return Enum.ContextActionResult.Pass
@@ -342,7 +807,28 @@ function AbilityController:SendMessage(slot: string, messageType: string, payloa
 		payload = payload,
 		clientSequence = self._clientSequence,
 	})
+	if messageType == ACTIVATE_MESSAGE then
+		self:_predictCooldown(slot, abilityId)
+	end
 	return true
+end
+
+function AbilityController:_predictCooldown(slot: string, abilityId: string)
+	local definition = AbilityConfig.GetDefinition(abilityId)
+	local cooldown = getDefinitionCooldown(definition)
+	if cooldown <= 0 then
+		return
+	end
+
+	local currentTime = getServerTime()
+	self._predictedCooldowns[slot] = {
+		abilityId = abilityId,
+		startedAt = currentTime,
+		endsAt = currentTime + cooldown,
+		duration = cooldown,
+		expiresAt = currentTime + PREDICTION_TIMEOUT_SECONDS,
+	}
+	self:_updateButtons()
 end
 
 function AbilityController:ActivateSlot(slot: string, inputState: Enum.UserInputState?, inputObject: InputObject?): boolean

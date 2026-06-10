@@ -7,6 +7,7 @@ export type AbilityResultKind =
 	| "Absorb"
 	| "DestroyProjectile"
 	| "ExplodeProjectile"
+	| "AttachProjectile"
 	| "ModifyDamage"
 	| "DeferProjectile"
 	| "RedirectProjectile"
@@ -23,6 +24,7 @@ AbilityResult.Kind = table.freeze({
 	Absorb = "Absorb",
 	DestroyProjectile = "DestroyProjectile",
 	ExplodeProjectile = "ExplodeProjectile",
+	AttachProjectile = "AttachProjectile",
 	ModifyDamage = "ModifyDamage",
 	DeferProjectile = "DeferProjectile",
 	RedirectProjectile = "RedirectProjectile",

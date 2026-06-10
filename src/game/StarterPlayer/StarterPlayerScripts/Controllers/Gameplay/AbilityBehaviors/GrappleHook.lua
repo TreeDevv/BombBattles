@@ -18,11 +18,14 @@ type GrappleVisual = {
 	anchorAttachment: Attachment?,
 	muzzleProxyPart: BasePart?,
 	anchorPart: BasePart?,
+	anchorInstance: Instance?,
 	beam: Beam?,
 	spring: SpringConstraint?,
 	tween: Tween?,
 	tweens: { Tween },
 	followConnection: RBXScriptConnection?,
+	pivotConnection: RBXScriptConnection?,
+	pivotValue: CFrameValue?,
 	targetAttachmentParent: BasePart?,
 	anchorFollowsTarget: boolean,
 	travelStartedAt: number,
@@ -34,11 +37,17 @@ type ActivePlayerPull = {
 	sessionId: number,
 	rootPart: BasePart,
 	anchorPosition: Vector3,
+	hitNormal: Vector3?,
 	startedAt: number,
 	maxDuration: number,
 	arrivalDistance: number,
 	pullSpeed: number,
 	upwardBias: number,
+	releaseUpwardVelocity: number,
+	releaseWallKickSpeed: number,
+	releaseWallKickMaxDistance: number,
+	releaseWallKickIntoWallDot: number,
+	airControlMinAirTime: number,
 	maxRange: number,
 	connection: RBXScriptConnection?,
 	visual: GrappleVisual?,
@@ -148,6 +157,59 @@ local function getRootPartFromInstance(instance: Instance?): BasePart?
 	return nil
 end
 
+local function getByPath(root: Instance, path: { string }): Instance?
+	local current: Instance? = root
+	for _, name in ipairs(path) do
+		if not current then
+			return nil
+		end
+		current = current:FindFirstChild(name)
+	end
+	return current
+end
+
+local function getHookTemplate(definition: AbilityDefinition?): Instance?
+	local path = definition and definition.assetPath
+	if typeof(path) ~= "table" then
+		return nil
+	end
+
+	local template = getByPath(ReplicatedStorage, path)
+	if template and (template:IsA("Model") or template:IsA("BasePart")) then
+		return template
+	end
+	return nil
+end
+
+local function getBaseParts(root: Instance): { BasePart }
+	local parts = {}
+	if root:IsA("BasePart") then
+		table.insert(parts, root)
+	end
+
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			table.insert(parts, descendant)
+		end
+	end
+	return parts
+end
+
+local function pivotTo(instance: Instance, cframe: CFrame)
+	if instance:IsA("Model") then
+		instance:PivotTo(cframe)
+	elseif instance:IsA("BasePart") then
+		instance.CFrame = cframe
+	end
+end
+
+local function getHookCFrame(position: Vector3, direction: Vector3): CFrame
+	if direction.Magnitude < 0.05 then
+		return CFrame.new(position)
+	end
+	return CFrame.lookAt(position, position + direction.Unit)
+end
+
 local function getMouseRay(): (Vector3?, Vector3?)
 	local camera = workspace.CurrentCamera
 	if not camera then
@@ -196,6 +258,12 @@ local function destroyVisual(visual: GrappleVisual?)
 	if visual.followConnection then
 		visual.followConnection:Disconnect()
 	end
+	if visual.pivotConnection then
+		visual.pivotConnection:Disconnect()
+	end
+	if visual.pivotValue then
+		visual.pivotValue:Destroy()
+	end
 	for _, tween in ipairs(visual.tweens) do
 		tween:Cancel()
 	end
@@ -212,7 +280,9 @@ local function destroyVisual(visual: GrappleVisual?)
 	if visual.muzzleProxyPart and visual.muzzleProxyPart.Parent then
 		visual.muzzleProxyPart:Destroy()
 	end
-	if visual.anchorPart and visual.anchorPart.Parent then
+	if visual.anchorInstance and visual.anchorInstance.Parent then
+		visual.anchorInstance:Destroy()
+	elseif visual.anchorPart and visual.anchorPart.Parent then
 		visual.anchorPart:Destroy()
 	end
 end
@@ -228,6 +298,64 @@ local function playTrackedTween(visual: GrappleVisual, instance: Instance, tween
 	end)
 	tween:Play()
 	return tween
+end
+
+local function clearPivotTween(visual: GrappleVisual)
+	if visual.pivotConnection then
+		visual.pivotConnection:Disconnect()
+		visual.pivotConnection = nil
+	end
+	if visual.pivotValue then
+		visual.pivotValue:Destroy()
+		visual.pivotValue = nil
+	end
+end
+
+local function tweenAnchorTo(visual: GrappleVisual, targetCFrame: CFrame, tweenInfo: TweenInfo): Tween?
+	local anchorInstance = visual.anchorInstance
+	if not (anchorInstance and anchorInstance.Parent) then
+		return nil
+	end
+
+	if visual.tween then
+		visual.tween:Cancel()
+		visual.tween = nil
+	end
+	clearPivotTween(visual)
+
+	if anchorInstance:IsA("BasePart") then
+		local tween = TweenService:Create(anchorInstance, tweenInfo, {
+			CFrame = targetCFrame,
+		})
+		visual.tween = tween
+		tween:Play()
+		return tween
+	end
+
+	if anchorInstance:IsA("Model") then
+		local pivotValue = Instance.new("CFrameValue")
+		pivotValue.Value = anchorInstance:GetPivot()
+		visual.pivotValue = pivotValue
+		visual.pivotConnection = pivotValue:GetPropertyChangedSignal("Value"):Connect(function()
+			if anchorInstance.Parent then
+				anchorInstance:PivotTo(pivotValue.Value)
+			end
+		end)
+
+		local tween = TweenService:Create(pivotValue, tweenInfo, {
+			Value = targetCFrame,
+		})
+		visual.tween = tween
+		tween.Completed:Connect(function()
+			if visual.pivotValue == pivotValue then
+				clearPivotTween(visual)
+			end
+		end)
+		tween:Play()
+		return tween
+	end
+
+	return nil
 end
 
 local function beginSpringTautOnLand(visual: GrappleVisual?, definition: AbilityDefinition, onTaut: (() -> ())?)
@@ -289,6 +417,7 @@ local function createVisual(
 	local color = getDefinitionColor(definition, "beamColor", Color3.fromRGB(103, 229, 255))
 	local anchorColor = getDefinitionColor(definition, "anchorColor", Color3.fromRGB(133, 245, 255))
 	local anchorSize = math.max(getDefinitionNumber(definition, "anchorMarkerSize", 0.62), 0.1)
+	local travelDirection = endPosition - startPosition
 
 	local muzzleProxyPart = Instance.new("Part")
 	muzzleProxyPart.Name = "GrappleHookMuzzleProxy"
@@ -309,8 +438,38 @@ local function createVisual(
 	local anchorPart = nil :: BasePart?
 	local anchorAttachment = Instance.new("Attachment")
 	anchorAttachment.Name = "GrappleHookAnchorAttachment"
+	local anchorInstance = nil :: Instance?
+	local hookTemplate = getHookTemplate(definition)
+	if hookTemplate then
+		local hookClone = hookTemplate:Clone()
+		hookClone.Name = "GrappleHookAnchor"
+		anchorPart = getRootPartFromInstance(hookClone)
+		if anchorPart then
+			for _, part in ipairs(getBaseParts(hookClone)) do
+				part.Anchored = true
+				part.CanCollide = false
+				part.CanQuery = false
+				part.CanTouch = false
+				part.CastShadow = false
+			end
+			pivotTo(hookClone, getHookCFrame(startPosition, travelDirection))
+			hookClone.Parent = folder
+			anchorInstance = hookClone
 
-	if targetAttachmentParent then
+			local coilAttachment = hookClone:FindFirstChild("Coil", true)
+			if coilAttachment and coilAttachment:IsA("Attachment") then
+				anchorAttachment = coilAttachment
+			else
+				anchorAttachment.Parent = anchorPart
+			end
+		else
+			hookClone:Destroy()
+		end
+	end
+
+	if anchorInstance then
+		-- Cloned hook asset already provides the visible anchor.
+	elseif targetAttachmentParent then
 		anchorPart = Instance.new("Part")
 		anchorPart.Name = "GrappleHookTargetProxy"
 		anchorPart.Anchored = true
@@ -322,6 +481,7 @@ local function createVisual(
 		anchorPart.Size = Vector3.new(0.12, 0.12, 0.12)
 		anchorPart.CFrame = CFrame.new(startPosition)
 		anchorPart.Parent = folder
+		anchorInstance = anchorPart
 		anchorAttachment.Parent = anchorPart
 	else
 		anchorPart = Instance.new("Part")
@@ -338,6 +498,7 @@ local function createVisual(
 		anchorPart.Size = Vector3.new(anchorSize, anchorSize, anchorSize)
 		anchorPart.CFrame = CFrame.new(startPosition)
 		anchorPart.Parent = folder
+		anchorInstance = anchorPart
 		anchorAttachment.Parent = anchorPart
 	end
 
@@ -375,11 +536,14 @@ local function createVisual(
 		anchorAttachment = anchorAttachment,
 		muzzleProxyPart = muzzleProxyPart,
 		anchorPart = anchorPart,
+		anchorInstance = anchorInstance,
 		beam = beam,
 		spring = spring,
 		tween = nil,
 		tweens = {},
 		followConnection = nil,
+		pivotConnection = nil,
+		pivotValue = nil,
 		targetAttachmentParent = targetAttachmentParent,
 		anchorFollowsTarget = false,
 		travelStartedAt = os.clock(),
@@ -395,8 +559,8 @@ local function createVisual(
 			return
 		end
 		if targetAttachmentParent and anchorPart and visual.anchorFollowsTarget then
-			if targetAttachmentParent.Parent and anchorPart.Parent then
-				anchorPart.CFrame = targetAttachmentParent.CFrame
+			if targetAttachmentParent.Parent and anchorPart.Parent and anchorInstance and anchorInstance.Parent then
+				pivotTo(anchorInstance, targetAttachmentParent.CFrame)
 			else
 				destroyVisual(visual)
 			end
@@ -408,11 +572,11 @@ local function createVisual(
 		local speed = math.max(getDefinitionNumber(definition, "projectileSpeed", 375), 1)
 		local travelTime = math.clamp(distance / speed, 0.04, getDefinitionNumber(definition, "hookTravelMaxSeconds", 0.65))
 		visual.travelDuration = travelTime
-		local tween = TweenService:Create(anchorPart, TweenInfo.new(travelTime, Enum.EasingStyle.Linear), {
-			CFrame = CFrame.new(endPosition),
-		})
-		visual.tween = tween
-		tween:Play()
+		tweenAnchorTo(
+			visual,
+			getHookCFrame(endPosition, travelDirection),
+			TweenInfo.new(travelTime, Enum.EasingStyle.Linear)
+		)
 	end
 
 	return visual
@@ -430,7 +594,13 @@ local function fadeAndDestroyVisual(visual: GrappleVisual?, fadeSeconds: number?
 			Width1 = 0,
 		}):Play()
 	end
-	if visual.anchorPart and visual.anchorPart.Parent then
+	if visual.anchorInstance and visual.anchorInstance.Parent then
+		for _, part in ipairs(getBaseParts(visual.anchorInstance)) do
+			TweenService:Create(part, TweenInfo.new(duration), {
+				Transparency = 1,
+			}):Play()
+		end
+	elseif visual.anchorPart and visual.anchorPart.Parent then
 		TweenService:Create(visual.anchorPart, TweenInfo.new(duration), {
 			Transparency = 1,
 		}):Play()
@@ -480,25 +650,32 @@ local function finishTravelAndTaut(
 		visual.tween:Cancel()
 		visual.tween = nil
 	end
+	clearPivotTween(visual)
 
 	local elapsed = os.clock() - visual.travelStartedAt
 	local remainingTravel = math.max(visual.travelDuration - elapsed, 0)
+	local direction = anchorPosition - anchorPart.Position
 	if remainingTravel <= 0.01 then
-		anchorPart.CFrame = CFrame.new(anchorPosition)
+		local anchorInstance = visual.anchorInstance or anchorPart
+		pivotTo(anchorInstance, getHookCFrame(anchorPosition, direction))
 		tauten()
 		return
 	end
 
-	local tween = TweenService:Create(anchorPart, TweenInfo.new(remainingTravel, Enum.EasingStyle.Linear), {
-		CFrame = CFrame.new(anchorPosition),
-	})
-	visual.tween = tween
-	tween.Completed:Connect(function(playbackState)
-		if playbackState == Enum.PlaybackState.Completed and not visual.destroyed then
-			tauten()
-		end
-	end)
-	tween:Play()
+	local tween = tweenAnchorTo(
+		visual,
+		getHookCFrame(anchorPosition, direction),
+		TweenInfo.new(remainingTravel, Enum.EasingStyle.Linear)
+	)
+	if tween then
+		tween.Completed:Connect(function(playbackState)
+			if playbackState == Enum.PlaybackState.Completed and not visual.destroyed then
+				tauten()
+			end
+		end)
+	else
+		tauten()
+	end
 end
 
 local function applyConfirmedTravelTime(visual: GrappleVisual?, payload)
@@ -508,6 +685,64 @@ local function applyConfirmedTravelTime(visual: GrappleVisual?, payload)
 	local travelTime = payload.travelTime
 	if typeof(travelTime) == "number" and travelTime > 0 then
 		visual.travelDuration = math.max(travelTime, 0.04)
+	end
+end
+
+local function getPayloadNormal(payload): Vector3?
+	if typeof(payload) ~= "table" or typeof(payload.hitNormal) ~= "Vector3" then
+		return nil
+	end
+
+	local normal = payload.hitNormal
+	if normal.Magnitude < 0.05 then
+		return nil
+	end
+	return normal.Unit
+end
+
+local function shouldApplyWallKick(active: ActivePlayerPull, rootPart: BasePart): boolean
+	local normal = active.hitNormal
+	if not normal then
+		return false
+	end
+	if active.releaseWallKickSpeed <= 0 or active.releaseWallKickMaxDistance <= 0 then
+		return false
+	end
+
+	local toAnchor = active.anchorPosition - rootPart.Position
+	if toAnchor.Magnitude > active.releaseWallKickMaxDistance or toAnchor.Magnitude < 0.05 then
+		return false
+	end
+
+	local intoWallDot = -toAnchor.Unit:Dot(normal)
+	return intoWallDot >= active.releaseWallKickIntoWallDot
+end
+
+local function applyReleaseBoost(active: ActivePlayerPull, reason: string?)
+	if reason == "Restart" then
+		return
+	end
+
+	local rootPart = active.rootPart
+	local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+	if not (rootPart.Parent and humanoid and humanoid.Health > 0) then
+		return
+	end
+
+	local targetVelocity = math.max(active.releaseUpwardVelocity, 0)
+	local currentVelocity = rootPart.AssemblyLinearVelocity
+	local upwardDelta = math.max(targetVelocity - currentVelocity.Y, 0)
+	local velocityDelta = Vector3.yAxis * upwardDelta
+
+	local normal = active.hitNormal
+	if normal and shouldApplyWallKick(active, rootPart) then
+		local outwardDelta = math.max(active.releaseWallKickSpeed - currentVelocity:Dot(normal), 0)
+		velocityDelta += normal * outwardDelta
+	end
+
+	if velocityDelta.Magnitude > 0 then
+		rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
+		MovementController:RecordExternalAirControlLaunch("GrappleHook", active.airControlMinAirTime)
 	end
 end
 
@@ -521,6 +756,7 @@ local function cancelActivePull(sendCancel: boolean, reason: string?)
 		if active.connection then
 			active.connection:Disconnect()
 		end
+		applyReleaseBoost(active, reason)
 		fadeAndDestroyVisual(active.visual)
 		if sendCancel then
 			-- AbilityController is not globally stored in the behavior; cancellation is sent from callers.
@@ -591,18 +827,25 @@ local function startPlayerPull(sessionId: number, anchorPosition: Vector3, paylo
 	end
 
 	if visual and visual.anchorPart then
-		visual.anchorPart.CFrame = CFrame.new(anchorPosition)
+		local anchorInstance = visual.anchorInstance or visual.anchorPart
+		pivotTo(anchorInstance, getHookCFrame(anchorPosition, anchorPosition - rootPart.Position))
 	end
 
 	local active: ActivePlayerPull = {
 		sessionId = sessionId,
 		rootPart = rootPart,
 		anchorPosition = anchorPosition,
+		hitNormal = getPayloadNormal(payload),
 		startedAt = os.clock(),
 		maxDuration = math.max(tonumber(payload.playerMaxPullTime) or getDefinitionNumber(definition, "playerMaxPullTime", 1.5), 0.05),
 		arrivalDistance = math.max(tonumber(payload.playerArrivalDistance) or getDefinitionNumber(definition, "playerArrivalDistance", 7), 1),
 		pullSpeed = math.max(tonumber(payload.playerPullSpeed) or getDefinitionNumber(definition, "playerPullSpeed", 120), 1),
 		upwardBias = tonumber(payload.playerUpwardBias) or getDefinitionNumber(definition, "playerUpwardBias", 22),
+		releaseUpwardVelocity = getDefinitionNumber(definition, "releaseUpwardVelocity", 48),
+		releaseWallKickSpeed = getDefinitionNumber(definition, "releaseWallKickSpeed", 26),
+		releaseWallKickMaxDistance = getDefinitionNumber(definition, "releaseWallKickMaxDistance", 10),
+		releaseWallKickIntoWallDot = getDefinitionNumber(definition, "releaseWallKickIntoWallDot", 0.35),
+		airControlMinAirTime = getDefinitionNumber(definition, "airControlMinAirTime", 0.2),
 		maxRange = math.max(tonumber(payload.maxRange) or getDefinitionNumber(definition, "maxRange", 350), 1),
 		connection = nil,
 		visual = visual,

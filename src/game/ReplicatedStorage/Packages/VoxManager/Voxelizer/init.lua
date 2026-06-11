@@ -281,7 +281,8 @@ local function subdivideAABB(
 	minSize: number,
 	targetCFrame: CFrame,
 	terrainConfig,
-	sourceInfo
+	sourceInfo,
+	options
 )
 	local remainingBlocks = {}
 	local removedBlocks = {}
@@ -295,7 +296,9 @@ local function subdivideAABB(
 
 	if isTerminal then
 		local block = { center = aabbCenter, size = fullSize }
-		if applyTerrainDamageToBlock(block, targetCFrame, sphereCenterWorld, sphereRadius, terrainConfig, sourceInfo) then
+		if typeof(options) == "table" and options.forceSubtract == true then
+			table.insert(removedBlocks, { center = aabbCenter, size = fullSize })
+		elseif applyTerrainDamageToBlock(block, targetCFrame, sphereCenterWorld, sphereRadius, terrainConfig, sourceInfo) then
 			table.insert(removedBlocks, { center = aabbCenter, size = fullSize })
 		else
 			table.insert(remainingBlocks, { center = aabbCenter, size = fullSize })
@@ -323,7 +326,8 @@ local function subdivideAABB(
 						minSize,
 						targetCFrame,
 						terrainConfig,
-						sourceInfo
+						sourceInfo,
+						options
 					)
 
 				for _, block in ipairs(subRemaining) do
@@ -380,6 +384,26 @@ local function partitionTargetBlocks(targetSize: Vector3, localSphereCenter: Vec
 		center = (impactMin + impactMax) * 0.5,
 		size = impactMax - impactMin,
 	}
+end
+
+local function getEffectiveSubtractRadius(target: BasePart, sphereRadius: number, options): number
+	if typeof(options) ~= "table" or options.forceSubtract ~= true then
+		return sphereRadius
+	end
+
+	local transparentCollisionClearance = options.transparentCollisionClearance
+	if typeof(transparentCollisionClearance) ~= "number" or transparentCollisionClearance <= 0 then
+		return sphereRadius
+	end
+
+	local transparencyThreshold = if typeof(options.transparentCollisionTransparency) == "number"
+		then math.clamp(options.transparentCollisionTransparency, 0, 1)
+		else 0.95
+	if target.Transparency < transparencyThreshold or not (target.CanCollide or target.CanQuery) then
+		return sphereRadius
+	end
+
+	return sphereRadius + transparentCollisionClearance
 end
 
 function VoxDestruct.clearTerrainDebugVisuals()
@@ -466,7 +490,8 @@ function VoxDestruct.octreeMeshSubtraction(
 	local targetSize = target.Size
 
 	local localSphereCenter = targetCFrame:PointToObjectSpace(sphereCenterWorld)
-	local outsideBlocks, impactBlock = partitionTargetBlocks(targetSize, localSphereCenter, sphereRadius)
+	local effectiveSphereRadius = getEffectiveSubtractRadius(target, sphereRadius, options)
+	local outsideBlocks, impactBlock = partitionTargetBlocks(targetSize, localSphereCenter, effectiveSphereRadius)
 	local remainingBlocks = table.clone(outsideBlocks)
 	local removedBlocks = {}
 	local sourceInfo = getSourceInfo(target, generatedVoxelTag, terrainConfig)
@@ -478,11 +503,12 @@ function VoxDestruct.octreeMeshSubtraction(
 				impactBlock.size * 0.5,
 				localSphereCenter,
 				sphereCenterWorld,
-				sphereRadius,
+				effectiveSphereRadius,
 				minSize,
 				targetCFrame,
 				terrainConfig,
-				sourceInfo
+				sourceInfo,
+				options
 			)
 		for _, block in ipairs(impactRemaining) do
 			table.insert(remainingBlocks, block)
@@ -500,6 +526,12 @@ function VoxDestruct.octreeMeshSubtraction(
 		Material = target.Material,
 		Transparency = target.Transparency,
 		Reflectance = target.Reflectance,
+		CanCollide = target.CanCollide,
+		CanTouch = target.CanTouch,
+		CanQuery = target.CanQuery,
+		CollisionGroup = target.CollisionGroup,
+		CastShadow = target.CastShadow,
+		CustomPhysicalProperties = target.CustomPhysicalProperties,
 	}
 
 	local meshedFolder = outputFolder
@@ -539,6 +571,17 @@ function VoxDestruct.octreeMeshSubtraction(
 		part.BottomSurface = Enum.SurfaceType.Smooth
 		part.Transparency = originalInfo.Transparency
 		part.Reflectance = originalInfo.Reflectance
+		part.CanCollide = originalInfo.CanCollide
+		part.CanTouch = originalInfo.CanTouch
+		part.CanQuery = originalInfo.CanQuery
+		part.CastShadow = originalInfo.CastShadow
+		part.CustomPhysicalProperties = originalInfo.CustomPhysicalProperties
+		local collisionGroup = originalInfo.CollisionGroup
+		if typeof(collisionGroup) == "string" and collisionGroup ~= "" then
+			pcall(function()
+				part.CollisionGroup = collisionGroup
+			end)
+		end
 
 		if randomColor then
 			part.BrickColor = BrickColor.Random()

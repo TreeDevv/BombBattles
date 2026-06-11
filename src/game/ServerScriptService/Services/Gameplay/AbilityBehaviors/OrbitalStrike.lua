@@ -20,7 +20,6 @@ type TargetSession = {
 	sessionId: number,
 	slot: string,
 	abilityId: string,
-	expiresAt: number,
 }
 
 local OrbitalStrike = {} :: AbilityTypes.ServerBehavior
@@ -30,6 +29,7 @@ local WARNING_FOLDER_NAME = "Warnings"
 local DAMAGE_ZONE_FOLDER_NAME = "DamageZones"
 local TELEGRAPH_EFFECT = "OrbitalStrikeTelegraph"
 local IMPACT_EFFECT = "OrbitalStrikeImpact"
+local HIT_FLASH_EFFECT = "OrbitalStrikeHitFlash"
 local BEGIN_TARGETING_EFFECT = "OrbitalStrikeBeginTargeting"
 local REJECTED_EFFECT = "OrbitalStrikeRejected"
 local CANCELLED_EFFECT = "OrbitalStrikeCancelled"
@@ -379,7 +379,18 @@ local function getDamageTargets(owner: Player, zone: BasePart, overlapParams: Ov
 	return targets
 end
 
-local function damagePlayers(owner: Player, zone: BasePart, overlapParams: OverlapParams, origin: Vector3, radius: number, damage: number)
+local function damagePlayers(
+	owner: Player,
+	zone: BasePart,
+	overlapParams: OverlapParams,
+	origin: Vector3,
+	radius: number,
+	damage: number,
+	sessionId: number,
+	hitFlashSent: { [Player]: boolean },
+	hitFlashDuration: number,
+	hitFlashTransparency: number
+)
 	if damage <= 0 then
 		return
 	end
@@ -430,6 +441,15 @@ local function damagePlayers(owner: Player, zone: BasePart, overlapParams: Overl
 			sourceId = "OrbitalStrike",
 		})
 		humanoid:TakeDamage(resolvedDamage)
+		if humanoid.Health < healthBefore and not hitFlashSent[target] then
+			hitFlashSent[target] = true
+			fireToPlayer(target, HIT_FLASH_EFFECT, {
+				abilityId = "OrbitalStrike",
+				sessionId = sessionId,
+				durationSeconds = hitFlashDuration,
+				initialTransparency = hitFlashTransparency,
+			})
+		end
 	end
 end
 
@@ -513,6 +533,9 @@ local function startDamageTicks(player: Player, definition: AbilityDefinition, s
 	local tickCount = math.max(math.floor(durationSeconds / tickSeconds + 0.5), 1)
 	local playerTickDamage = math.max(getDefinitionNumber(definition, "totalPlayerDamage", 115), 0) / tickCount
 	local coreTickDamage = math.max(getDefinitionNumber(definition, "totalCoreDamage", 30), 0) / tickCount
+	local hitFlashDuration = math.max(getDefinitionNumber(definition, "blackFlashHitDuration", 3), 0.1)
+	local hitFlashTransparency = math.clamp(getDefinitionNumber(definition, "blackFlashClosestTransparency", 0.3), 0, 1)
+	local hitFlashSent: { [Player]: boolean } = {}
 
 	local zone = createDamageZone(position, radius, topY, bottomY)
 	local overlapParams = OverlapParams.new()
@@ -524,8 +547,21 @@ local function startDamageTicks(player: Player, definition: AbilityDefinition, s
 			if not (zone.Parent and player.Parent == Players and RoundService:IsPlayerActive(player)) then
 				break
 			end
-			damagePlayers(player, zone, overlapParams, position, radius, playerTickDamage)
-			damageCores(player, position, radius, topY, bottomY, coreTickDamage)
+			damagePlayers(
+				player,
+				zone,
+				overlapParams,
+				position,
+				radius,
+				playerTickDamage,
+				sessionId,
+				hitFlashSent,
+				hitFlashDuration,
+				hitFlashTransparency
+			)
+			if coreTickDamage > 0 then
+				damageCores(player, position, radius, topY, bottomY, coreTickDamage)
+			end
 			task.wait(tickSeconds)
 		end
 
@@ -535,15 +571,43 @@ local function startDamageTicks(player: Player, definition: AbilityDefinition, s
 	end)
 end
 
-local function cutTerrainColumn(player: Player, definition: AbilityDefinition, position: Vector3, radius: number, bottomY: number)
-	local depth = math.max(position.Y - bottomY, radius)
-	local step = math.max(radius * getDefinitionNumber(definition, "terrainColumnStepScale", 0.75), 1)
-	DestructionService:DestroyCylinderDown(position, radius, depth, step, {
+local function getTerrainColumnData(definition: AbilityDefinition, position: Vector3, radius: number, bottomY: number)
+	local explosionRadius = math.max(getDefinitionNumber(definition, "terrainOnlyExplosionRadius", radius), 1)
+	local depth = math.max(position.Y - bottomY, explosionRadius)
+	local columnBottomY = position.Y - depth
+	local step = math.max(explosionRadius * getDefinitionNumber(definition, "terrainColumnStepScale", 0.55), 1)
+	local stepCount = math.max(math.floor(depth / step) + 1, 1)
+	if (stepCount - 1) * step < depth then
+		stepCount += 1
+	end
+	local duration = math.max(getDefinitionNumber(definition, "terrainColumnDurationSeconds", 1.4), 0)
+	local interval = if stepCount > 1 then duration / (stepCount - 1) else 0
+	return explosionRadius, depth, columnBottomY, step, stepCount, interval
+end
+
+local function startTerrainColumn(player: Player, definition: AbilityDefinition, position: Vector3, radius: number, bottomY: number)
+	local explosionRadius, depth, _, step, stepCount, interval = getTerrainColumnData(definition, position, radius, bottomY)
+	local sourceContext = {
 		sourceType = "Ability",
 		sourceId = "OrbitalStrike",
 		ownerUserId = player.UserId,
 		timestamp = workspace:GetServerTimeNow(),
-	})
+	}
+
+	task.spawn(function()
+		local transparentCollisionClearance =
+			math.max(getDefinitionNumber(definition, "terrainTransparentCollisionClearance", 0), 0)
+		for index = 0, stepCount - 1 do
+			local offset = math.min(index * step, depth)
+			DestructionService:DestroySphere(position - Vector3.yAxis * offset, explosionRadius, sourceContext, {
+				forceSubtract = true,
+				transparentCollisionClearance = transparentCollisionClearance,
+			})
+			if index < stepCount - 1 and interval > 0 then
+				task.wait(interval)
+			end
+		end
+	end)
 end
 
 local function scheduleStrike(player: Player, definition: AbilityDefinition, sessionId: number, position: Vector3)
@@ -560,8 +624,8 @@ local function scheduleStrike(player: Player, definition: AbilityDefinition, ses
 		local radius = getDefinitionNumber(definition, "strikeRadius", 22)
 		local activeMap = getActiveMap()
 		local topY, bottomY = getMapVerticalBounds(activeMap, radius, position)
-		cutTerrainColumn(player, definition, position, radius, bottomY)
-		startDamageTicks(player, definition, sessionId, position, radius, topY, bottomY)
+		local terrainRadius, _terrainDepth, columnBottomY, terrainStep, _terrainStepCount, terrainStepInterval =
+			getTerrainColumnData(definition, position, radius, bottomY)
 		fireAll(IMPACT_EFFECT, {
 			player = player,
 			abilityId = "OrbitalStrike",
@@ -569,7 +633,17 @@ local function scheduleStrike(player: Player, definition: AbilityDefinition, ses
 			position = position,
 			radius = radius,
 			durationSeconds = getDefinitionNumber(definition, "strikeDurationSeconds", 3),
+			columnTopY = position.Y,
+			columnBottomY = columnBottomY,
+			terrainStep = terrainStep,
+			terrainStepInterval = terrainStepInterval,
+			terrainExplosionRadius = terrainRadius,
+			blackFlashRadius = getDefinitionNumber(definition, "blackFlashRadius", 260),
+			blackFlashDuration = getDefinitionNumber(definition, "blackFlashDuration", 3),
+			blackFlashClosestTransparency = getDefinitionNumber(definition, "blackFlashClosestTransparency", 0.3),
 		})
+		startTerrainColumn(player, definition, position, radius, bottomY)
+		startDamageTicks(player, definition, sessionId, position, radius, topY, bottomY)
 	end)
 end
 
@@ -581,12 +655,10 @@ local function beginTargeting(context: ServerClientMessageContext)
 
 	nextSessionId += 1
 	local sessionId = nextSessionId
-	local timeLimit = math.max(getDefinitionNumber(context.definition, "targetingTimeLimit", 4), 0.5)
 	sessions[context.player] = {
 		sessionId = sessionId,
 		slot = context.slot,
 		abilityId = context.abilityId,
-		expiresAt = context.now + timeLimit,
 	}
 
 	fireToPlayer(context.player, BEGIN_TARGETING_EFFECT, {
@@ -594,9 +666,7 @@ local function beginTargeting(context: ServerClientMessageContext)
 		slot = context.slot,
 		abilityId = context.abilityId,
 		sessionId = sessionId,
-		expiresAt = context.now + timeLimit,
 		serverTime = context.now,
-		targetingTimeLimit = timeLimit,
 		strikeRadius = getDefinitionNumber(context.definition, "strikeRadius", 22),
 		cameraHeight = getDefinitionNumber(context.definition, "cameraHeight", 110),
 		targetFOV = getDefinitionNumber(context.definition, "targetFOV", 40),
@@ -618,11 +688,6 @@ local function confirmTarget(context: ServerClientMessageContext)
 	end
 	if session.slot ~= context.slot or session.abilityId ~= context.abilityId then
 		reject(context.player, sessionId, "InvalidSession")
-		return
-	end
-	if context.now > session.expiresAt then
-		sessions[context.player] = nil
-		reject(context.player, sessionId, "Timeout")
 		return
 	end
 	if not isReady(context) then

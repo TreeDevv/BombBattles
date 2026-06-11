@@ -161,7 +161,7 @@ local function recordDestructionScore(sourceContext, targetsHit: number, positio
 	end
 end
 
-function DestructionService:DestroySphere(position: Vector3, radius: number?, sourceContext)
+function DestructionService:DestroySphere(position: Vector3, radius: number?, sourceContext, options)
 	if typeof(position) ~= "Vector3" then
 		return {}
 	end
@@ -186,7 +186,9 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 			DestructionConfig.Debris,
 			DestructionConfig.DebrisAmount,
 			{},
-			targets
+			targets,
+			nil,
+			options
 		) or {}
 	end)
 

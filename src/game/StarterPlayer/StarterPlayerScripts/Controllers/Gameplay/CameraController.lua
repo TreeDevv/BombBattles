@@ -374,6 +374,53 @@ function CameraController:PlayExplosionShake(origin: Vector3, radius: number?)
 	)
 end
 
+function CameraController:PlayOrbitalStrikeShake(origin: Vector3, config: { [string]: any }?)
+	if typeof(origin) ~= "Vector3" then
+		return
+	end
+
+	local maxRadius = math.max(if config and typeof(config.cameraShakeRadius) == "number" then config.cameraShakeRadius else 260, 0)
+	if maxRadius <= 0 then
+		return
+	end
+
+	local character = self:_getCharacter()
+	local rootPart = if character then getRootPart(character) else nil
+	if not rootPart then
+		return
+	end
+
+	local distance = (rootPart.Position - origin).Magnitude
+	if distance > maxRadius then
+		return
+	end
+
+	local strength = smoothstep(1 - math.clamp(distance / maxRadius, 0, 1))
+	if strength <= 0 then
+		return
+	end
+
+	local magnitude = if config and typeof(config.cameraShakeMagnitude) == "number" then config.cameraShakeMagnitude else 6.5
+	local roughness = if config and typeof(config.cameraShakeRoughness) == "number" then config.cameraShakeRoughness else 18
+	local fadeInTime = if config and typeof(config.cameraShakeFadeInTime) == "number" then config.cameraShakeFadeInTime else 0.03
+	local fadeOutTime = if config and typeof(config.cameraShakeFadeOutTime) == "number" then config.cameraShakeFadeOutTime else 0.85
+	local positionInfluence = if config and typeof(config.cameraShakePositionInfluence) == "Vector3"
+		then config.cameraShakePositionInfluence
+		else Vector3.new(0.55, 0.45, 0.55)
+	local rotationInfluence = if config and typeof(config.cameraShakeRotationInfluence) == "Vector3"
+		then config.cameraShakeRotationInfluence
+		else Vector3.new(3.2, 2.1, 2.6)
+
+	self:_getCameraShaker():ShakeOnce(
+		magnitude * strength,
+		roughness,
+		math.max(fadeInTime, 0),
+		math.max(fadeOutTime, 0),
+		positionInfluence * strength,
+		rotationInfluence * strength
+	)
+end
+
 function CameraController:_updateLandingSettleTrigger(character: Model, now: number)
 	local landingSerial = readNumberAttribute(character, "Movement_LandingSerial")
 	if landingSerial <= self._lastLandingSerial then

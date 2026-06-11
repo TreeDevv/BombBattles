@@ -13,7 +13,7 @@ return table.freeze({
 	TerrainNearDamageMin = 35,
 	TerrainOuterDamageMax = 25,
 	TerrainOuterDamageMin = 8,
-	DebugVisualizeDamageGrid = true,
+	DebugVisualizeDamageGrid = false,
 	DebugDamageGridStudioOnly = true,
 	DebugDamageGridFolderName = "DamageGridDebug",
 	DebugDamageGridTransparency = 0.65,

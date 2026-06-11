@@ -10,6 +10,7 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 local CameraController = require(script.Parent.Parent:WaitForChild("CameraController"))
 
 type AbilityControllerLike = AbilityTypes.AbilityControllerLike
@@ -37,7 +38,6 @@ type TargetingState = {
 	slot: string,
 	abilityId: string,
 	definition: AbilityDefinition?,
-	expiresAt: number,
 	savedCamera: SavedCameraState?,
 	markerFolder: Folder?,
 	radiusPart: BasePart?,
@@ -49,6 +49,7 @@ type TargetingState = {
 	currentFocus: Vector3?,
 	placementCenter: Vector3?,
 	placementOffset: Vector3,
+	placementForward: Vector3,
 	keyboardInput: Vector2,
 	gamepadInput: Vector2,
 	touchInput: Vector2,
@@ -110,7 +111,6 @@ local state: TargetingState = {
 	slot = "",
 	abilityId = "",
 	definition = nil,
-	expiresAt = 0,
 	savedCamera = nil,
 	markerFolder = nil,
 	radiusPart = nil,
@@ -122,6 +122,7 @@ local state: TargetingState = {
 	currentFocus = nil,
 	placementCenter = nil,
 	placementOffset = Vector3.zero,
+	placementForward = Vector3.zAxis,
 	keyboardInput = Vector2.zero,
 	gamepadInput = Vector2.zero,
 	touchInput = Vector2.zero,
@@ -263,23 +264,17 @@ local function pivotTo(instance: Instance, cframe: CFrame)
 	end
 end
 
-local function cleanupAfterEmit(clone: Instance, env, cleanupSeconds: number)
-	local cleaned = false
-	local function cleanup()
-		if cleaned then
-			return
-		end
-		cleaned = true
+local function cleanupVisualAfterDelay(clone: Instance, cleanupSeconds: number)
+	task.delay(math.max(cleanupSeconds, 0), function()
 		if clone.Parent then
 			clone:Destroy()
 		end
-	end
+	end)
+end
 
-	local finished = if typeof(env) == "table" then env.Finished else nil
-	if finished and type(finished.finally) == "function" then
-		finished:finally(cleanup)
-	end
-	task.delay(cleanupSeconds, cleanup)
+local function getPayloadNumber(payload: any, key: string, fallback: number): number
+	local value = if typeof(payload) == "table" then payload[key] else nil
+	return if typeof(value) == "number" then value else fallback
 end
 
 local function playStrikeVfx(payload: any)
@@ -303,21 +298,38 @@ local function playStrikeVfx(payload: any)
 	local cleanupSeconds = math.max(getDefinitionNumber(definition, "strikeVisualCleanupSeconds", 5), 0.25)
 	local module = getEmitModule()
 	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, env = pcall(function()
-			return module.emit(clone)
-		end)
-		if ok then
-			cleanupAfterEmit(clone, env, cleanupSeconds)
-			return
+		local columnTopY = getPayloadNumber(payload, "columnTopY", position.Y)
+		local columnBottomY = getPayloadNumber(payload, "columnBottomY", position.Y)
+		local depth = math.max(columnTopY - columnBottomY, 0)
+		local step = math.max(getPayloadNumber(payload, "terrainStep", math.max(getPayloadNumber(payload, "terrainExplosionRadius", 22), 1)), 1)
+		local stepCount = math.max(math.floor(depth / step) + 1, 1)
+		if (stepCount - 1) * step < depth then
+			stepCount += 1
 		end
-		warn("[OrbitalStrike] Failed to emit strike VFX: " .. tostring(env))
+		local interval = math.max(getPayloadNumber(payload, "terrainStepInterval", 0), 0)
+
+		task.spawn(function()
+			for index = 0, stepCount - 1 do
+				local offset = math.min(index * step, depth)
+				local stepPosition = Vector3.new(position.X, columnTopY - offset, position.Z)
+				pivotTo(clone, CFrame.new(stepPosition))
+				local ok, err = pcall(function()
+					return module.emit(clone)
+				end)
+				if not ok then
+					warn("[OrbitalStrike] Failed to emit strike VFX: " .. tostring(err))
+					break
+				end
+				if index < stepCount - 1 and interval > 0 then
+					task.wait(interval)
+				end
+			end
+			cleanupVisualAfterDelay(clone, cleanupSeconds)
+		end)
+		return
 	end
 
-	task.delay(cleanupSeconds, function()
-		if clone.Parent then
-			clone:Destroy()
-		end
-	end)
+	cleanupVisualAfterDelay(clone, cleanupSeconds)
 end
 
 local function getControls(): Controls?
@@ -368,6 +380,18 @@ end
 local function flattenDirection(direction: Vector3): Vector3
 	local flat = Vector3.new(direction.X, 0, direction.Z)
 	return if flat.Magnitude > 0.05 then flat.Unit else Vector3.zero
+end
+
+local function axisAlignedDirection(direction: Vector3): Vector3
+	local flat = Vector3.new(direction.X, 0, direction.Z)
+	if flat.Magnitude <= 0.05 then
+		return Vector3.zero
+	end
+
+	if math.abs(flat.X) >= math.abs(flat.Z) then
+		return Vector3.new(if flat.X >= 0 then 1 else -1, 0, 0)
+	end
+	return Vector3.new(0, 0, if flat.Z >= 0 then 1 else -1)
 end
 
 local function disconnectAll()
@@ -436,9 +460,143 @@ local function getRootPart(): BasePart?
 	return nil
 end
 
+local function smoothstep(value: number): number
+	local x = math.clamp(value, 0, 1)
+	return x * x * (3 - 2 * x)
+end
+
+local function playProximityBlackFlash(payload: any, definition: AbilityDefinition?)
+	local position = if typeof(payload) == "table" then payload.position else nil
+	if typeof(position) ~= "Vector3" then
+		return
+	end
+
+	local rootPart = getRootPart()
+	if not rootPart then
+		return
+	end
+
+	local radius = math.max(getPayloadNumber(payload, "blackFlashRadius", getDefinitionNumber(definition, "blackFlashRadius", 260)), 0)
+	if radius <= 0 then
+		return
+	end
+
+	local rootPosition = rootPart.Position
+	local distance = Vector3.new(rootPosition.X - position.X, 0, rootPosition.Z - position.Z).Magnitude
+	if distance > radius then
+		return
+	end
+
+	local strength = smoothstep(1 - distance / radius)
+	if strength <= 0 then
+		return
+	end
+
+	local closestTransparency =
+		math.clamp(getPayloadNumber(payload, "blackFlashClosestTransparency", getDefinitionNumber(definition, "blackFlashClosestTransparency", 0.3)), 0, 1)
+	local initialTransparency = 1 - ((1 - closestTransparency) * strength)
+	if initialTransparency >= 1 then
+		return
+	end
+
+	ScreenEffects.FlashBlack(getPayloadNumber(payload, "blackFlashDuration", getDefinitionNumber(definition, "blackFlashDuration", 3)), initialTransparency)
+end
+
+local function playHitBlackFlash(payload: any)
+	if typeof(payload) ~= "table" or payload.abilityId ~= "OrbitalStrike" then
+		return
+	end
+
+	local definition = AbilityConfig.GetDefinition("OrbitalStrike")
+	local duration = if typeof(payload.durationSeconds) == "number"
+		then payload.durationSeconds
+		else getDefinitionNumber(definition, "blackFlashHitDuration", 3)
+	local initialTransparency = if typeof(payload.initialTransparency) == "number"
+		then payload.initialTransparency
+		else getDefinitionNumber(definition, "blackFlashClosestTransparency", 0.3)
+	ScreenEffects.FlashBlack(duration, initialTransparency)
+end
+
 local function getActiveMap(): Model?
 	local map = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	return if map and map:IsA("Model") then map else nil
+end
+
+local function getInstancePosition(instance: Instance): Vector3?
+	if instance:IsA("BasePart") then
+		return instance.Position
+	end
+	if instance:IsA("Model") then
+		return instance:GetPivot().Position
+	end
+
+	local ok, pivot = pcall(function()
+		return (instance :: any):GetPivot()
+	end)
+	if ok and typeof(pivot) == "CFrame" then
+		return pivot.Position
+	end
+	return nil
+end
+
+local function getEnemyTeamName(): string?
+	local localTeam = LocalPlayer.Team
+	local localTeamName = localTeam and localTeam.Name or nil
+	if not localTeamName then
+		return nil
+	end
+
+	for _, teamConfig in pairs(RoundConfig.Teams) do
+		if typeof(teamConfig) == "table" and typeof(teamConfig.name) == "string" and teamConfig.name ~= localTeamName then
+			return teamConfig.name
+		end
+	end
+	return nil
+end
+
+local function getClosestTaggedTeamPosition(tagName: string, teamName: string, map: Model, origin: Vector3): Vector3?
+	local closestPosition: Vector3? = nil
+	local closestDistance = math.huge
+	for _, instance in ipairs(CollectionService:GetTagged(tagName)) do
+		if not instance:IsDescendantOf(map) or instance:GetAttribute("Team") ~= teamName then
+			continue
+		end
+
+		local position = getInstancePosition(instance)
+		if not position then
+			continue
+		end
+
+		local distance = (Vector3.new(position.X, origin.Y, position.Z) - origin).Magnitude
+		if distance < closestDistance then
+			closestDistance = distance
+			closestPosition = position
+		end
+	end
+	return closestPosition
+end
+
+local function resolvePlacementForward(rootPart: BasePart): Vector3
+	local map = getActiveMap()
+	local enemyTeamName = getEnemyTeamName()
+	local origin = rootPart.Position
+	local targetPosition: Vector3? = nil
+	if map and enemyTeamName then
+		targetPosition = getClosestTaggedTeamPosition(RoundConfig.Tags.TeamCore, enemyTeamName, map, origin)
+			or getClosestTaggedTeamPosition(RoundConfig.Tags.TeamSpawn, enemyTeamName, map, origin)
+	end
+
+	local forward = if targetPosition then axisAlignedDirection(targetPosition - origin) else Vector3.zero
+	if forward.Magnitude > 0.05 then
+		return forward
+	end
+
+	forward = axisAlignedDirection(rootPart.CFrame.LookVector)
+	if forward.Magnitude > 0.05 then
+		return forward
+	end
+
+	return Vector3.zAxis
 end
 
 local function hasTaggedAncestor(instance: Instance, tags: { string }): boolean
@@ -574,22 +732,24 @@ local function getMoveInput(): Vector2
 	return input
 end
 
-local function getPanDirection(camera: Camera, input: Vector2): Vector3
+local function getPanDirection(input: Vector2): Vector3
 	if input.Magnitude <= 0.05 then
 		return Vector3.zero
 	end
 
-	local right = flattenDirection(camera.CFrame.RightVector)
+	local forward = flattenDirection(state.placementForward)
+	if forward.Magnitude <= 0.05 then
+		forward = Vector3.zAxis
+	end
+
+	local right = forward:Cross(Vector3.yAxis)
 	if right.Magnitude <= 0.05 then
 		right = Vector3.xAxis
+	else
+		right = right.Unit
 	end
 
-	local up = flattenDirection(camera.CFrame.UpVector)
-	if up.Magnitude <= 0.05 then
-		up = Vector3.zAxis
-	end
-
-	local direction = right * input.X + up * input.Y
+	local direction = right * input.X + forward * input.Y
 	return if direction.Magnitude > 0.05 then direction.Unit * math.min(input.Magnitude, 1) else Vector3.zero
 end
 
@@ -608,7 +768,7 @@ local function raycastPlacement(desiredPosition: Vector3, definition: AbilityDef
 	return hit.Position, hit.Instance, hit.Normal
 end
 
-local function updatePlacementFromMove(camera: Camera, definition: AbilityDefinition, dt: number): (Vector3?, boolean)
+local function updatePlacementFromMove(definition: AbilityDefinition, dt: number): (Vector3?, boolean)
 	local rootPart = getRootPart()
 	if not rootPart then
 		return nil, false
@@ -616,7 +776,7 @@ local function updatePlacementFromMove(camera: Camera, definition: AbilityDefini
 
 	local center = state.placementCenter or rootPart.Position
 	state.placementCenter = center
-	local panDirection = getPanDirection(camera, getMoveInput())
+	local panDirection = getPanDirection(getMoveInput())
 	if panDirection.Magnitude > 0.05 then
 		local speed = math.max(getDefinitionNumber(definition, "placementPanSpeed", 180), 1)
 		state.placementOffset += panDirection * speed * dt
@@ -651,7 +811,9 @@ local function getCameraGoal(definition: AbilityDefinition, focus: Vector3): (CF
 	local height = getDefinitionNumber(definition, "cameraHeight", 110)
 	local fov = getDefinitionNumber(definition, "targetFOV", 40)
 	local position = focus + Vector3.yAxis * height
-	return CFrame.lookAt(position, focus, Vector3.zAxis), fov
+	local forward = flattenDirection(state.placementForward)
+	local cameraUp = if forward.Magnitude > 0.05 then forward else Vector3.zAxis
+	return CFrame.lookAt(position, focus, cameraUp), fov
 end
 
 local function getBlendAlpha(): number
@@ -695,12 +857,12 @@ local function finishCleanup()
 	state.slot = ""
 	state.abilityId = ""
 	state.definition = nil
-	state.expiresAt = 0
 	state.savedCamera = nil
 	state.restoreTweening = false
 	state.currentFocus = nil
 	state.placementCenter = nil
 	state.placementOffset = Vector3.zero
+	state.placementForward = Vector3.zAxis
 	state.targetPosition = nil
 	state.valid = false
 end
@@ -765,16 +927,6 @@ local function stepTargeting(dt: number)
 	end
 
 	if not state.restoreTweening then
-		if workspace:GetServerTimeNow() >= state.expiresAt then
-			if state.controller then
-				state.controller:SendMessage(state.slot, AbilityConfig.MessageTypes.Cancel, {
-					action = "CancelTargeting",
-					sessionId = state.sessionId,
-				})
-			end
-			endTargeting(false)
-			return
-		end
 		if not getRootPart() then
 			endTargeting(true)
 			return
@@ -786,7 +938,7 @@ local function stepTargeting(dt: number)
 
 		disableMovementControls()
 
-		local targetPosition, valid = updatePlacementFromMove(camera, definition, dt)
+		local targetPosition, valid = updatePlacementFromMove(definition, dt)
 		state.targetPosition = targetPosition
 		state.valid = valid
 		setMarker(targetPosition, valid)
@@ -1062,9 +1214,6 @@ local function beginLocalTargeting(context: ClientEffectContext)
 	state.slot = if typeof(payload.slot) == "string" then payload.slot else AbilityConfig.Slots.Offensive
 	state.abilityId = "OrbitalStrike"
 	state.definition = definition
-	state.expiresAt = if typeof(payload.expiresAt) == "number"
-		then payload.expiresAt
-		else workspace:GetServerTimeNow() + getDefinitionNumber(definition, "targetingTimeLimit", 4)
 	state.savedCamera = {
 		cameraType = camera.CameraType,
 		cameraSubject = camera.CameraSubject,
@@ -1077,6 +1226,7 @@ local function beginLocalTargeting(context: ClientEffectContext)
 	state.currentFocus = rootPart.Position
 	state.placementCenter = rootPart.Position
 	state.placementOffset = Vector3.zero
+	state.placementForward = resolvePlacementForward(rootPart)
 	state.targetPosition = rootPart.Position
 	state.valid = false
 	clearMoveInput()
@@ -1193,10 +1343,14 @@ function OrbitalStrike.OnEffect(context: ClientEffectContext)
 	elseif typeof(payload) == "table" and context.effectName == "OrbitalStrikeTelegraph" and payload.abilityId == "OrbitalStrike" then
 		createLocalTelegraph(payload)
 	elseif typeof(payload) == "table" and context.effectName == "OrbitalStrikeImpact" and payload.abilityId == "OrbitalStrike" then
+		local definition = AbilityConfig.GetDefinition("OrbitalStrike")
 		playStrikeVfx(payload)
-		if typeof(payload.position) == "Vector3" and type(CameraController.PlayExplosionShake) == "function" then
-			CameraController:PlayExplosionShake(payload.position, payload.radius or 80)
+		playProximityBlackFlash(payload, definition)
+		if typeof(payload.position) == "Vector3" and type(CameraController.PlayOrbitalStrikeShake) == "function" then
+			CameraController:PlayOrbitalStrikeShake(payload.position, definition)
 		end
+	elseif context.effectName == "OrbitalStrikeHitFlash" then
+		playHitBlackFlash(payload)
 	end
 end
 

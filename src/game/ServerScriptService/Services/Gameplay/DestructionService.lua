@@ -206,6 +206,44 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 	return debrisPayloads
 end
 
+local function appendDebrisPayloads(combined, payloads)
+	if typeof(payloads) ~= "table" then
+		return
+	end
+
+	for _, payload in ipairs(payloads) do
+		table.insert(combined, payload)
+	end
+
+	local targetsHit = if typeof(payloads.targetsHit) == "number" then payloads.targetsHit else #payloads
+	combined.targetsHit = (combined.targetsHit or 0) + targetsHit
+end
+
+function DestructionService:DestroyCylinderDown(position: Vector3, radius: number?, depth: number?, step: number?, sourceContext)
+	if typeof(position) ~= "Vector3" then
+		return {}
+	end
+
+	local destructionRadius = if typeof(radius) == "number" and radius > 0
+		then radius
+		else BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius
+	local destructionDepth = if typeof(depth) == "number" and depth > 0 then depth else destructionRadius
+	local stepDistance = if typeof(step) == "number" and step > 0 then step else destructionRadius * 0.75
+	stepDistance = math.max(stepDistance, DestructionConfig.FinalVoxelSize, 0.5)
+
+	local combined = { targetsHit = 0 }
+	local offset = 0
+	while offset <= destructionDepth do
+		appendDebrisPayloads(combined, self:DestroySphere(position - Vector3.yAxis * offset, destructionRadius, sourceContext))
+		offset += stepDistance
+	end
+
+	if offset - stepDistance < destructionDepth then
+		appendDebrisPayloads(combined, self:DestroySphere(position - Vector3.yAxis * destructionDepth, destructionRadius, sourceContext))
+	end
+
+	return combined
+end
 function DestructionService:Cleanup()
 	VoxManager:cleanup()
 end

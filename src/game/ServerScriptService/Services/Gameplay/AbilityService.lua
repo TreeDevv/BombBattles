@@ -400,6 +400,12 @@ local function fireAbilityEffect(effectName: string, payload: any?)
 	end
 end
 
+local function fireAbilityEffectToPlayer(player: Player, effectName: string, payload: any?)
+	if effectRemote and player.Parent == Players then
+		effectRemote:FireClient(player, effectName, payload)
+	end
+end
+
 local function activate(player: Player, resolved: ResolvedAbilityRequest, currentTime: number)
 	if not isAliveActivePlayer(player) then
 		return
@@ -675,6 +681,10 @@ end
 
 function AbilityService:FireEffect(effectName: string, payload: any?)
 	fireAbilityEffect(effectName, payload)
+end
+
+function AbilityService:FireEffectToPlayer(player: Player, effectName: string, payload: any?)
+	fireAbilityEffectToPlayer(player, effectName, payload)
 end
 
 function AbilityService:SetSlotValues(player: Player, slot: string, values: { [string]: any }): boolean

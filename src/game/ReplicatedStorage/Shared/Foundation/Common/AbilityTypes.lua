@@ -42,6 +42,7 @@ export type AbilityControllerLike = {
 export type AbilityServiceLike = {
 	RunHook: (any, string, any?) -> AbilityHookResult,
 	FireEffect: (any, string, any?) -> (),
+	FireEffectToPlayer: (any, Player, string, any?) -> (),
 	SetSlotValues: (any, Player, AbilitySlot, { [string]: any }) -> boolean,
 	SetEquippedAbility: (any, Player, AbilitySlot, AbilityId) -> boolean,
 	SetLoadout: (any, Player, AbilityLoadout) -> boolean,

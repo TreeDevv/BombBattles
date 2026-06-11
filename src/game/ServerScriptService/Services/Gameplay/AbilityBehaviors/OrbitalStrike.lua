@@ -1,0 +1,710 @@
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+
+local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
+local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local DestructionService = require(ServerScriptService.Services.DestructionService)
+local RoundService = require(ServerScriptService.Services.RoundService)
+
+type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityServiceLike = AbilityTypes.AbilityServiceLike
+type ServerActivateContext = AbilityTypes.ServerActivateContext
+type ServerClientMessageContext = AbilityTypes.ServerClientMessageContext
+
+type TargetSession = {
+	sessionId: number,
+	slot: string,
+	abilityId: string,
+	expiresAt: number,
+}
+
+local OrbitalStrike = {} :: AbilityTypes.ServerBehavior
+
+local OBJECTS_FOLDER_NAME = "OrbitalStrikeObjects"
+local WARNING_FOLDER_NAME = "Warnings"
+local DAMAGE_ZONE_FOLDER_NAME = "DamageZones"
+local TELEGRAPH_EFFECT = "OrbitalStrikeTelegraph"
+local IMPACT_EFFECT = "OrbitalStrikeImpact"
+local BEGIN_TARGETING_EFFECT = "OrbitalStrikeBeginTargeting"
+local REJECTED_EFFECT = "OrbitalStrikeRejected"
+local CANCELLED_EFFECT = "OrbitalStrikeCancelled"
+
+local UNSAFE_TAGS = {
+	RoundConfig.Tags.TeamCore,
+	RoundConfig.Tags.TeamSpawn,
+	RoundConfig.Tags.LobbySpawn,
+	"NoStrikeZone",
+	"ProtectedZone",
+}
+
+local abilityService: AbilityServiceLike? = nil
+local sessions: { [Player]: TargetSession } = {}
+local nextSessionId = 0
+
+local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
+	local value = if definition then definition[key] else nil
+	return if typeof(value) == "number" then value else fallback
+end
+
+local function getDefinitionBoolean(definition: AbilityDefinition?, key: string, fallback: boolean): boolean
+	local value = if definition then definition[key] else nil
+	return if typeof(value) == "boolean" then value else fallback
+end
+
+local function isFiniteVector(value: any): boolean
+	return typeof(value) == "Vector3"
+		and value.X == value.X
+		and value.Y == value.Y
+		and value.Z == value.Z
+		and value.Magnitude < math.huge
+end
+
+local function getCharacterRoot(player: Player): BasePart?
+	local character = player.Character
+	if not character then
+		return nil
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if humanoid and humanoid.Health > 0 and rootPart and rootPart:IsA("BasePart") then
+		return rootPart
+	end
+	return nil
+end
+
+local function isReady(context: ServerClientMessageContext): boolean
+	if context.player.Parent ~= Players then
+		return false
+	end
+	if context.slotState.abilityId ~= context.abilityId then
+		return false
+	end
+	if not RoundService:IsPlayerActive(context.player) then
+		return false
+	end
+	if not getCharacterRoot(context.player) then
+		return false
+	end
+	if typeof(context.slotState.cooldownEndsAt) == "number" and context.slotState.cooldownEndsAt > context.now then
+		return false
+	end
+	return true
+end
+
+local function getActiveMap(): Model?
+	local map = workspace:FindFirstChild(RoundConfig.ActiveMapName)
+	return if map and map:IsA("Model") then map else nil
+end
+
+local function getTeamName(player: Player): string?
+	local teamName = player:GetAttribute("RoundTeam")
+	return if typeof(teamName) == "string" and teamName ~= "" then teamName else nil
+end
+
+local function isEnemyPlayer(owner: Player, target: Player?): boolean
+	if not target or target == owner then
+		return false
+	end
+	if target.Parent ~= Players or not RoundService:IsPlayerActive(target) then
+		return false
+	end
+
+	local ownerTeam = getTeamName(owner)
+	local targetTeam = getTeamName(target)
+	return not (ownerTeam and targetTeam and ownerTeam == targetTeam)
+end
+
+local function hasTaggedAncestor(instance: Instance, tags: { string }): boolean
+	local current: Instance? = instance
+	while current and current ~= workspace do
+		for _, tagName in ipairs(tags) do
+			if CollectionService:HasTag(current, tagName) then
+				return true
+			end
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+local function isInsideMapBounds(position: Vector3, map: Model?): boolean
+	if not map then
+		return false
+	end
+
+	local boundsCFrame, boundsSize = map:GetBoundingBox()
+	local localPosition = boundsCFrame:PointToObjectSpace(position)
+	local halfSize = boundsSize * 0.5 + Vector3.new(3, 12, 3)
+	return math.abs(localPosition.X) <= halfSize.X
+		and math.abs(localPosition.Y) <= halfSize.Y
+		and math.abs(localPosition.Z) <= halfSize.Z
+end
+
+local function getMapVerticalBounds(map: Model?, radius: number, fallbackPosition: Vector3): (number, number)
+	if not map then
+		return fallbackPosition.Y + radius * 2, fallbackPosition.Y - radius * 3
+	end
+
+	local boundsCFrame, boundsSize = map:GetBoundingBox()
+	local topY = boundsCFrame.Position.Y + boundsSize.Y * 0.5 + radius
+	local bottomY = boundsCFrame.Position.Y - boundsSize.Y * 0.5 - radius
+	return math.max(topY, fallbackPosition.Y + radius), math.min(bottomY, fallbackPosition.Y - radius)
+end
+
+local function getObjectsFolder(): Folder
+	local activeMap = getActiveMap()
+	local parent: Instance = activeMap or workspace
+	local existing = parent:FindFirstChild(OBJECTS_FOLDER_NAME)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = OBJECTS_FOLDER_NAME
+	folder.Parent = parent
+	return folder
+end
+
+local function getChildFolder(parent: Instance, name: string): Folder
+	local existing = parent:FindFirstChild(name)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = name
+	folder.Parent = parent
+	return folder
+end
+
+local function makeRaycastParams(player: Player): RaycastParams
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+
+	local excluded = {}
+	if player.Character then
+		table.insert(excluded, player.Character)
+	end
+
+	local activeMap = getActiveMap()
+	local objectsFolder = activeMap and activeMap:FindFirstChild(OBJECTS_FOLDER_NAME) or workspace:FindFirstChild(OBJECTS_FOLDER_NAME)
+	if objectsFolder then
+		table.insert(excluded, objectsFolder)
+	end
+	local projectileFolder = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
+	if projectileFolder then
+		table.insert(excluded, projectileFolder)
+	end
+	local fireFolder = workspace:FindFirstChild("FireBombZones")
+	if fireFolder then
+		table.insert(excluded, fireFolder)
+	end
+
+	params.FilterDescendantsInstances = excluded
+	return params
+end
+
+local function hasSkyAccess(player: Player, position: Vector3, definition: AbilityDefinition): boolean
+	if not getDefinitionBoolean(definition, "skyAccessRequired", false) then
+		return true
+	end
+
+	local params = makeRaycastParams(player)
+	local hit = workspace:Raycast(position + Vector3.yAxis * 2, Vector3.yAxis * 600, params)
+	return hit == nil
+end
+
+local function validateTarget(player: Player, definition: AbilityDefinition, proposedPosition: any): (Vector3?, string?)
+	if not isFiniteVector(proposedPosition) then
+		return nil, "InvalidPosition"
+	end
+	if not getCharacterRoot(player) then
+		return nil, "NotAlive"
+	end
+
+	local activeMap = getActiveMap()
+	if not isInsideMapBounds(proposedPosition, activeMap) then
+		return nil, "OutOfMap"
+	end
+
+	local rayUp = math.max(getDefinitionNumber(definition, "floorRaycastUp", 80), 1)
+	local rayDown = math.max(getDefinitionNumber(definition, "floorRaycastDown", 180), 1)
+	local hit = workspace:Raycast(
+		proposedPosition + Vector3.yAxis * rayUp,
+		Vector3.yAxis * -(rayUp + rayDown),
+		makeRaycastParams(player)
+	)
+	if not hit then
+		return nil, "NoSurface"
+	end
+	if hit.Normal.Y < getDefinitionNumber(definition, "minFloorNormalY", 0.45) then
+		return nil, "BadSurface"
+	end
+	if activeMap and not hit.Instance:IsDescendantOf(activeMap) then
+		return nil, "OutOfMap"
+	end
+	if hasTaggedAncestor(hit.Instance, UNSAFE_TAGS) then
+		return nil, "Protected"
+	end
+	if not hasSkyAccess(player, hit.Position, definition) then
+		return nil, "BlockedSky"
+	end
+
+	return hit.Position, nil
+end
+
+local function fireToPlayer(player: Player, effectName: string, payload: any?)
+	if abilityService and type(abilityService.FireEffectToPlayer) == "function" then
+		abilityService:FireEffectToPlayer(player, effectName, payload)
+	end
+end
+
+local function fireAll(effectName: string, payload: any?)
+	if abilityService and type(abilityService.FireEffect) == "function" then
+		abilityService:FireEffect(effectName, payload)
+	end
+end
+
+local function reject(player: Player, sessionId: number?, reason: string)
+	fireToPlayer(player, REJECTED_EFFECT, {
+		abilityId = "OrbitalStrike",
+		sessionId = sessionId,
+		reason = reason,
+	})
+end
+
+local function setCooldownAndState(context: ServerClientMessageContext, position: Vector3): boolean
+	if not abilityService then
+		return false
+	end
+
+	local state = context.slotState.state
+	local strikesCalled = if typeof(state) == "table" and typeof(state.strikesCalled) == "number" then state.strikesCalled else 0
+	return abilityService:SetSlotValues(context.player, context.slot, {
+		cooldownEndsAt = context.now + math.max(getDefinitionNumber(context.definition, "cooldownSeconds", 60), 0),
+		activeEndsAt = 0,
+		state = {
+			strikesCalled = strikesCalled + 1,
+			lastActivatedAt = context.now,
+			lastTargetPosition = position,
+		},
+	})
+end
+
+local function spawnWarningPart(position: Vector3, radius: number, lifetime: number): BasePart
+	local warning = Instance.new("Part")
+	warning.Name = "OrbitalStrikeWarning"
+	warning.Anchored = true
+	warning.CanCollide = false
+	warning.CanTouch = false
+	warning.CanQuery = false
+	warning.Shape = Enum.PartType.Cylinder
+	warning.Size = Vector3.new(0.08, radius * 2, radius * 2)
+	warning.CFrame = CFrame.new(position + Vector3.yAxis * 0.08) * CFrame.Angles(0, 0, math.rad(90))
+	warning.Color = Color3.fromRGB(255, 70, 70)
+	warning.Material = Enum.Material.Neon
+	warning.Transparency = 0.62
+	warning.Parent = getChildFolder(getObjectsFolder(), WARNING_FOLDER_NAME)
+
+	task.delay(lifetime, function()
+		if warning.Parent then
+			warning:Destroy()
+		end
+	end)
+	return warning
+end
+
+local function createDamageZone(position: Vector3, radius: number, topY: number, bottomY: number): BasePart
+	local height = math.max(topY - bottomY, radius * 2)
+	local zone = Instance.new("Part")
+	zone.Name = "OrbitalStrikeDamageZone"
+	zone.Anchored = true
+	zone.CanCollide = false
+	zone.CanTouch = false
+	zone.CanQuery = true
+	zone.Transparency = 1
+	zone.Shape = Enum.PartType.Cylinder
+	zone.Size = Vector3.new(height, radius * 2, radius * 2)
+	zone.CFrame = CFrame.new(position.X, bottomY + height * 0.5, position.Z) * CFrame.Angles(0, 0, math.rad(90))
+	zone.Parent = getChildFolder(getObjectsFolder(), DAMAGE_ZONE_FOLDER_NAME)
+	return zone
+end
+
+local function shouldSuppressAbilityDamage(result): boolean
+	return typeof(result) == "table" and (result.kind == AbilityResult.Kind.Block or result.kind == AbilityResult.Kind.Absorb)
+end
+
+local function getDamageTargets(owner: Player, zone: BasePart, overlapParams: OverlapParams): { [Player]: { humanoid: Humanoid, rootPart: BasePart, character: Model } }
+	local targets = {}
+	local ok, parts = pcall(function()
+		return workspace:GetPartsInPart(zone, overlapParams)
+	end)
+	if not ok then
+		warn("[OrbitalStrike] Failed to query damage zone overlaps: " .. tostring(parts))
+		return targets
+	end
+
+	for _, part in ipairs(parts) do
+		local character = part:FindFirstAncestorOfClass("Model")
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if not (character and humanoid and humanoid.Health > 0 and rootPart and rootPart:IsA("BasePart")) then
+			continue
+		end
+
+		local target = Players:GetPlayerFromCharacter(character)
+		if isEnemyPlayer(owner, target) then
+			targets[target :: Player] = {
+				humanoid = humanoid,
+				rootPart = rootPart,
+				character = character,
+			}
+		end
+	end
+
+	return targets
+end
+
+local function damagePlayers(owner: Player, zone: BasePart, overlapParams: OverlapParams, origin: Vector3, radius: number, damage: number)
+	if damage <= 0 then
+		return
+	end
+
+	for target, targetInfo in pairs(getDamageTargets(owner, zone, overlapParams)) do
+		local humanoid = targetInfo.humanoid
+		local healthBefore = humanoid.Health
+		if healthBefore <= 0 then
+			continue
+		end
+
+		local distance = Vector3.new(targetInfo.rootPart.Position.X - origin.X, 0, targetInfo.rootPart.Position.Z - origin.Z).Magnitude
+		local hookResult = if abilityService
+			then abilityService:RunHook("OnBeforePlayerBombDamage", {
+				owner = owner,
+				target = target,
+				character = targetInfo.character,
+				humanoid = humanoid,
+				rootPart = targetInfo.rootPart,
+				origin = origin,
+				distance = distance,
+				damage = damage,
+				explosion = {
+					outerRadius = radius,
+					sourceType = "Ability",
+					sourceId = "OrbitalStrike",
+				},
+			})
+			else nil
+		if shouldSuppressAbilityDamage(hookResult) then
+			continue
+		end
+		local resolvedDamage = damage
+		if typeof(hookResult) == "table" and typeof(hookResult.damage) == "number" then
+			resolvedDamage = math.max(hookResult.damage, 0)
+		elseif typeof(hookResult) == "table" and typeof(hookResult.damageMultiplier) == "number" then
+			resolvedDamage = math.max(resolvedDamage * hookResult.damageMultiplier, 0)
+		end
+		if typeof(hookResult) == "table" and hookResult.skipDamage == true then
+			continue
+		end
+		if resolvedDamage <= 0 then
+			continue
+		end
+
+		RoundService:RecordPlayerDamage(owner, target, math.min(resolvedDamage, healthBefore), {
+			sourceType = "Ability",
+			sourceId = "OrbitalStrike",
+		})
+		humanoid:TakeDamage(resolvedDamage)
+	end
+end
+
+local function getInstancePosition(instance: Instance): Vector3?
+	if instance:IsA("BasePart") then
+		return instance.Position
+	end
+	if instance:IsA("Model") then
+		return instance:GetPivot().Position
+	end
+	return nil
+end
+
+local function isPositionInsideColumn(position: Vector3, origin: Vector3, radius: number, topY: number, bottomY: number): boolean
+	if position.Y < bottomY or position.Y > topY then
+		return false
+	end
+	local horizontal = Vector3.new(position.X - origin.X, 0, position.Z - origin.Z)
+	return horizontal.Magnitude <= radius
+end
+
+local function damageCores(owner: Player, origin: Vector3, radius: number, topY: number, bottomY: number, damage: number)
+	if damage <= 0 then
+		return
+	end
+
+	local ownerTeam = getTeamName(owner)
+	for _, core in ipairs(CollectionService:GetTagged(RoundConfig.Tags.TeamCore)) do
+		local trackedCore = RoundService:GetTrackedCore(core)
+		if not trackedCore then
+			continue
+		end
+		if ownerTeam and trackedCore:GetAttribute("Team") == ownerTeam then
+			continue
+		end
+
+		local position = getInstancePosition(trackedCore)
+		if not position or not isPositionInsideColumn(position, origin, radius, topY, bottomY) then
+			continue
+		end
+
+		local hookResult = if abilityService
+			then abilityService:RunHook("OnBeforeCoreBombDamage", {
+				owner = owner,
+				core = trackedCore,
+				origin = origin,
+				position = position,
+				damage = damage,
+				explosion = {
+					outerRadius = radius,
+					sourceType = "Ability",
+					sourceId = "OrbitalStrike",
+				},
+			})
+			else nil
+		if shouldSuppressAbilityDamage(hookResult) then
+			continue
+		end
+		local resolvedDamage = damage
+		if typeof(hookResult) == "table" and typeof(hookResult.damage) == "number" then
+			resolvedDamage = math.max(hookResult.damage, 0)
+		elseif typeof(hookResult) == "table" and typeof(hookResult.damageMultiplier) == "number" then
+			resolvedDamage = math.max(resolvedDamage * hookResult.damageMultiplier, 0)
+		end
+		if typeof(hookResult) == "table" and hookResult.skipDamage == true then
+			continue
+		end
+		if resolvedDamage > 0 then
+			RoundService:DamageCore(trackedCore, resolvedDamage, {
+				attackerUserId = owner.UserId,
+				sourceType = "Ability",
+				sourceId = "OrbitalStrike",
+			})
+		end
+	end
+end
+
+local function startDamageTicks(player: Player, definition: AbilityDefinition, sessionId: number, position: Vector3, radius: number, topY: number, bottomY: number)
+	local durationSeconds = math.max(getDefinitionNumber(definition, "strikeDurationSeconds", 3), 0)
+	local tickSeconds = math.max(getDefinitionNumber(definition, "strikeTickSeconds", 0.5), 0.05)
+	local tickCount = math.max(math.floor(durationSeconds / tickSeconds + 0.5), 1)
+	local playerTickDamage = math.max(getDefinitionNumber(definition, "totalPlayerDamage", 115), 0) / tickCount
+	local coreTickDamage = math.max(getDefinitionNumber(definition, "totalCoreDamage", 30), 0) / tickCount
+
+	local zone = createDamageZone(position, radius, topY, bottomY)
+	local overlapParams = OverlapParams.new()
+	overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+	overlapParams.FilterDescendantsInstances = { zone }
+
+	task.spawn(function()
+		for _ = 1, tickCount do
+			if not (zone.Parent and player.Parent == Players and RoundService:IsPlayerActive(player)) then
+				break
+			end
+			damagePlayers(player, zone, overlapParams, position, radius, playerTickDamage)
+			damageCores(player, position, radius, topY, bottomY, coreTickDamage)
+			task.wait(tickSeconds)
+		end
+
+		if zone.Parent then
+			zone:Destroy()
+		end
+	end)
+end
+
+local function cutTerrainColumn(player: Player, definition: AbilityDefinition, position: Vector3, radius: number, bottomY: number)
+	local depth = math.max(position.Y - bottomY, radius)
+	local step = math.max(radius * getDefinitionNumber(definition, "terrainColumnStepScale", 0.75), 1)
+	DestructionService:DestroyCylinderDown(position, radius, depth, step, {
+		sourceType = "Ability",
+		sourceId = "OrbitalStrike",
+		ownerUserId = player.UserId,
+		timestamp = workspace:GetServerTimeNow(),
+	})
+end
+
+local function scheduleStrike(player: Player, definition: AbilityDefinition, sessionId: number, position: Vector3)
+	local delaySeconds = math.max(getDefinitionNumber(definition, "strikeDelay", 1.35), 0)
+	task.delay(delaySeconds, function()
+		local currentSession = sessions[player]
+		if currentSession and currentSession.sessionId == sessionId then
+			sessions[player] = nil
+		end
+		if player.Parent ~= Players or not RoundService:IsPlayerActive(player) then
+			return
+		end
+
+		local radius = getDefinitionNumber(definition, "strikeRadius", 22)
+		local activeMap = getActiveMap()
+		local topY, bottomY = getMapVerticalBounds(activeMap, radius, position)
+		cutTerrainColumn(player, definition, position, radius, bottomY)
+		startDamageTicks(player, definition, sessionId, position, radius, topY, bottomY)
+		fireAll(IMPACT_EFFECT, {
+			player = player,
+			abilityId = "OrbitalStrike",
+			sessionId = sessionId,
+			position = position,
+			radius = radius,
+			durationSeconds = getDefinitionNumber(definition, "strikeDurationSeconds", 3),
+		})
+	end)
+end
+
+local function beginTargeting(context: ServerClientMessageContext)
+	if not isReady(context) then
+		reject(context.player, nil, "NotReady")
+		return
+	end
+
+	nextSessionId += 1
+	local sessionId = nextSessionId
+	local timeLimit = math.max(getDefinitionNumber(context.definition, "targetingTimeLimit", 4), 0.5)
+	sessions[context.player] = {
+		sessionId = sessionId,
+		slot = context.slot,
+		abilityId = context.abilityId,
+		expiresAt = context.now + timeLimit,
+	}
+
+	fireToPlayer(context.player, BEGIN_TARGETING_EFFECT, {
+		player = context.player,
+		slot = context.slot,
+		abilityId = context.abilityId,
+		sessionId = sessionId,
+		expiresAt = context.now + timeLimit,
+		serverTime = context.now,
+		targetingTimeLimit = timeLimit,
+		strikeRadius = getDefinitionNumber(context.definition, "strikeRadius", 22),
+		cameraHeight = getDefinitionNumber(context.definition, "cameraHeight", 110),
+		targetFOV = getDefinitionNumber(context.definition, "targetFOV", 40),
+	})
+end
+
+local function confirmTarget(context: ServerClientMessageContext)
+	local payload = context.payload
+	if typeof(payload) ~= "table" then
+		reject(context.player, nil, "InvalidPayload")
+		return
+	end
+
+	local sessionId = payload.sessionId
+	local session = sessions[context.player]
+	if typeof(sessionId) ~= "number" or not session or session.sessionId ~= sessionId then
+		reject(context.player, if typeof(sessionId) == "number" then sessionId else nil, "InvalidSession")
+		return
+	end
+	if session.slot ~= context.slot or session.abilityId ~= context.abilityId then
+		reject(context.player, sessionId, "InvalidSession")
+		return
+	end
+	if context.now > session.expiresAt then
+		sessions[context.player] = nil
+		reject(context.player, sessionId, "Timeout")
+		return
+	end
+	if not isReady(context) then
+		sessions[context.player] = nil
+		reject(context.player, sessionId, "NotReady")
+		return
+	end
+
+	local position, reason = validateTarget(context.player, context.definition, payload.position)
+	if not position then
+		sessions[context.player] = nil
+		reject(context.player, sessionId, reason or "InvalidTarget")
+		return
+	end
+	if not setCooldownAndState(context, position) then
+		sessions[context.player] = nil
+		reject(context.player, sessionId, "CooldownFailed")
+		return
+	end
+
+	local radius = getDefinitionNumber(context.definition, "strikeRadius", 22)
+	local warningLifetime = math.max(
+		getDefinitionNumber(context.definition, "warningLifetimeSeconds", 1.6),
+		getDefinitionNumber(context.definition, "strikeDelay", 1.35)
+	)
+	spawnWarningPart(position, radius, warningLifetime)
+	fireAll(TELEGRAPH_EFFECT, {
+		player = context.player,
+		slot = context.slot,
+		abilityId = context.abilityId,
+		sessionId = sessionId,
+		position = position,
+		radius = radius,
+		strikeDelay = getDefinitionNumber(context.definition, "strikeDelay", 1.35),
+		serverTime = context.now,
+	})
+	scheduleStrike(context.player, context.definition, sessionId, position)
+end
+
+local function cancelTargeting(context: ServerClientMessageContext)
+	local payload = context.payload
+	local sessionId = if typeof(payload) == "table" then payload.sessionId else nil
+	local session = sessions[context.player]
+	if not session then
+		return
+	end
+	if typeof(sessionId) == "number" and session.sessionId ~= sessionId then
+		return
+	end
+
+	sessions[context.player] = nil
+	fireToPlayer(context.player, CANCELLED_EFFECT, {
+		abilityId = context.abilityId,
+		sessionId = session.sessionId,
+	})
+end
+
+function OrbitalStrike.OnStart(service: AbilityServiceLike)
+	abilityService = service
+end
+
+function OrbitalStrike.CanActivate(_context: ServerActivateContext): boolean
+	return false
+end
+
+function OrbitalStrike.OnClientMessage(context: ServerClientMessageContext)
+	local payload = context.payload
+	local action = if typeof(payload) == "table" and typeof(payload.action) == "string" then payload.action else ""
+
+	if context.messageType == AbilityConfig.MessageTypes.Intent then
+		if action == "BeginTargeting" then
+			beginTargeting(context)
+		elseif action == "ConfirmTarget" then
+			confirmTarget(context)
+		end
+	elseif context.messageType == AbilityConfig.MessageTypes.Cancel then
+		cancelTargeting(context)
+	end
+end
+
+function OrbitalStrike.OnPlayerRemoving(player: Player)
+	sessions[player] = nil
+end
+
+return OrbitalStrike

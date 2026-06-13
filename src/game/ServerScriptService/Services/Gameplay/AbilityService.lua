@@ -5,6 +5,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local EmoteService = require(ServerScriptService.Services.EmoteService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 
@@ -413,6 +414,8 @@ local function activate(player: Player, resolved: ResolvedAbilityRequest, curren
 	if typeof(resolved.slotState.cooldownEndsAt) == "number" and resolved.slotState.cooldownEndsAt > currentTime then
 		return
 	end
+
+	EmoteService:CancelActive(player, "Ability")
 
 	local behavior = getBehavior(resolved.abilityId, resolved.definition)
 	local context = {

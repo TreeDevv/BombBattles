@@ -1,3 +1,4 @@
+local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -7,16 +8,19 @@ local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
+local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
+local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
+local DestructionService = require(ServerScriptService.Services.DestructionService)
 
 local RESULT_KIND = AbilityResult.Kind
 local DEBUG_REPLAY_EVENTS = false
 
 type HandlerTable = {
 	fireEffect: ((effectName: string, payload: any) -> ())?,
-	explode: ((owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionConfig: { [string]: any }?) -> ())?,
+	explode: ((owner: any, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionConfig: { [string]: any }?) -> ())?,
 }
 
 type ProjectileAttachment = {
@@ -27,9 +31,24 @@ type ProjectileAttachment = {
 	targetKind: string?,
 }
 
+type ProjectileBurrowState = {
+	abilityId: string,
+	direction: Vector3,
+	startPosition: Vector3,
+	startedAt: number,
+	endsAt: number,
+	remainingDistance: number,
+	speed: number,
+	carveRadius: number,
+	carveStepDistance: number,
+	effectInterval: number,
+	lastCarvePosition: Vector3,
+	nextEffectAt: number,
+}
+
 type ProjectileState = {
 	id: string,
-	owner: Player,
+	owner: any,
 	bombType: string,
 	skinId: string,
 	rangeOrigin: Vector3,
@@ -54,6 +73,11 @@ type ProjectileState = {
 	destroyed: boolean,
 	nextSnapshotAt: number,
 	lastImpactAt: number,
+	frozenUntil: number?,
+	frozenVelocity: Vector3?,
+	frozenPosition: Vector3?,
+	frozenBy: string?,
+	burrow: ProjectileBurrowState?,
 }
 
 local BombProjectileService = {}
@@ -64,7 +88,14 @@ local heartbeatConnection: RBXScriptConnection? = nil
 local accumulator = 0
 local explodeProjectile
 local redirectProjectile
+local startBurrowProjectile
 local fireSnapshot
+
+local UNSAFE_TAGS = {
+	RoundConfig.Tags.TeamCore,
+	RoundConfig.Tags.TeamSpawn,
+	RoundConfig.Tags.LobbySpawn,
+}
 
 local function now(): number
 	return workspace:GetServerTimeNow()
@@ -116,11 +147,68 @@ local function fireEffect(effectName: string, payload)
 	end
 end
 
-local function explode(owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionConfig: { [string]: any }?)
+local function explode(owner: any, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionConfig: { [string]: any }?)
 	local callback = handlers.explode
 	if callback then
 		callback(owner, position, source, projectileId, bombSkinId, explosionConfig)
 	end
+end
+
+local function isValidOwner(owner: any): boolean
+	if typeof(owner) == "Instance" then
+		return owner:IsA("Player") and owner.Parent == Players
+	end
+
+	return RunService:IsStudio()
+		and typeof(owner) == "table"
+		and owner.studioAIBot == true
+		and typeof(owner.UserId) == "number"
+		and typeof(owner.Name) == "string"
+end
+
+local function isOwnerActive(owner: any): boolean
+	if typeof(owner) == "Instance" then
+		return owner:IsA("Player") and owner.Parent == Players
+	end
+	if not isValidOwner(owner) then
+		return false
+	end
+
+	local character = owner.Character
+	if typeof(character) ~= "Instance" or not character:IsA("Model") or not character.Parent then
+		return false
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0
+end
+
+local function getOwnerUserId(owner: any): number
+	return if typeof(owner) == "table" and typeof(owner.UserId) == "number" then owner.UserId else owner.UserId
+end
+
+local function hasTaggedAncestor(instance: Instance, tagName: string): boolean
+	local current: Instance? = instance
+	while current and current ~= workspace do
+		if CollectionService:HasTag(current, tagName) then
+			return true
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+local function hasUnsafeTaggedAncestor(instance: Instance): boolean
+	for _, tagName in ipairs(UNSAFE_TAGS) do
+		if hasTaggedAncestor(instance, tagName) then
+			return true
+		end
+	end
+	return false
+end
+
+local function hasDestructibleTaggedAncestor(instance: Instance): boolean
+	return hasTaggedAncestor(instance, DestructionConfig.Tag)
 end
 
 local function isSuppressed(result): boolean
@@ -168,7 +256,7 @@ local function getHorizontalDirection(direction: any): Vector3?
 	return horizontal.Unit
 end
 
-local function getOwnerFacingDirection(owner: Player): Vector3?
+local function getOwnerFacingDirection(owner: any): Vector3?
 	local character = owner.Character
 	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 	if rootPart and rootPart:IsA("BasePart") then
@@ -200,7 +288,7 @@ local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vect
 
 	local sweepRadius = math.max(state.physics.radius, 0)
 	for _, player in ipairs(Players:GetPlayers()) do
-		if player == state.owner then
+		if typeof(state.owner) == "Instance" and player == state.owner then
 			continue
 		end
 
@@ -231,7 +319,7 @@ local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vect
 	return nil
 end
 
-local function resolveGroundRollDirection(owner: Player, aimDirection: Vector3): Vector3
+local function resolveGroundRollDirection(owner: any, aimDirection: Vector3): Vector3
 	return getHorizontalDirection(aimDirection) or getOwnerFacingDirection(owner) or Vector3.zAxis
 end
 
@@ -250,7 +338,7 @@ local function getProjectileFolder(): Folder
 	return folder
 end
 
-local function preparePhysicalProjectile(projectileId: string, owner: Player, bombType: string, skinId: string, visuals): (Instance, BasePart)
+local function preparePhysicalProjectile(projectileId: string, owner: any, bombType: string, skinId: string, visuals): (Instance, BasePart)
 	local visualScale = if typeof(visuals) == "table" and typeof(visuals.visualScale) == "number"
 		then math.max(visuals.visualScale, 0.05)
 		else BombConfig.ProjectileVisualScale
@@ -272,11 +360,11 @@ local function preparePhysicalProjectile(projectileId: string, owner: Player, bo
 	end
 
 	projectile:SetAttribute("ProjectileId", projectileId)
-	projectile:SetAttribute("OwnerUserId", owner.UserId)
+	projectile:SetAttribute("OwnerUserId", getOwnerUserId(owner))
 	projectile:SetAttribute("BombType", bombType)
 	projectile:SetAttribute("BombSkinId", skinId)
 	rootPart:SetAttribute("ProjectileId", projectileId)
-	rootPart:SetAttribute("OwnerUserId", owner.UserId)
+	rootPart:SetAttribute("OwnerUserId", getOwnerUserId(owner))
 	rootPart:SetAttribute("BombType", bombType)
 	rootPart:SetAttribute("BombSkinId", skinId)
 	return projectile, rootPart
@@ -346,6 +434,107 @@ local function getAttachedPosition(state: ProjectileState): Vector3
 	return attachment.position
 end
 
+local function getFrozenUntil(result, currentTime: number): number?
+	local frozenUntil = tonumber(result.frozenUntil)
+	if frozenUntil and frozenUntil > currentTime then
+		return frozenUntil
+	end
+
+	local durationSeconds = tonumber(result.durationSeconds)
+	if durationSeconds and durationSeconds > 0 then
+		return currentTime + durationSeconds
+	end
+
+	return nil
+end
+
+local function applyFreezeResult(state: ProjectileState, result, currentTime: number): boolean
+	if typeof(result) ~= "table" then
+		return false
+	end
+	if state.frozenUntil and currentTime < state.frozenUntil then
+		return true
+	end
+
+	local frozenUntil = getFrozenUntil(result, currentTime)
+	if not frozenUntil then
+		return false
+	end
+
+	local position = if typeof(result.position) == "Vector3"
+		then result.position
+		elseif state.attached
+			then getAttachedPosition(state)
+			else getPhysicalPosition(state)
+	local velocity = readFiniteVector(result.velocity, getPhysicalVelocity(state))
+
+	state.frozenUntil = frozenUntil
+	state.frozenVelocity = velocity
+	state.frozenPosition = position
+	state.frozenBy = if typeof(result.frozenBy) == "string" then result.frozenBy else nil
+	state.position = position
+	state.lastPosition = position
+	state.velocity = Vector3.zero
+	state.settled = true
+	state.grounded = false
+	state.burrow = nil
+
+	destroyPhysicalProjectile(state)
+	fireSnapshot(state, currentTime, true)
+	return true
+end
+
+local function releaseFrozenProjectile(state: ProjectileState, currentTime: number)
+	if not state.frozenUntil or currentTime < state.frozenUntil then
+		return
+	end
+
+	local restoreVelocity = state.frozenVelocity
+	local frozenPosition = state.frozenPosition
+	state.frozenUntil = nil
+	state.frozenVelocity = nil
+	state.frozenPosition = nil
+	state.frozenBy = nil
+
+	if frozenPosition then
+		state.position = frozenPosition
+		state.lastPosition = frozenPosition
+	end
+
+	if restoreVelocity and restoreVelocity.Magnitude > 0.05 and not state.attached then
+		state.velocity = restoreVelocity
+		state.settled = false
+		state.grounded = false
+	else
+		state.velocity = Vector3.zero
+	end
+
+	fireSnapshot(state, currentTime, true)
+end
+
+local function stepFrozenProjectile(state: ProjectileState, fixedDt: number, currentTime: number): boolean
+	local frozenUntil = state.frozenUntil
+	if not frozenUntil then
+		return false
+	end
+	if currentTime >= frozenUntil then
+		releaseFrozenProjectile(state, currentTime)
+		return false
+	end
+
+	state.explodeAt += fixedDt
+	local frozenPosition = state.frozenPosition or state.position
+	state.position = frozenPosition
+	state.lastPosition = frozenPosition
+	state.velocity = Vector3.zero
+	state.settled = true
+	state.grounded = false
+
+	destroyPhysicalProjectile(state)
+	fireSnapshot(state, currentTime, false)
+	return true
+end
+
 local function getAttachNormal(result): Vector3
 	local normal = if typeof(result) == "table" then result.normal else nil
 	if typeof(normal) == "Vector3" and normal.Magnitude > 0.05 then
@@ -371,6 +560,7 @@ local function attachProjectile(state: ProjectileState, result, currentTime: num
 	state.velocity = Vector3.zero
 	state.settled = true
 	state.grounded = false
+	state.burrow = nil
 	state.attached = {
 		instance = instance,
 		localPosition = if instance then instance.CFrame:PointToObjectSpace(position) else nil,
@@ -514,6 +704,10 @@ fireSnapshot = function(state: ProjectileState, currentTime: number, force: bool
 		visuals = state.visuals,
 		visualScale = state.visuals.visualScale,
 		physicalProjectile = state.physicalProjectile,
+		frozen = state.frozenUntil ~= nil and currentTime < state.frozenUntil,
+		frozenUntil = state.frozenUntil,
+		frozenBy = state.frozenBy,
+		burrowing = state.burrow ~= nil,
 	})
 end
 
@@ -556,6 +750,9 @@ local function fireImpact(
 		return false
 	end
 	if impactResult.kind == RESULT_KIND.RedirectProjectile and redirectProjectile(state, impactResult, currentTime) then
+		return false
+	end
+	if impactResult.kind == RESULT_KIND.BurrowProjectile and startBurrowProjectile(state, impactResult, currentTime) then
 		return false
 	end
 	if typeof(impactResult.position) == "Vector3" then
@@ -637,6 +834,9 @@ local function fireContactImpact(state: ProjectileState, contact): boolean
 		return false
 	end
 	if impactResult.kind == RESULT_KIND.RedirectProjectile and redirectProjectile(state, impactResult, currentTime) then
+		return false
+	end
+	if impactResult.kind == RESULT_KIND.BurrowProjectile and startBurrowProjectile(state, impactResult, currentTime) then
 		return false
 	end
 
@@ -758,7 +958,7 @@ function redirectProjectile(state: ProjectileState, result, currentTime: number)
 		aimDirection = Vector3.zAxis
 	end
 
-	if typeof(result.owner) == "Instance" and result.owner:IsA("Player") then
+	if isValidOwner(result.owner) then
 		state.owner = result.owner
 	end
 
@@ -792,6 +992,7 @@ function redirectProjectile(state: ProjectileState, result, currentTime: number)
 	state.hasImpacted = false
 	state.grounded = false
 	state.attached = nil
+	state.burrow = nil
 	state.groundRollDirection = resolveGroundRollDirection(state.owner, aimDirection)
 
 	local remainingFuse = math.max(state.explodeAt - currentTime, 0)
@@ -818,7 +1019,181 @@ function redirectProjectile(state: ProjectileState, result, currentTime: number)
 	return true
 end
 
-local function handleStepHook(state: ProjectileState, nextPosition: Vector3, currentTime: number): boolean
+local function countDebrisTargets(debrisPayloads): number
+	if typeof(debrisPayloads) ~= "table" then
+		return 0
+	end
+	if typeof(debrisPayloads.targetsHit) == "number" then
+		return debrisPayloads.targetsHit
+	end
+	return #debrisPayloads
+end
+
+local function carveBurrowPosition(state: ProjectileState, burrow: ProjectileBurrowState, position: Vector3, currentTime: number)
+	local debrisPayloads = DestructionService:DestroySphere(position, burrow.carveRadius, {
+		sourceType = "Ability",
+		sourceId = burrow.abilityId,
+		bombId = state.id,
+		ownerUserId = getOwnerUserId(state.owner),
+		timestamp = currentTime,
+	}, {
+		skipDebrisWeld = true,
+	})
+
+	if countDebrisTargets(debrisPayloads) > 0 then
+		fireEffect("TerrainDebris", {
+			payloads = debrisPayloads,
+		})
+	end
+end
+
+local function readBurrowDirection(result, state: ProjectileState): Vector3
+	local direction = if typeof(result.direction) == "Vector3"
+		then result.direction
+		elseif typeof(result.aimDirection) == "Vector3" then result.aimDirection
+		else state.velocity
+	if direction.Magnitude <= 0.05 then
+		direction = Vector3.zAxis
+	end
+	return direction.Unit
+end
+
+function startBurrowProjectile(state: ProjectileState, result, currentTime: number): boolean
+	if typeof(result) ~= "table" then
+		return false
+	end
+
+	local direction = readBurrowDirection(result, state)
+	local speed = readNumber(result.speed, 58, 1, 220)
+	local maxDistance = readNumber(result.maxDistance, 34, 1, 220)
+	local maxDuration = readNumber(result.maxDuration, 0.75, 0.05, 5)
+	local carveRadius = readNumber(result.carveRadius, 4.4, 0.5, 24)
+	local carveStepDistance = readNumber(result.carveStepDistance, carveRadius * 0.8, 0.5, 32)
+	local effectInterval = readNumber(result.effectInterval, 0.075, 0.02, 0.5)
+	local startInset = readNumber(result.startInset, math.min(carveRadius * 0.45, 2.5), 0, 12)
+	local startPosition = readFiniteVector(result.position, state.position) + direction * startInset
+	local abilityId = if typeof(result.abilityId) == "string" and result.abilityId ~= "" then result.abilityId else "DrillBomb"
+
+	destroyPhysicalProjectile(state)
+	state.position = startPosition
+	state.lastPosition = startPosition
+	state.velocity = direction * speed
+	state.settled = false
+	state.hasImpacted = true
+	state.grounded = false
+	state.attached = nil
+	state.burrow = {
+		abilityId = abilityId,
+		direction = direction,
+		startPosition = startPosition,
+		startedAt = currentTime,
+		endsAt = math.min(currentTime + maxDuration, state.explodeAt),
+		remainingDistance = maxDistance,
+		speed = speed,
+		carveRadius = carveRadius,
+		carveStepDistance = carveStepDistance,
+		effectInterval = effectInterval,
+		lastCarvePosition = startPosition,
+		nextEffectAt = currentTime,
+	}
+
+	local burrow = state.burrow
+	if burrow then
+		carveBurrowPosition(state, burrow, startPosition, currentTime)
+	end
+	fireEffect("ProjectileBurrowStart", {
+		player = state.owner,
+		projectileId = state.id,
+		customProjectile = true,
+		bombType = state.bombType,
+		bombSkinId = state.skinId,
+		position = startPosition,
+		direction = direction,
+		radius = carveRadius,
+		speed = speed,
+		remainingFuse = math.max(state.explodeAt - currentTime, 0),
+		serverTime = currentTime,
+		visuals = state.visuals,
+	})
+	fireSnapshot(state, currentTime, true)
+	return true
+end
+
+local function shouldBurrowStopForHit(hit: RaycastResult?): boolean
+	if not hit then
+		return false
+	end
+	local instance = hit.Instance
+	if not (instance and instance:IsA("BasePart")) then
+		return true
+	end
+	if hasUnsafeTaggedAncestor(instance) then
+		return true
+	end
+	return not hasDestructibleTaggedAncestor(instance)
+end
+
+local function stepBurrowProjectile(state: ProjectileState, fixedDt: number, currentTime: number): boolean
+	local burrow = state.burrow
+	if not burrow then
+		return false
+	end
+
+	if currentTime >= burrow.endsAt or burrow.remainingDistance <= 0 then
+		state.burrow = nil
+		fireEffect("ProjectileBurrowEnd", {
+			player = state.owner,
+			projectileId = state.id,
+			customProjectile = true,
+			bombSkinId = state.skinId,
+			position = state.position,
+			direction = burrow.direction,
+			serverTime = currentTime,
+		})
+		explodeProjectile(state, state.position)
+		return true
+	end
+
+	local travelDistance = math.min(burrow.speed * fixedDt, burrow.remainingDistance)
+	local movement = burrow.direction * travelDistance
+	local hit = workspace:Raycast(state.position, movement, createRaycastParams(state))
+	local nextPosition = state.position + movement
+	if shouldBurrowStopForHit(hit) then
+		nextPosition = hit.Position - burrow.direction * math.min(math.max(state.physics.radius, 0.1), 1.5)
+		burrow.remainingDistance = 0
+	end
+
+	state.lastPosition = state.position
+	state.position = nextPosition
+	state.velocity = burrow.direction * burrow.speed
+	burrow.remainingDistance -= travelDistance
+
+	if (state.position - burrow.lastCarvePosition).Magnitude >= burrow.carveStepDistance or burrow.remainingDistance <= 0 then
+		burrow.lastCarvePosition = state.position
+		carveBurrowPosition(state, burrow, state.position, currentTime)
+	end
+
+	if currentTime >= burrow.nextEffectAt or burrow.remainingDistance <= 0 then
+		burrow.nextEffectAt = currentTime + burrow.effectInterval
+		fireEffect("ProjectileBurrowStep", {
+			player = state.owner,
+			projectileId = state.id,
+			customProjectile = true,
+			bombSkinId = state.skinId,
+			position = state.position,
+			lastPosition = state.lastPosition,
+			direction = burrow.direction,
+			radius = burrow.carveRadius,
+			speed = burrow.speed,
+			remainingDistance = burrow.remainingDistance,
+			serverTime = currentTime,
+		})
+	end
+	fireSnapshot(state, currentTime, false)
+	return true
+end
+
+local function handleStepHook(state: ProjectileState, nextPosition: Vector3, currentTime: number, fixedDt: number): boolean
 	local stepResult = AbilityService:RunHook("OnProjectileStep", {
 		projectileId = state.id,
 		owner = state.owner,
@@ -833,6 +1208,8 @@ local function handleStepHook(state: ProjectileState, nextPosition: Vector3, cur
 		remainingFuse = math.max(state.explodeAt - currentTime, 0),
 		sweepRadius = state.physics.radius,
 		customProjectile = true,
+		attached = state.attached ~= nil,
+		deltaTime = fixedDt,
 	})
 
 	if stepResult.kind == RESULT_KIND.DestroyProjectile or stepResult.kind == RESULT_KIND.Absorb then
@@ -856,6 +1233,22 @@ local function handleStepHook(state: ProjectileState, nextPosition: Vector3, cur
 	end
 	if stepResult.kind == RESULT_KIND.RedirectProjectile then
 		return not redirectProjectile(state, stepResult, currentTime)
+	end
+	if stepResult.kind == RESULT_KIND.BurrowProjectile then
+		return not startBurrowProjectile(state, stepResult, currentTime)
+	end
+	if stepResult.kind == RESULT_KIND.FreezeProjectile and applyFreezeResult(state, stepResult, currentTime) then
+		return false
+	end
+	if stepResult.kind == RESULT_KIND.ModifyProjectileVelocity then
+		local velocity = readFiniteVector(stepResult.velocity, state.velocity)
+		local maxSpeed = math.max(tonumber(stepResult.maxSpeed) or state.physics.maxSpeed, 1)
+		state.velocity = ProjectilePhysics.ClampVelocity(velocity, maxSpeed)
+		state.settled = false
+		state.grounded = false
+		if state.physicalProjectile and state.physicalProjectile.Parent then
+			setPhysicalMotion(state.physicalProjectile, state.velocity, Vector3.zero)
+		end
 	end
 
 	return true
@@ -895,19 +1288,25 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	if state.destroyed then
 		return
 	end
-	if not state.owner.Parent then
+	if not isOwnerActive(state.owner) then
 		BombProjectileService:DestroyProjectile(state.id, "OwnerRemoved")
+		return
+	end
+	if stepFrozenProjectile(state, fixedDt, currentTime) then
 		return
 	end
 	if currentTime >= state.explodeAt then
 		explodeProjectile(state)
 		return
 	end
+	if stepBurrowProjectile(state, fixedDt, currentTime) then
+		return
+	end
 
 	if state.attached then
 		state.position = getAttachedPosition(state)
 		state.velocity = Vector3.zero
-		if not handleStepHook(state, state.position, currentTime) then
+		if not handleStepHook(state, state.position, currentTime, fixedDt) then
 			return
 		end
 		if not state.destroyed then
@@ -923,7 +1322,7 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		if enforceRangeLimit(state) then
 			return
 		end
-		if not handleStepHook(state, state.position + state.velocity * fixedDt, currentTime) then
+		if not handleStepHook(state, state.position + state.velocity * fixedDt, currentTime, fixedDt) then
 			return
 		end
 		if state.destroyed or not state.physicalProjectile then
@@ -945,7 +1344,7 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		)
 	end
 
-	if not handleStepHook(state, predictedPosition, currentTime) then
+	if not handleStepHook(state, predictedPosition, currentTime, fixedDt) then
 		return
 	end
 	if state.destroyed then
@@ -1095,6 +1494,7 @@ function BombProjectileService:ApplyExternalVelocity(projectileId: string, veloc
 	state.settled = false
 	state.grounded = false
 	state.attached = nil
+	state.burrow = nil
 
 	if state.physicalProjectile and state.physicalProjectile.Parent then
 		setPhysicalMotion(state.physicalProjectile, velocity, Vector3.zero)
@@ -1110,7 +1510,7 @@ function BombProjectileService:Launch(request): boolean
 	end
 
 	local owner = request.owner
-	if not (typeof(owner) == "Instance" and owner:IsA("Player")) then
+	if not isValidOwner(owner) then
 		return false
 	end
 	local projectileId = request.projectileId
@@ -1204,6 +1604,11 @@ function BombProjectileService:Launch(request): boolean
 		destroyed = false,
 		nextSnapshotAt = launchTime,
 		lastImpactAt = 0,
+		frozenUntil = nil,
+		frozenVelocity = nil,
+		frozenPosition = nil,
+		frozenBy = nil,
+		burrow = nil,
 	}
 
 	activeProjectiles[projectileId] = state
@@ -1229,7 +1634,7 @@ function BombProjectileService:Launch(request): boolean
 	})
 	recordReplayEvent("BombThrown", {
 		bombId = projectileId,
-		ownerUserId = owner.UserId,
+		ownerUserId = getOwnerUserId(owner),
 		bombType = bombType,
 		bombSkinId = skinId,
 		position = origin,
@@ -1283,7 +1688,7 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 		end
 
 		local owner = state.owner
-		local ownerUserId = if owner and owner.Parent then owner.UserId else nil
+		local ownerUserId = if isOwnerActive(owner) then getOwnerUserId(owner) else nil
 		local radius = if typeof(state.physics.radius) == "number" then state.physics.radius else nil
 		local sizeScale = if radius and typeof(defaultRadius) == "number" and defaultRadius > 0 then radius / defaultRadius else nil
 

@@ -7,10 +7,8 @@ local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
-local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
-local DestructionService = require(ServerScriptService.Services.DestructionService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -19,7 +17,7 @@ type ServerHookContext = AbilityTypes.ServerHookContext
 
 type DrillRecord = {
 	player: Player,
-	drilled: boolean,
+	burrowing: boolean,
 }
 
 local DrillBomb = {} :: AbilityTypes.ServerBehavior
@@ -28,7 +26,6 @@ local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
 local PROJECTILES: { [string]: DrillRecord } = {}
 local projectileSerial = 0
-local abilityService = nil
 local bombProjectileService = nil
 
 local UNSAFE_TAGS = {
@@ -170,13 +167,7 @@ local function getTrackedProjectile(player: Player, context): DrillRecord?
 	return nil
 end
 
-local function isEligibleFloor(definition: AbilityDefinition, hitInstance: any, normal: any): boolean
-	if typeof(normal) ~= "Vector3" then
-		return false
-	end
-	if normal.Y < getDefinitionNumber(definition, "drillMinFloorNormalY", 0.68) then
-		return false
-	end
+local function isEligibleDrillSurface(_definition: AbilityDefinition, hitInstance: any): boolean
 	if not (typeof(hitInstance) == "Instance" and hitInstance:IsA("BasePart")) then
 		return false
 	end
@@ -186,29 +177,27 @@ local function isEligibleFloor(definition: AbilityDefinition, hitInstance: any, 
 	return hasDestructibleTaggedAncestor(hitInstance)
 end
 
-local function countDestroyedTargets(debrisPayloads): number
-	if typeof(debrisPayloads) ~= "table" then
-		return 0
+local function getIncomingDirection(payload): Vector3?
+	if typeof(payload) ~= "table" then
+		return nil
 	end
-	if typeof(debrisPayloads.targetsHit) == "number" then
-		return debrisPayloads.targetsHit
+	local velocity = payload.incomingVelocity
+	if typeof(velocity) == "Vector3" and velocity.Magnitude > 0.05 then
+		return velocity.Unit
 	end
-	return #debrisPayloads
+	velocity = payload.currentVelocity
+	if typeof(velocity) == "Vector3" and velocity.Magnitude > 0.05 then
+		return velocity.Unit
+	end
+	return nil
 end
 
-local function fireDrillEffect(player: Player, projectileId: string, position: Vector3, radius: number, hitInstance: Instance?)
-	if not (abilityService and type(abilityService.FireEffect) == "function") then
-		return
-	end
-
-	abilityService:FireEffect("DrillBombDrilled", {
-		player = player,
-		abilityId = "DrillBomb",
-		projectileId = projectileId,
-		position = position,
-		radius = radius,
-		hitInstance = hitInstance,
-	})
+local function cleanupProjectileLater(projectileId: string, record: DrillRecord, delaySeconds: number)
+	task.delay(delaySeconds, function()
+		if PROJECTILES[projectileId] == record then
+			PROJECTILES[projectileId] = nil
+		end
+	end)
 end
 
 function DrillBomb.CanActivate(context: ServerActivateContext): boolean
@@ -253,16 +242,27 @@ function DrillBomb.OnActivate(context: ServerActivateContext): AbilityActivation
 				directHitExplodes = false,
 				playerContactExplodes = false,
 			},
+			visuals = {
+				spinRadiansPerSecond = getDefinitionNumber(context.definition, "drillTravelSpinRadiansPerSecond", 18),
+				burrowSpinRadiansPerSecond = getDefinitionNumber(context.definition, "drillBurrowSpinRadiansPerSecond", 34),
+				trailColor = context.definition.previewColor,
+				highlightColor = context.definition.drillColor or context.definition.previewColor,
+				highlightFillTransparency = 0.72,
+				highlightOutlineTransparency = 0.08,
+				drill = true,
+			},
 		},
 	})
 	if not launched then
 		return false
 	end
 
-	PROJECTILES[projectileId] = {
+	local record = {
 		player = context.player,
-		drilled = false,
+		burrowing = false,
 	}
+	PROJECTILES[projectileId] = record
+	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 4)
 
 	local state = context.slotState.state
 	local drillsFired = if typeof(state) == "table" and typeof(state.drillsFired) == "number" then state.drillsFired else 0
@@ -294,78 +294,51 @@ function DrillBomb.OnBeforeProjectileImpact(context: ServerHookContext)
 		return AbilityResult.Continue()
 	end
 
-	if record.drilled then
-		if typeof(payload.normal) == "Vector3" and payload.normal.Y >= getDefinitionNumber(context.definition, "drillMinFloorNormalY", 0.68) then
-			PROJECTILES[projectileId] = nil
-			return {
-				kind = AbilityResult.Kind.ExplodeProjectile,
-				position = position,
-			}
-		end
+	if record.burrowing then
 		return AbilityResult.Continue()
 	end
 
 	local hitInstance = payload.hitInstance
-	if not isEligibleFloor(context.definition, hitInstance, payload.normal) then
+	if not isEligibleDrillSurface(context.definition, hitInstance) then
 		return AbilityResult.Continue()
 	end
 
-	local radius = math.max(getDefinitionNumber(context.definition, "drillRadius", 8), 0.5)
-	local debrisPayloads = DestructionService:DestroySphere(position, radius, {
-		sourceType = "Ability",
-		sourceId = context.abilityId,
-		bombId = projectileId,
-		ownerUserId = context.player.UserId,
-		timestamp = context.now,
-	})
-	if countDestroyedTargets(debrisPayloads) <= 0 then
+	local direction = getIncomingDirection(payload)
+	if not direction then
 		return AbilityResult.Continue()
 	end
 
-	record.drilled = true
-	fireDrillEffect(context.player, projectileId, position, radius, hitInstance)
-
-	local fallSpeed = math.max(getDefinitionNumber(context.definition, "drillFallSpeed", 78), 1)
-	local fallGravityScale = math.max(getDefinitionNumber(context.definition, "drillFallGravityScale", 0.72), 0)
-	local exitDepth = math.max(getDefinitionNumber(context.definition, "drillExitDepth", 5), 0)
+	record.burrowing = true
 	return {
-		kind = AbilityResult.Kind.RedirectProjectile,
-		origin = position - Vector3.yAxis * exitDepth,
-		aimDirection = -Vector3.yAxis,
-		launchSpeed = fallSpeed,
-		upwardVelocity = 0,
-		gravity = workspace.Gravity * fallGravityScale,
-		postImpactGravity = workspace.Gravity * fallGravityScale,
-		maxSpeed = fallSpeed,
-		impactResponse = ProjectilePhysics.ImpactResponse.Sandbag,
-		restitution = 0,
-		friction = 0.9,
-		wallFriction = 0.8,
-		minRollSpeed = 0,
-		minGroundImpactRollSpeed = 0,
+		kind = AbilityResult.Kind.BurrowProjectile,
+		abilityId = context.abilityId,
+		position = position,
+		direction = direction,
+		speed = getDefinitionNumber(context.definition, "drillBurrowSpeed", 62),
+		maxDistance = getDefinitionNumber(context.definition, "drillBurrowDistance", 42),
+		maxDuration = getDefinitionNumber(context.definition, "drillBurrowDuration", 0.8),
+		carveRadius = getDefinitionNumber(context.definition, "drillCarveRadius", 4.5),
+		carveStepDistance = getDefinitionNumber(context.definition, "drillCarveStepDistance", 3.25),
+		effectInterval = getDefinitionNumber(context.definition, "drillBurrowEffectInterval", 0.065),
+		startInset = getDefinitionNumber(context.definition, "drillStartInset", 2.2),
 	}
 end
 
-function DrillBomb.OnProjectileStep(context: ServerHookContext)
+function DrillBomb.OnBeforeExplosion(context: ServerHookContext)
 	local payload = context.context
-	local record = getTrackedProjectile(context.player, payload)
-	if not (record and record.drilled) then
+	if not getTrackedProjectile(context.player, payload) then
 		return AbilityResult.Continue()
 	end
-	if payload.settled ~= true and payload.landed ~= true then
-		return AbilityResult.Continue()
-	end
-
 	local projectileId = payload.projectileId
 	PROJECTILES[projectileId] = nil
+
 	return {
-		kind = AbilityResult.Kind.ExplodeProjectile,
-		position = if typeof(payload.position) == "Vector3" then payload.position else nil,
+		kind = AbilityResult.Kind.ModifyDamage,
+		explosionVisualScale = getDefinitionNumber(context.definition, "drillExplosionVisualScale", 1.12),
 	}
 end
 
-function DrillBomb.OnStart(service)
-	abilityService = service
+function DrillBomb.OnStart(_service)
 end
 
 function DrillBomb.OnPlayerRemoving(player: Player)

@@ -21,6 +21,7 @@ type FireRecord = {
 
 local FireBomb = {} :: AbilityTypes.ServerBehavior
 
+local RESULT_KIND = AbilityResult.Kind
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
 local ZONE_FOLDER_NAME = "FireBombZones"
@@ -250,6 +251,42 @@ local function getDamageTargets(owner: Player, zone: BasePart, overlapParams: Ov
 	return targets
 end
 
+local function resolvePlayerDamage(owner: Player, target: Player, humanoid: Humanoid, damage: number, sourceContext): (number, boolean)
+	local service = abilityService
+	if not service then
+		return damage, false
+	end
+
+	local character = target.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	local hookResult = service:RunHook("OnBeforePlayerDamage", {
+		owner = owner,
+		target = target,
+		character = character,
+		humanoid = humanoid,
+		rootPart = if rootPart and rootPart:IsA("BasePart") then rootPart else nil,
+		damage = damage,
+		sourceType = sourceContext.sourceType,
+		sourceId = sourceContext.sourceId,
+		projectileId = sourceContext.projectileId,
+		sourceContext = sourceContext,
+	})
+	if typeof(hookResult) ~= "table" then
+		return damage, false
+	end
+	if hookResult.kind == RESULT_KIND.Block or hookResult.kind == RESULT_KIND.Absorb or hookResult.skipDamage == true then
+		return 0, true
+	end
+	if typeof(hookResult.damage) == "number" then
+		return math.max(hookResult.damage, 0), false
+	end
+	if typeof(hookResult.damageMultiplier) == "number" then
+		return math.max(damage * hookResult.damageMultiplier, 0), false
+	end
+
+	return damage, false
+end
+
 local function damageTargets(owner: Player, zone: BasePart, overlapParams: OverlapParams, damage: number, projectileId: string)
 	if damage <= 0 then
 		return
@@ -261,13 +298,19 @@ local function damageTargets(owner: Player, zone: BasePart, overlapParams: Overl
 			continue
 		end
 
-		local appliedDamage = math.min(damage, healthBefore)
-		RoundService:RecordPlayerDamage(owner, target, appliedDamage, {
+		local sourceContext = {
 			sourceType = "Ability",
 			sourceId = "FireBomb",
 			projectileId = projectileId,
-		})
-		humanoid:TakeDamage(damage)
+		}
+		local resolvedDamage, blocked = resolvePlayerDamage(owner, target, humanoid, damage, sourceContext)
+		if blocked or resolvedDamage <= 0 then
+			continue
+		end
+
+		local appliedDamage = math.min(resolvedDamage, healthBefore)
+		RoundService:RecordPlayerDamage(owner, target, appliedDamage, sourceContext)
+		humanoid:TakeDamage(resolvedDamage)
 	end
 end
 

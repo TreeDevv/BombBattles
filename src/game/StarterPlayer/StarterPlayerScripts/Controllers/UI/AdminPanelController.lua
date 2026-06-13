@@ -488,6 +488,11 @@ function AdminPanelController:_buildPanel()
 		{ text = "Test POTG", activated = function() self:_runCommand("replay.testPOTG", {}) end },
 	})
 
+	self:_addSection(scroller, "Cutscene")
+	self:_addButton(scroller, "Play POTG Cutscene", function()
+		self:_runCommand("cutscene.playPOTG", {})
+	end)
+
 	self:_addSection(scroller, "Player")
 	self._speedInput = self:_addInputRow(scroller, "Walk speed", "24")
 	self._jumpInput = self:_addInputRow(scroller, "Jump power", "60")

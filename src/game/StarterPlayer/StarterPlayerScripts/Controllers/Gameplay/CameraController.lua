@@ -34,6 +34,9 @@ CameraController._currentFOV = CameraConfig.BaseFOV
 CameraController._currentRoll = 0
 CameraController._currentShoulderOffset = Vector3.zero
 CameraController._currentFallLagYOffset = 0
+CameraController._currentAirMotionOffset = Vector3.zero
+CameraController._currentAirRoll = 0
+CameraController._currentFallAnticipationYOffset = 0
 CameraController._cameraShaker = nil :: any
 CameraController._wasGrounded = false
 CameraController._hasObservedGroundedState = false
@@ -45,7 +48,14 @@ CameraController._landingSettleStartTime = NEVER
 CameraController._landingSettleIntensity = 0
 CameraController._landingSettleDuration = CameraConfig.LandingSettleDuration
 CameraController._currentLandingSettleYOffset = 0
+CameraController._speedEffectFOVIntensity = 0
 CameraController._throwFOVStartTime = NEVER
+CameraController._takeoffLiftStartTime = NEVER
+CameraController._takeoffLiftIntensity = 0
+CameraController._airActionPunchStartTime = NEVER
+CameraController._airActionPunchDuration = 0
+CameraController._airActionPunchFOVBonus = 0
+CameraController._airActionPunchOffset = Vector3.zero
 CameraController._mouseLocked = false
 CameraController._mouseUnlockFrames = 0
 CameraController._shiftLocked = CameraConfig.DefaultShiftLocked == true
@@ -87,6 +97,19 @@ end
 
 local function smoothVector(current: Vector3, target: Vector3, responsiveness: number, dt: number): Vector3
 	return current:Lerp(target, exponentialAlpha(responsiveness, dt))
+end
+
+local function inverseLerpClamped(minValue: number, maxValue: number, value: number): number
+	local range = maxValue - minValue
+	if math.abs(range) <= 0.001 then
+		return if value >= maxValue then 1 else 0
+	end
+
+	return math.clamp((value - minValue) / range, 0, 1)
+end
+
+local function flattenVelocity(velocity: Vector3): Vector3
+	return Vector3.new(velocity.X, 0, velocity.Z)
 end
 
 local function readBoolAttribute(instance: Instance, name: string): boolean
@@ -140,7 +163,10 @@ local function isHudFOVActive(camera: Camera, extraFOVAllowance: number?): boole
 	local maxMovementFOV = CameraConfig.BaseFOV
 		+ CameraConfig.SprintFOVBonus
 		+ CameraConfig.AirFOVBonus
+		+ CameraConfig.AirSpeedFOVBonus
+		+ CameraConfig.AirControlFOVBonus
 		+ CameraConfig.SlideJumpFOVBonus
+		+ CameraConfig.AirCarryFOVBonus
 		+ (extraFOVAllowance or 0)
 	return camera.FieldOfView > maxMovementFOV + 0.5
 end
@@ -258,6 +284,9 @@ function CameraController:_resetCameraState(camera: Camera?)
 	self._currentRoll = 0
 	self._currentShoulderOffset = Vector3.zero
 	self._currentFallLagYOffset = 0
+	self._currentAirMotionOffset = Vector3.zero
+	self._currentAirRoll = 0
+	self._currentFallAnticipationYOffset = 0
 	self._cameraShaker = nil
 	self._wasGrounded = false
 	self._hasObservedGroundedState = false
@@ -269,7 +298,14 @@ function CameraController:_resetCameraState(camera: Camera?)
 	self._landingSettleIntensity = 0
 	self._landingSettleDuration = CameraConfig.LandingSettleDuration
 	self._currentLandingSettleYOffset = 0
+	self._speedEffectFOVIntensity = 0
 	self._throwFOVStartTime = NEVER
+	self._takeoffLiftStartTime = NEVER
+	self._takeoffLiftIntensity = 0
+	self._airActionPunchStartTime = NEVER
+	self._airActionPunchDuration = 0
+	self._airActionPunchFOVBonus = 0
+	self._airActionPunchOffset = Vector3.zero
 
 	if camera then
 		self._currentFOV = camera.FieldOfView
@@ -315,6 +351,30 @@ function CameraController:_getThrowFOVBonus(now: number): number
 	return CameraConfig.ThrowFOVBonus * (1 - smoothstep(elapsed / duration))
 end
 
+function CameraController:_startAirActionPunch(duration: number, fovBonus: number, offset: Vector3)
+	self._airActionPunchStartTime = os.clock()
+	self._airActionPunchDuration = math.max(duration, 0.001)
+	self._airActionPunchFOVBonus = math.max(fovBonus, 0)
+	self._airActionPunchOffset = offset
+end
+
+function CameraController:_getAirActionPunch(now: number): (Vector3, number)
+	if self._airActionPunchStartTime == NEVER then
+		return Vector3.zero, 0
+	end
+
+	local elapsed = now - self._airActionPunchStartTime
+	if elapsed >= self._airActionPunchDuration then
+		self._airActionPunchStartTime = NEVER
+		self._airActionPunchFOVBonus = 0
+		self._airActionPunchOffset = Vector3.zero
+		return Vector3.zero, 0
+	end
+
+	local alpha = 1 - smoothstep(elapsed / self._airActionPunchDuration)
+	return self._airActionPunchOffset * alpha, self._airActionPunchFOVBonus * alpha
+end
+
 function CameraController:PlayBombThrowPunch()
 	self._throwFOVStartTime = os.clock()
 	self:_getCameraShaker():ShakeOnce(
@@ -328,6 +388,11 @@ function CameraController:PlayBombThrowPunch()
 end
 
 function CameraController:PlayAirBurstPunch()
+	self:_startAirActionPunch(
+		CameraConfig.AirBurstPunchDuration,
+		CameraConfig.AirBurstPunchFOVBonus,
+		CameraConfig.AirBurstPunchOffset
+	)
 	self:_getCameraShaker():ShakeOnce(
 		CameraConfig.AirBurstShakeMagnitude,
 		CameraConfig.AirBurstShakeRoughness,
@@ -336,6 +401,30 @@ function CameraController:PlayAirBurstPunch()
 		CameraConfig.AirBurstShakePositionInfluence,
 		CameraConfig.AirBurstShakeRotationInfluence
 	)
+end
+
+function CameraController:PlayGrapplePullPunch()
+	self:_startAirActionPunch(
+		CameraConfig.GrapplePunchDuration,
+		CameraConfig.GrapplePunchFOVBonus,
+		CameraConfig.GrapplePunchOffset
+	)
+	self:_getCameraShaker():ShakeOnce(
+		CameraConfig.AirBurstShakeMagnitude * 0.85,
+		CameraConfig.AirBurstShakeRoughness,
+		0,
+		CameraConfig.AirBurstShakeFadeOutTime,
+		Vector3.new(0.02, 0.04, 0.02),
+		Vector3.new(0.22, 0.08, 0.12)
+	)
+end
+
+function CameraController:PlayAbilityFOVPunch(duration: number, fovBonus: number)
+	self:_startAirActionPunch(math.max(duration, 0.001), math.max(fovBonus, 0), Vector3.zero)
+end
+
+function CameraController:SetSpeedEffectFOVIntensity(intensity: number)
+	self._speedEffectFOVIntensity = math.clamp(tonumber(intensity) or 0, 0, 1)
 end
 
 function CameraController:PlayExplosionShake(origin: Vector3, radius: number?)
@@ -371,6 +460,17 @@ function CameraController:PlayExplosionShake(origin: Vector3, radius: number?)
 		CameraConfig.BombExplosionShakeFadeOutTime,
 		CameraConfig.BombExplosionShakePositionInfluence * strength,
 		CameraConfig.BombExplosionShakeRotationInfluence * strength
+	)
+end
+
+function CameraController:PlayLocalBombExplosionShake()
+	self:_getCameraShaker():ShakeOnce(
+		CameraConfig.LocalBombExplosionShakeMagnitude,
+		CameraConfig.LocalBombExplosionShakeRoughness,
+		0,
+		CameraConfig.LocalBombExplosionShakeFadeOutTime,
+		CameraConfig.LocalBombExplosionShakePositionInfluence,
+		CameraConfig.LocalBombExplosionShakeRotationInfluence
 	)
 end
 
@@ -477,6 +577,76 @@ function CameraController:_getLandingSettleAlpha(now: number): number
 	return (1 - smoothstep(elapsed / duration)) * self._landingSettleIntensity
 end
 
+function CameraController:_startTakeoffLift(velocityY: number)
+	local liftAlpha = inverseLerpClamped(
+		CameraConfig.AirTakeoffMinVelocity,
+		CameraConfig.AirTakeoffMinVelocity * 3,
+		velocityY
+	)
+	if liftAlpha <= 0 then
+		return
+	end
+
+	self._takeoffLiftStartTime = os.clock()
+	self._takeoffLiftIntensity = liftAlpha
+end
+
+function CameraController:_getTakeoffLift(now: number): number
+	if self._takeoffLiftStartTime == NEVER then
+		return 0
+	end
+
+	local duration = math.max(CameraConfig.AirTakeoffDuration, 0.001)
+	local elapsed = now - self._takeoffLiftStartTime
+	if elapsed >= duration then
+		self._takeoffLiftStartTime = NEVER
+		self._takeoffLiftIntensity = 0
+		return 0
+	end
+
+	local alpha = (1 - smoothstep(elapsed / duration)) * self._takeoffLiftIntensity
+	return CameraConfig.AirTakeoffLiftYOffset * alpha
+end
+
+function CameraController:_getFallAnticipationAlpha(character: Model, rootPart: BasePart?, isAirborne: boolean, velocityY: number): number
+	if
+		not isAirborne
+		or not rootPart
+		or velocityY > CameraConfig.FallAnticipationDownVelocity
+		or CameraConfig.FallAnticipationRayDistance <= 0
+	then
+		return 0
+	end
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = { character }
+	raycastParams.RespectCanCollide = true
+
+	local result = workspace:Raycast(
+		rootPart.Position,
+		Vector3.yAxis * -CameraConfig.FallAnticipationRayDistance,
+		raycastParams
+	)
+	if not result then
+		return 0
+	end
+
+	local distanceAlpha = 1
+		- inverseLerpClamped(
+			CameraConfig.FallAnticipationMinDistance,
+			CameraConfig.FallAnticipationRayDistance,
+			result.Distance
+		)
+	local speedAlpha = inverseLerpClamped(
+		math.abs(CameraConfig.FallAnticipationDownVelocity),
+		math.abs(CameraConfig.FallAnticipationDownVelocity * 2),
+		-velocityY
+	)
+
+	return smoothstep(math.min(distanceAlpha, speedAlpha))
+end
+
 function CameraController:_updateFallState(now: number, isGrounded: boolean, velocityY: number): number
 	if not self._hasObservedGroundedState then
 		self._hasObservedGroundedState = true
@@ -506,6 +676,7 @@ function CameraController:_updateFallState(now: number, isGrounded: boolean, vel
 		if self._wasGrounded or not self._airborneStartTime then
 			self._airborneStartTime = now
 			self._maxDownwardSpeed = 0
+			self:_startTakeoffLift(velocityY)
 		end
 
 		self._maxDownwardSpeed = math.min(self._maxDownwardSpeed, velocityY)
@@ -518,20 +689,80 @@ end
 
 function CameraController:_updateFallLag(dt: number, isAirborne: boolean, airborneTime: number, velocityY: number)
 	local targetYOffset = 0
-	if
-		isAirborne
-		and velocityY <= CameraConfig.FallLagDownVelocityThreshold
-		and airborneTime >= CameraConfig.FallLagDelay
-	then
-		local fallLagRange = math.max(CameraConfig.FallLagFullTime - CameraConfig.FallLagDelay, 0.001)
-		local fallAlpha = math.clamp((airborneTime - CameraConfig.FallLagDelay) / fallLagRange, 0, 1)
-		targetYOffset = CameraConfig.MaxFallLagYOffset * fallAlpha
+	if isAirborne and velocityY <= CameraConfig.FallLagDownVelocityThreshold then
+		local fastFallAlpha = inverseLerpClamped(
+			CameraConfig.FallLagDownVelocityThreshold,
+			CameraConfig.FallLagFastDownVelocity,
+			velocityY
+		)
+		local delayScale = 1 - (fastFallAlpha * (1 - CameraConfig.FallLagFastDelayScale))
+		local delay = CameraConfig.FallLagDelay * delayScale
+		if airborneTime >= delay then
+			local fallLagRange = math.max(CameraConfig.FallLagFullTime - delay, 0.001)
+			local fallAlpha = math.clamp((airborneTime - delay) / fallLagRange, 0, 1)
+			targetYOffset = (CameraConfig.MaxFallLagYOffset + (CameraConfig.FallLagVelocityBonusYOffset * fastFallAlpha))
+				* fallAlpha
+		end
 	end
 
 	local responsiveness = if targetYOffset == 0
 		then CameraConfig.FallLagRecoveryResponsiveness
 		else CameraConfig.FallLagResponsiveness
 	self._currentFallLagYOffset = smoothNumber(self._currentFallLagYOffset, targetYOffset, responsiveness, dt)
+end
+
+function CameraController:_updateAirMotion(
+	dt: number,
+	camera: Camera,
+	isAirborne: boolean,
+	slideMomentumActive: boolean,
+	linearVelocity: Vector3
+)
+	local targetOffset = Vector3.zero
+	local targetRoll = 0
+
+	if isAirborne then
+		local localVelocity = camera.CFrame:VectorToObjectSpace(linearVelocity)
+		local lateralAlpha = math.clamp(
+			localVelocity.X / math.max(CameraConfig.AirVelocityLeanSpeedForMax, 1),
+			-1,
+			1
+		)
+		local forwardAlpha = math.clamp(
+			-localVelocity.Z / math.max(CameraConfig.AirDriftSpeedForMax, 1),
+			0,
+			1
+		)
+		local riseAlpha = math.clamp(
+			linearVelocity.Y / math.max(CameraConfig.AirVerticalRiseSpeedForMax, 1),
+			0,
+			1
+		)
+		local fallAlpha = math.clamp(
+			-linearVelocity.Y / math.max(CameraConfig.AirVerticalFallSpeedForMax, 1),
+			0,
+			1
+		)
+
+		targetRoll = math.rad(-CameraConfig.MaxAirVelocityRollDegrees * lateralAlpha)
+		targetOffset = Vector3.new(
+			-CameraConfig.AirDriftMaxOffset.X * lateralAlpha,
+			(CameraConfig.AirDriftMaxOffset.Y * riseAlpha * 0.55) - (CameraConfig.AirDriftMaxOffset.Y * fallAlpha),
+			CameraConfig.AirDriftMaxOffset.Z * forwardAlpha
+		)
+
+		if slideMomentumActive then
+			targetOffset += CameraConfig.AirCarryOffset
+		end
+	end
+
+	self._currentAirMotionOffset = smoothVector(
+		self._currentAirMotionOffset,
+		targetOffset,
+		CameraConfig.AirDriftResponsiveness,
+		dt
+	)
+	self._currentAirRoll = smoothNumber(self._currentAirRoll, targetRoll, CameraConfig.AirLeanResponsiveness, dt)
 end
 
 function CameraController:_bindCharacter(character: Model)
@@ -610,7 +841,12 @@ function CameraController:_step(dt: number)
 	local slideJumpBurstActive = readBoolAttribute(character, "Movement_SlideJumpBurstActive")
 	local isAirborne = not isGrounded
 	local rootPart = getRootPart(character)
-	local velocityY = if rootPart then rootPart.AssemblyLinearVelocity.Y else 0
+	local linearVelocity = if rootPart then rootPart.AssemblyLinearVelocity else Vector3.zero
+	local velocityY = linearVelocity.Y
+	local slideMomentumActive = slideJumpBurstActive
+		or slidePhase == "AirCarry"
+		or slidePhase == "GroundRunout"
+	local airFramingActive = isAirborne and (slideJumpBurstActive or slidePhase == "AirCarry")
 
 	local now = os.clock()
 	self:_updateLandingSettleTrigger(character, now)
@@ -618,20 +854,49 @@ function CameraController:_step(dt: number)
 	local airborneTime = self:_updateFallState(now, isGrounded, velocityY)
 	self:_updateFallLag(dt, isAirborne, airborneTime, velocityY)
 	local throwFOVBonus = self:_getThrowFOVBonus(now)
+	local airActionOffset, airActionFOVBonus = self:_getAirActionPunch(now)
+	local takeoffLiftYOffset = self:_getTakeoffLift(now)
+	local fallAnticipationAlpha = self:_getFallAnticipationAlpha(character, rootPart, isAirborne, velocityY)
+	if firstPerson then
+		fallAnticipationAlpha = 0
+	end
+	self._currentFallAnticipationYOffset = smoothNumber(
+		self._currentFallAnticipationYOffset,
+		CameraConfig.FallAnticipationMaxYOffset * fallAnticipationAlpha,
+		CameraConfig.FallLagResponsiveness,
+		dt
+	)
+	self:_updateAirMotion(dt, camera, isAirborne, airFramingActive, linearVelocity)
 
 	local targetFOV = CameraConfig.BaseFOV
 	if isSprinting then
 		targetFOV += CameraConfig.SprintFOVBonus
-	elseif isAirborne and moveMagnitude > 0.05 then
-		targetFOV += CameraConfig.AirFOVBonus
-	elseif effectiveSpeed > 0 then
+	elseif effectiveSpeed > 0 and not isAirborne then
 		local speedAlpha = math.clamp((effectiveSpeed - 18) / 6, 0, 1)
 		targetFOV += CameraConfig.SprintFOVBonus * speedAlpha
 	end
 
-	local slideMomentumActive = slideJumpBurstActive
-		or slidePhase == "AirCarry"
-		or slidePhase == "GroundRunout"
+	if isAirborne then
+		if moveMagnitude > 0.05 then
+			targetFOV += CameraConfig.AirFOVBonus
+		end
+
+		local horizontalSpeedForCamera = math.max(horizontalSpeed, flattenVelocity(linearVelocity).Magnitude)
+		local airSpeedAlpha = inverseLerpClamped(
+			CameraConfig.AirSpeedFOVMinSpeed,
+			CameraConfig.AirSpeedFOVMaxSpeed,
+			horizontalSpeedForCamera
+		)
+		targetFOV += CameraConfig.AirSpeedFOVBonus * airSpeedAlpha
+
+		local airControlAlpha = inverseLerpClamped(
+			CameraConfig.AirControlFOVMinMoveMagnitude,
+			1,
+			moveMagnitude
+		)
+		targetFOV += CameraConfig.AirControlFOVBonus * airControlAlpha
+	end
+
 	if slideMomentumActive then
 		local boostedSpeed = math.max(effectiveSpeed, slideSpeed, horizontalSpeed)
 		local speedRange = math.max(CameraConfig.SlideJumpFOVSpeedForMax - 24, 1)
@@ -639,14 +904,23 @@ function CameraController:_step(dt: number)
 			then 1
 			else math.clamp((boostedSpeed - 24) / speedRange, 0, 1)
 		targetFOV += CameraConfig.SlideJumpFOVBonus * slideJumpAlpha
+		if airFramingActive then
+			targetFOV += CameraConfig.AirCarryFOVBonus * slideJumpAlpha
+		end
 	end
+	targetFOV += CameraConfig.SpeedEffectFOVBonus * self._speedEffectFOVIntensity
+	targetFOV -= CameraConfig.FallAnticipationMaxFOVDip * fallAnticipationAlpha
 	targetFOV -= CameraConfig.LandingSettleMaxFOVDip * landingSettleAlpha
 	targetFOV += throwFOVBonus
+	targetFOV += airActionFOVBonus
 
-	if CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera, throwFOVBonus) then
+	if CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera, throwFOVBonus + airActionFOVBonus) then
 		self._currentFOV = camera.FieldOfView
 	else
-		self._currentFOV = smoothNumber(self._currentFOV, targetFOV, CameraConfig.FOVResponsiveness, dt)
+		local fovResponsiveness = if airActionFOVBonus > 0
+			then math.max(CameraConfig.FOVResponsiveness, CameraConfig.AirActionFOVResponsiveness)
+			else CameraConfig.FOVResponsiveness
+		self._currentFOV = smoothNumber(self._currentFOV, targetFOV, fovResponsiveness, dt)
 		camera.FieldOfView = self._currentFOV
 	end
 
@@ -668,13 +942,22 @@ function CameraController:_step(dt: number)
 	self._currentRoll = smoothNumber(self._currentRoll, targetRoll, CameraConfig.RollResponsiveness, dt)
 	self._currentLandingSettleYOffset = CameraConfig.LandingSettleMaxYOffset * landingSettleAlpha
 
+	local cameraMotionOffset = self._currentAirMotionOffset + airActionOffset + Vector3.new(0, takeoffLiftYOffset, 0)
+	local cameraRoll = self._currentRoll + self._currentAirRoll
+	if firstPerson then
+		cameraMotionOffset = Vector3.zero
+		cameraRoll = self._currentRoll
+	end
+
 	local shakeCFrame = self:_getCameraShaker():Update(dt)
 
 	camera.CFrame = camera.CFrame
 		* CFrame.new(self._currentShoulderOffset)
+		* CFrame.new(cameraMotionOffset)
 		* CFrame.new(0, self._currentFallLagYOffset, 0)
+		* CFrame.new(0, self._currentFallAnticipationYOffset, 0)
 		* CFrame.new(0, self._currentLandingSettleYOffset, 0)
-		* CFrame.Angles(0, 0, self._currentRoll)
+		* CFrame.Angles(0, 0, cameraRoll)
 		* shakeCFrame
 end
 

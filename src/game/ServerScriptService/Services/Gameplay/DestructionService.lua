@@ -1,6 +1,5 @@
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
@@ -63,20 +62,7 @@ local function recordMapDestruction(position: Vector3, radius: number, sourceCon
 	end)
 end
 
-local function isStudioBombTeamProtectionBypassEnabled(): boolean
-	if not RunService:IsStudio() then
-		return false
-	end
-
-	local studioTesting = RoundConfig.StudioTesting
-	return studioTesting ~= nil and studioTesting.AllowBombTeamProtectionBypass == true
-end
-
 local function hasUnsafeTaggedAncestor(instance: Instance): boolean
-	if isStudioBombTeamProtectionBypassEnabled() then
-		return false
-	end
-
 	local current: Instance? = instance
 	while current and current ~= workspace do
 		for _, tagName in ipairs(UNSAFE_TAGS) do

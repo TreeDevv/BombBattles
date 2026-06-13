@@ -4,6 +4,7 @@ return table.freeze({
 	ReplayDebugEnabled = true,
 	ReplayDebugAllowedUserIds = {},
 	RequestRemoteName = "AdminRequest",
+	POTGCutsceneRemoteName = "AdminPOTGCutscene",
 	RequestCooldownSeconds = 0.15,
 	MaxCoreDamage = 1000,
 	MinWalkSpeed = 4,

@@ -50,6 +50,11 @@ type HighlightRecord = {
 	highlight: Highlight,
 	tween: Tween?,
 }
+type BeamAttachments = {
+	beamEnd: Attachment?,
+	beamEffects: Attachment?,
+	lightningEffects: Attachment?,
+}
 
 local Interceptor = {} :: AbilityTypes.ClientBehavior
 
@@ -309,6 +314,20 @@ local function isPlacementClear(boundsCFrame: CFrame, boundsSize: Vector3, floor
 	return true
 end
 
+local function hidePreviewVfx(ghost: Instance)
+	for _, descendant in ipairs(ghost:GetDescendants()) do
+		if descendant:IsA("ParticleEmitter")
+			or descendant:IsA("Beam")
+			or descendant:IsA("Trail")
+			or descendant:IsA("PointLight")
+			or descendant:IsA("SpotLight")
+			or descendant:IsA("SurfaceLight")
+		then
+			descendant.Enabled = false
+		end
+	end
+end
+
 local function styleGhost(ghost: Instance, definition: AbilityDefinition)
 	local transparency = definition.previewTransparency or 0.5
 	for _, part in ipairs(getBaseParts(ghost)) do
@@ -316,17 +335,29 @@ local function styleGhost(ghost: Instance, definition: AbilityDefinition)
 		part.CanCollide = false
 		part.CanQuery = false
 		part.CanTouch = false
-		part.Transparency = transparency
 	end
+
+	local cylinder = ghost:FindFirstChild("Cylinder", true)
+	if cylinder and cylinder:IsA("BasePart") then
+		cylinder.Transparency = transparency
+	end
+
+	hidePreviewVfx(ghost)
 end
 
-local function setGhostColor(ghost: Instance, definition: AbilityDefinition, valid: boolean)
-	local color = if valid
-		then definition.previewValidColor or Color3.fromRGB(255, 78, 78)
-		else definition.previewInvalidColor or Color3.fromRGB(255, 68, 68)
+local function setGhostColor(ghost: Instance, definition: AbilityDefinition, _valid: boolean)
+	local color = definition.previewValidColor or Color3.fromRGB(76, 255, 97)
+	local cylinder = ghost:FindFirstChild("Cylinder", true)
+	if not (cylinder and cylinder:IsA("BasePart")) then
+		return
+	end
 
-	for _, part in ipairs(getBaseParts(ghost)) do
-		part.Color = color
+	local surfaceAppearance = cylinder:FindFirstChild("SurfaceAppearance")
+	if surfaceAppearance and surfaceAppearance:IsA("SurfaceAppearance") then
+		surfaceAppearance.Color = color
+		surfaceAppearance.EmissiveTint = color
+	else
+		cylinder.Color = color
 	end
 end
 
@@ -361,8 +392,7 @@ local function updatePreview()
 		return
 	end
 
-	local controller = preview.controller
-	if not controller or controller:GetEquippedAbilityId(preview.slot) ~= preview.abilityId then
+	if not preview.controller then
 		cancelPreview()
 		return
 	end
@@ -734,11 +764,35 @@ local function expireVisual(interceptorId: string)
 	stopHighlightLoopIfIdle()
 end
 
-local function findBeamEnd(centerPiece: Instance): Attachment?
+local function getAttachment(parent: Instance?, childName: string): Attachment?
+	local child = parent and parent:FindFirstChild(childName)
+	return if child and child:IsA("Attachment") then child else nil
+end
+
+local function findBeamAttachments(centerPiece: Instance): BeamAttachments
 	local cylinder = centerPiece:FindFirstChild("Cylinder", true)
 	local blast = cylinder and cylinder:FindFirstChild("Blast")
-	local beamEnd = blast and blast:FindFirstChild("Beam end")
-	return if beamEnd and beamEnd:IsA("Attachment") then beamEnd else nil
+	return {
+		beamEnd = getAttachment(blast, "Beam end"),
+		beamEffects = getAttachment(blast, "Beam effects 2"),
+		lightningEffects = getAttachment(blast, "Lightning effects 2"),
+	}
+end
+
+local function setAttachmentWorldCFrame(attachment: Attachment, cframe: CFrame)
+	local ok = pcall(function()
+		attachment.WorldCFrame = cframe
+	end)
+	if ok then
+		return
+	end
+
+	local parent = attachment.Parent
+	if parent and parent:IsA("BasePart") then
+		attachment.CFrame = parent.CFrame:ToObjectSpace(cframe)
+	elseif parent and parent:IsA("Attachment") then
+		attachment.CFrame = parent.WorldCFrame:ToObjectSpace(cframe)
+	end
 end
 
 local function moveAttachmentToWorldPosition(attachment: Attachment, position: Vector3)
@@ -749,10 +803,15 @@ local function moveAttachmentToWorldPosition(attachment: Attachment, position: V
 		return
 	end
 
-	local parent = attachment.Parent
-	if parent and parent:IsA("BasePart") then
-		attachment.CFrame = parent.CFrame:ToObjectSpace(CFrame.new(position))
+	setAttachmentWorldCFrame(attachment, attachment.WorldCFrame - attachment.WorldPosition + position)
+end
+
+local function faceAttachmentTowardWorldPosition(attachment: Attachment, targetPosition: Vector3)
+	local origin = attachment.WorldPosition
+	if (targetPosition - origin).Magnitude <= 0.001 then
+		return
 	end
+	setAttachmentWorldCFrame(attachment, CFrame.lookAt(origin, targetPosition))
 end
 
 local function emitBeamEnd(beamEnd: Attachment)
@@ -781,9 +840,16 @@ local function playIntercept(interceptorId: string, position: Vector3)
 		return
 	end
 
-	local beamEnd = findBeamEnd(visual.centerPiece)
+	local attachments = findBeamAttachments(visual.centerPiece)
+	local beamEnd = attachments.beamEnd
 	if beamEnd then
 		moveAttachmentToWorldPosition(beamEnd, position)
+		if attachments.beamEffects then
+			faceAttachmentTowardWorldPosition(attachments.beamEffects, beamEnd.WorldPosition)
+		end
+		if attachments.lightningEffects then
+			setAttachmentWorldCFrame(attachments.lightningEffects, beamEnd.WorldCFrame)
+		end
 		emitBeamEnd(beamEnd)
 	end
 
@@ -891,10 +957,6 @@ local function playIntercepted(payload: any)
 end
 
 local function startPreview(context: ClientActivateRequestedContext): boolean
-	if context.controller:GetCooldownRemaining(context.slot) > 0 then
-		return true
-	end
-
 	local centerTemplate = getCenterTemplate(context.definition)
 	if not centerTemplate then
 		warn("[Interceptor] Missing ReplicatedStorage.Assets.Abilities.Interceptor.Interceptor.CenterPiece")

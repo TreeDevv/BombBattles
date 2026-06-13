@@ -11,6 +11,20 @@ return {
 		MinPlayers = 1,
 		HoldSoloRoundsActive = true,
 		AllowBombTeamProtectionBypass = true,
+		AIBots = {
+			Enabled = true,
+			TargetTeamSize = 6,
+			MaxBotsTotal = 12,
+			PatrolRadius = 42,
+			PatrolRepathSeconds = 3.5,
+			ThrowMinSeconds = 1.8,
+			ThrowMaxSeconds = 3.4,
+			ThrowOriginHeight = 3.2,
+			AimSpreadStuds = 10,
+			RespawnSeconds = 4,
+			WalkSpeed = 18,
+			JumpPower = 45,
+		},
 	},
 
 	Teams = {

@@ -11,6 +11,9 @@ export type AbilityResultKind =
 	| "ModifyDamage"
 	| "DeferProjectile"
 	| "RedirectProjectile"
+	| "BurrowProjectile"
+	| "FreezeProjectile"
+	| "ModifyProjectileVelocity"
 
 export type AbilityHookResult = {
 	kind: AbilityResultKind?,
@@ -28,6 +31,9 @@ AbilityResult.Kind = table.freeze({
 	ModifyDamage = "ModifyDamage",
 	DeferProjectile = "DeferProjectile",
 	RedirectProjectile = "RedirectProjectile",
+	BurrowProjectile = "BurrowProjectile",
+	FreezeProjectile = "FreezeProjectile",
+	ModifyProjectileVelocity = "ModifyProjectileVelocity",
 })
 
 function AbilityResult.Continue(extra: AbilityHookResult?): AbilityHookResult

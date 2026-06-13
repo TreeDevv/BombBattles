@@ -6,6 +6,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 local CameraController = require(script.Parent.Parent:WaitForChild("CameraController"))
 local MovementController = require(script.Parent.Parent:WaitForChild("MovementController"))
 
@@ -37,13 +38,25 @@ type ActivePlayerPull = {
 	sessionId: number,
 	rootPart: BasePart,
 	anchorPosition: Vector3,
+	pullTargetPosition: Vector3,
 	hitNormal: Vector3?,
 	startedAt: number,
+	lastStepAt: number,
+	startDistance: number,
 	maxDuration: number,
 	arrivalDistance: number,
-	pullSpeed: number,
+	minPullSpeed: number,
+	maxPullSpeed: number,
+	pullAcceleration: number,
 	upwardBias: number,
+	steerAcceleration: number,
+	maxSteerSpeed: number,
+	tangentialRetention: number,
+	maxTangentialSpeed: number,
 	releaseUpwardVelocity: number,
+	releaseForwardVelocity: number,
+	releaseMomentumScale: number,
+	releaseMaxSpeed: number,
 	releaseWallKickSpeed: number,
 	releaseWallKickMaxDistance: number,
 	releaseWallKickIntoWallDot: number,
@@ -59,6 +72,11 @@ GrappleHook.HandlesInputState = true
 local LocalPlayer = Players.LocalPlayer
 local DEBUG_GRAPPLE = false
 local VISUAL_FOLDER_NAME = "GrappleHookVisuals"
+local SOUND_FIRE = "GrappleHookFire"
+local SOUND_LATCH = "GrappleHookLatch"
+local SOUND_BOMB = "GrappleHookBomb"
+local SOUND_FAIL = "GrappleHookFail"
+local SOUND_RELEASE = "GrappleHookRelease"
 
 local activePull: ActivePlayerPull? = nil
 local activeServerSessionId: number? = nil
@@ -81,6 +99,53 @@ end
 local function getDefinitionBoolean(definition: AbilityDefinition?, key: string, fallback: boolean): boolean
 	local value = if definition then definition[key] else nil
 	return if typeof(value) == "boolean" then value else fallback
+end
+
+local function clampMagnitude(vector: Vector3, maxMagnitude: number): Vector3
+	if maxMagnitude <= 0 then
+		return Vector3.zero
+	end
+
+	local magnitude = vector.Magnitude
+	if magnitude <= maxMagnitude then
+		return vector
+	end
+	return vector.Unit * maxMagnitude
+end
+
+local function flattenDirection(direction: Vector3): Vector3
+	local flat = Vector3.new(direction.X, 0, direction.Z)
+	if flat.Magnitude <= 0.001 then
+		return Vector3.zero
+	end
+	return flat.Unit
+end
+
+local function playOptionalSound(soundName: string, parent: Instance?)
+	SoundUtil.Play(soundName, parent)
+end
+
+local function playSoundDescendants(instance: Instance?)
+	if not instance then
+		return
+	end
+
+	if instance:IsA("Sound") and instance.SoundId ~= "" then
+		instance.TimePosition = 0
+		instance:Play()
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("Sound") and descendant.SoundId ~= "" then
+			descendant.TimePosition = 0
+			descendant:Play()
+		end
+	end
+end
+
+local function playVisualSounds(visual: GrappleVisual?)
+	if visual and visual.anchorInstance then
+		playSoundDescendants(visual.anchorInstance)
+	end
 end
 
 local function setDebugAttribute(name: string, value: any?)
@@ -245,6 +310,63 @@ local function predictEndpoint(origin: Vector3, direction: Vector3, definition: 
 	local maxRange = math.max(getDefinitionNumber(definition, "maxRange", 350), 1)
 	local hit = workspace:Raycast(origin, direction * maxRange, getPredictionRaycastParams())
 	return if hit then hit.Position else origin + direction * maxRange
+end
+
+local function tintVisual(visual: GrappleVisual?, color: Color3, widthScale: number?)
+	if not visual then
+		return
+	end
+
+	if visual.beam and visual.beam.Parent then
+		visual.beam.Color = ColorSequence.new(color)
+		local scale = math.max(widthScale or 1, 0.05)
+		visual.beam.Width0 *= scale
+		visual.beam.Width1 *= scale
+	end
+	if visual.spring and visual.spring.Parent then
+		visual.spring.Color = BrickColor.new(color)
+	end
+	if visual.anchorInstance and visual.anchorInstance.Parent then
+		for _, part in ipairs(getBaseParts(visual.anchorInstance)) do
+			if part.Material == Enum.Material.Neon or part.Transparency < 0.95 then
+				part.Color = color
+			end
+		end
+	elseif visual.anchorPart and visual.anchorPart.Parent then
+		visual.anchorPart.Color = color
+	end
+end
+
+local function spawnImpactPulse(position: Vector3, color: Color3, size: number, duration: number)
+	local folder = getVisualFolder()
+	local pulse = Instance.new("Part")
+	pulse.Name = "GrappleHookImpactPulse"
+	pulse.Shape = Enum.PartType.Ball
+	pulse.Anchored = true
+	pulse.CanCollide = false
+	pulse.CanQuery = false
+	pulse.CanTouch = false
+	pulse.CastShadow = false
+	pulse.Material = Enum.Material.Neon
+	pulse.Color = color
+	pulse.Transparency = 0.24
+	pulse.Size = Vector3.new(0.18, 0.18, 0.18)
+	pulse.CFrame = CFrame.new(position)
+	pulse.Parent = folder
+
+	TweenService:Create(
+		pulse,
+		TweenInfo.new(math.max(duration, 0.03), Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+		{
+			Size = Vector3.new(size, size, size),
+			Transparency = 1,
+		}
+	):Play()
+	task.delay(duration + 0.04, function()
+		if pulse.Parent then
+			pulse:Destroy()
+		end
+	end)
 end
 
 local function destroyVisual(visual: GrappleVisual?)
@@ -718,8 +840,16 @@ local function shouldApplyWallKick(active: ActivePlayerPull, rootPart: BasePart)
 	return intoWallDot >= active.releaseWallKickIntoWallDot
 end
 
+local function shouldApplyReleaseBoost(reason: string?): boolean
+	return reason == "Arrived"
+		or reason == "JumpCancel"
+		or reason == "ManualCancel"
+		or reason == "ClientCancel"
+		or reason == "Timeout"
+end
+
 local function applyReleaseBoost(active: ActivePlayerPull, reason: string?)
-	if reason == "Restart" then
+	if reason == "Restart" or not shouldApplyReleaseBoost(reason) then
 		return
 	end
 
@@ -733,6 +863,23 @@ local function applyReleaseBoost(active: ActivePlayerPull, reason: string?)
 	local currentVelocity = rootPart.AssemblyLinearVelocity
 	local upwardDelta = math.max(targetVelocity - currentVelocity.Y, 0)
 	local velocityDelta = Vector3.yAxis * upwardDelta
+	local currentSpeed = currentVelocity.Magnitude
+
+	if currentSpeed > 0.05 then
+		local scaledVelocity = currentVelocity * math.max(active.releaseMomentumScale, 0)
+		if scaledVelocity.Magnitude > currentSpeed then
+			velocityDelta += clampMagnitude(scaledVelocity, active.releaseMaxSpeed) - currentVelocity
+		elseif currentSpeed > active.releaseMaxSpeed then
+			velocityDelta += currentVelocity.Unit * (active.releaseMaxSpeed - currentSpeed)
+		end
+	end
+
+	local forwardDirection = active.pullTargetPosition - rootPart.Position
+	if forwardDirection.Magnitude > 0.05 and active.releaseForwardVelocity > 0 then
+		forwardDirection = forwardDirection.Unit
+		local forwardDelta = math.max(active.releaseForwardVelocity - currentVelocity:Dot(forwardDirection), 0)
+		velocityDelta += forwardDirection * forwardDelta
+	end
 
 	local normal = active.hitNormal
 	if normal and shouldApplyWallKick(active, rootPart) then
@@ -783,6 +930,34 @@ local function sendCancel(controller, slot: string)
 	})
 end
 
+local function getMoveSteerDirection(humanoid: Humanoid, pullDirection: Vector3): Vector3
+	local moveDirection = humanoid.MoveDirection
+	if moveDirection.Magnitude < 0.05 then
+		return Vector3.zero
+	end
+
+	local steer = moveDirection - pullDirection * moveDirection:Dot(pullDirection)
+	if steer.Magnitude < 0.05 then
+		steer = flattenDirection(moveDirection)
+	end
+	return if steer.Magnitude > 0.05 then steer.Unit else Vector3.zero
+end
+
+local function getPullTargetPosition(anchorPosition: Vector3, hitNormal: Vector3?, definition: AbilityDefinition): Vector3
+	if not hitNormal then
+		return anchorPosition
+	end
+
+	local wallNormalY = getDefinitionNumber(definition, "wallAssistMaxNormalY", 0.45)
+	if math.abs(hitNormal.Y) > wallNormalY then
+		return anchorPosition
+	end
+
+	local standOff = math.max(getDefinitionNumber(definition, "wallAssistStandOff", 4.5), 0)
+	local lift = math.max(getDefinitionNumber(definition, "wallAssistLift", 4.5), 0)
+	return anchorPosition + hitNormal.Unit * standOff + Vector3.yAxis * lift
+end
+
 local function stepPlayerPull(active: ActivePlayerPull)
 	local rootPart = active.rootPart
 	if not rootPart.Parent then
@@ -796,13 +971,17 @@ local function stepPlayerPull(active: ActivePlayerPull)
 		return
 	end
 
-	local elapsed = os.clock() - active.startedAt
+	local now = os.clock()
+	local elapsed = now - active.startedAt
 	if elapsed >= active.maxDuration then
 		cancelActivePull(false, "Timeout")
 		return
 	end
 
-	local offset = active.anchorPosition - rootPart.Position
+	local dt = math.clamp(now - active.lastStepAt, 1 / 240, 1 / 20)
+	active.lastStepAt = now
+
+	local offset = active.pullTargetPosition - rootPart.Position
 	local distance = offset.Magnitude
 	if distance <= active.arrivalDistance then
 		cancelActivePull(false, "Arrived")
@@ -813,7 +992,24 @@ local function stepPlayerPull(active: ActivePlayerPull)
 		return
 	end
 
-	rootPart.AssemblyLinearVelocity = offset.Unit * active.pullSpeed + Vector3.yAxis * active.upwardBias
+	local pullDirection = offset.Unit
+	local currentVelocity = rootPart.AssemblyLinearVelocity
+	local radialSpeed = currentVelocity:Dot(pullDirection)
+	local targetRadialSpeed = math.min(active.minPullSpeed + active.pullAcceleration * elapsed, active.maxPullSpeed)
+	local nextRadialSpeed = math.min(math.max(radialSpeed, 0) + active.pullAcceleration * dt, targetRadialSpeed)
+
+	local tangentialVelocity = currentVelocity - pullDirection * radialSpeed
+	tangentialVelocity *= math.clamp(active.tangentialRetention, 0, 1)
+	tangentialVelocity = clampMagnitude(tangentialVelocity, active.maxTangentialSpeed)
+
+	local steerDirection = getMoveSteerDirection(humanoid, pullDirection)
+	local steerVelocity = if steerDirection.Magnitude > 0
+		then steerDirection * math.min(active.steerAcceleration * dt, active.maxSteerSpeed)
+		else Vector3.zero
+
+	local upwardAssist = Vector3.yAxis * active.upwardBias * math.clamp(distance / math.max(active.startDistance, 1), 0.25, 1)
+	local desiredVelocity = pullDirection * nextRadialSpeed + tangentialVelocity + steerVelocity + upwardAssist
+	rootPart.AssemblyLinearVelocity = clampMagnitude(desiredVelocity, active.maxPullSpeed + active.maxTangentialSpeed)
 end
 
 local function startPlayerPull(sessionId: number, anchorPosition: Vector3, payload, definition: AbilityDefinition, visual: GrappleVisual?)
@@ -831,17 +1027,33 @@ local function startPlayerPull(sessionId: number, anchorPosition: Vector3, paylo
 		pivotTo(anchorInstance, getHookCFrame(anchorPosition, anchorPosition - rootPart.Position))
 	end
 
+	local pullTargetPosition = getPullTargetPosition(anchorPosition, getPayloadNormal(payload), definition)
+	local startDistance = math.max((pullTargetPosition - rootPart.Position).Magnitude, 1)
+	local configuredPullSpeed = math.max(tonumber(payload.playerPullSpeed) or getDefinitionNumber(definition, "playerPullSpeed", 120), 1)
+
 	local active: ActivePlayerPull = {
 		sessionId = sessionId,
 		rootPart = rootPart,
 		anchorPosition = anchorPosition,
+		pullTargetPosition = pullTargetPosition,
 		hitNormal = getPayloadNormal(payload),
 		startedAt = os.clock(),
+		lastStepAt = os.clock(),
+		startDistance = startDistance,
 		maxDuration = math.max(tonumber(payload.playerMaxPullTime) or getDefinitionNumber(definition, "playerMaxPullTime", 1.5), 0.05),
 		arrivalDistance = math.max(tonumber(payload.playerArrivalDistance) or getDefinitionNumber(definition, "playerArrivalDistance", 7), 1),
-		pullSpeed = math.max(tonumber(payload.playerPullSpeed) or getDefinitionNumber(definition, "playerPullSpeed", 120), 1),
+		minPullSpeed = math.max(getDefinitionNumber(definition, "playerMinPullSpeed", 55), 1),
+		maxPullSpeed = math.max(getDefinitionNumber(definition, "playerMaxPullSpeed", configuredPullSpeed), 1),
+		pullAcceleration = math.max(getDefinitionNumber(definition, "playerPullAcceleration", 190), 1),
 		upwardBias = tonumber(payload.playerUpwardBias) or getDefinitionNumber(definition, "playerUpwardBias", 22),
+		steerAcceleration = math.max(getDefinitionNumber(definition, "playerSteerAcceleration", 75), 0),
+		maxSteerSpeed = math.max(getDefinitionNumber(definition, "playerMaxSteerSpeed", 26), 0),
+		tangentialRetention = getDefinitionNumber(definition, "playerTangentialRetention", 0.88),
+		maxTangentialSpeed = math.max(getDefinitionNumber(definition, "playerMaxTangentialSpeed", 62), 0),
 		releaseUpwardVelocity = getDefinitionNumber(definition, "releaseUpwardVelocity", 48),
+		releaseForwardVelocity = getDefinitionNumber(definition, "releaseForwardVelocity", 70),
+		releaseMomentumScale = getDefinitionNumber(definition, "releaseMomentumScale", 0.82),
+		releaseMaxSpeed = getDefinitionNumber(definition, "releaseMaxSpeed", 105),
 		releaseWallKickSpeed = getDefinitionNumber(definition, "releaseWallKickSpeed", 26),
 		releaseWallKickMaxDistance = getDefinitionNumber(definition, "releaseWallKickMaxDistance", 10),
 		releaseWallKickIntoWallDot = getDefinitionNumber(definition, "releaseWallKickIntoWallDot", 0.35),
@@ -860,7 +1072,9 @@ local function startPlayerPull(sessionId: number, anchorPosition: Vector3, paylo
 	setDebugAttribute("AnchorPosition", anchorPosition)
 	setClientStatus("ActiveWall", "")
 	MovementController:RecordExternalAirControlLaunch("GrappleHook", getDefinitionNumber(definition, "airControlMinAirTime", 0.2))
-	if type(CameraController.PlayAirBurstPunch) == "function" then
+	if type(CameraController.PlayGrapplePullPunch) == "function" then
+		CameraController:PlayGrapplePullPunch()
+	elseif type(CameraController.PlayAirBurstPunch) == "function" then
 		CameraController:PlayAirBurstPunch()
 	end
 end
@@ -930,6 +1144,7 @@ function GrappleHook.OnActivateRequested(context: ClientActivateRequestedContext
 		pendingVisuals[sequence] = visual
 	end
 
+	playOptionalSound(SOUND_FIRE, rootPart)
 	ensureJumpCancel(context.controller, context.slot)
 	setClientStatus("Sent", "")
 	context.controller:SendMessage(context.slot, AbilityConfig.MessageTypes.Activate, {
@@ -963,6 +1178,10 @@ function GrappleHook.OnEffect(context: ClientEffectContext)
 		local visual = remoteVisuals[sessionId]
 		remoteVisuals[sessionId] = nil
 		fadeAndDestroyVisual(visual)
+		if context.payload.player == context.localPlayer then
+			local rootPart = getCharacterRoot(context.localPlayer)
+			playOptionalSound(SOUND_RELEASE, rootPart)
+		end
 		return
 	end
 
@@ -970,7 +1189,18 @@ function GrappleHook.OnEffect(context: ClientEffectContext)
 		local sequence = if typeof(payload.sessionId) == "number" then payload.sessionId else 0
 		local visual = pendingVisuals[sequence]
 		pendingVisuals[sequence] = nil
+		local failColor = getDefinitionColor(definition, "failColor", Color3.fromRGB(255, 86, 86))
+		tintVisual(visual, failColor, 0.75)
+		if typeof(payload.anchorPosition) == "Vector3" then
+			spawnImpactPulse(
+				payload.anchorPosition,
+				failColor,
+				getDefinitionNumber(definition, "failPulseSize", 2.2),
+				getDefinitionNumber(definition, "failPulseSeconds", 0.16)
+			)
+		end
 		fadeAndDestroyVisual(visual, getDefinitionNumber(definition, "missVisualDurationSeconds", 0.16))
+		playOptionalSound(SOUND_FAIL, getCharacterRoot(context.localPlayer))
 		setClientStatus(context.effectName == "GrappleHookMiss" and "Miss" or "Fail", "")
 		return
 	end
@@ -1007,9 +1237,39 @@ function GrappleHook.OnEffect(context: ClientEffectContext)
 			local attachmentParent = if targetKind == "Enemy" then targetRoot elseif targetKind == "Bomb" then bombRoot else nil
 			visual = createVisual(player, shooterRoot.Position, anchorPosition, definition, attachmentParent)
 			applyConfirmedTravelTime(visual, payload)
+			if targetKind == "Bomb" then
+				tintVisual(visual, getDefinitionColor(definition, "bombBeamColor", Color3.fromRGB(255, 211, 92)), 1.15)
+			elseif targetKind == "Enemy" then
+				tintVisual(visual, getDefinitionColor(definition, "enemyBeamColor", Color3.fromRGB(255, 95, 95)), 1.05)
+			end
 			finishTravelAndTaut(visual, anchorPosition, definition, nil)
 			remoteVisuals[sessionId] = visual
 		end
+	end
+
+	if targetKind == "Bomb" then
+		tintVisual(visual, getDefinitionColor(definition, "bombBeamColor", Color3.fromRGB(255, 211, 92)), 1.15)
+	elseif targetKind == "Enemy" then
+		tintVisual(visual, getDefinitionColor(definition, "enemyBeamColor", Color3.fromRGB(255, 95, 95)), 1.05)
+	else
+		tintVisual(visual, getDefinitionColor(definition, "beamColor", Color3.fromRGB(103, 229, 255)), 1)
+	end
+
+	spawnImpactPulse(
+		anchorPosition,
+		if targetKind == "Bomb"
+			then getDefinitionColor(definition, "bombBeamColor", Color3.fromRGB(255, 211, 92))
+			elseif targetKind == "Enemy" then getDefinitionColor(definition, "enemyBeamColor", Color3.fromRGB(255, 95, 95))
+			else getDefinitionColor(definition, "latchColor", Color3.fromRGB(133, 245, 255)),
+		getDefinitionNumber(definition, "latchPulseSize", 2.8),
+		getDefinitionNumber(definition, "latchPulseSeconds", 0.2)
+	)
+
+	if player == context.localPlayer then
+		playVisualSounds(visual)
+		playOptionalSound(if targetKind == "Bomb" then SOUND_BOMB else SOUND_LATCH, getCharacterRoot(context.localPlayer))
+	else
+		playVisualSounds(visual)
 	end
 
 	if player == context.localPlayer and targetKind == "Wall" then

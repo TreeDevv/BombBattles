@@ -6,6 +6,11 @@ local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 
 type AbilityDefinition = AbilityTypes.AbilityDefinition
 type ClientEffectContext = AbilityTypes.ClientEffectContext
+type MeshRecord = {
+	mesh: SpecialMesh,
+	finalScale: Vector3,
+	startScale: Vector3,
+}
 
 local ForcefieldDome = {} :: AbilityTypes.ClientBehavior
 
@@ -56,6 +61,14 @@ local function pivotTo(instance: Instance, cframe: CFrame)
 	else
 		(instance :: BasePart).CFrame = cframe
 	end
+end
+
+local function scaledVector(vector: Vector3, scale: number): Vector3
+	return Vector3.new(
+		math.max(vector.X * scale, 0.01),
+		math.max(vector.Y * scale, 0.01),
+		math.max(vector.Z * scale, 0.01)
+	)
 end
 
 local function getRootPart(player: Player): BasePart?
@@ -132,6 +145,15 @@ local function tweenParts(records, tweenInfo: TweenInfo, transparency: number, s
 			}
 			TweenService:Create(part, tweenInfo, goal):Play()
 		end
+
+		for _, meshRecord in ipairs(record.meshRecords) do
+			local mesh = meshRecord.mesh
+			if mesh.Parent then
+				TweenService:Create(mesh, tweenInfo, {
+					Scale = if shrink then meshRecord.startScale else meshRecord.finalScale,
+				}):Play()
+			end
+		end
 	end
 end
 
@@ -162,16 +184,28 @@ local function playVisual(player: Player, definition: AbilityDefinition, activeE
 		part.CanTouch = false
 		part.Massless = true
 		part.Transparency = 1
-		part.Size = Vector3.new(
-			math.max(finalSize.X * startScale, 0.01),
-			math.max(finalSize.Y * startScale, 0.01),
-			math.max(finalSize.Z * startScale, 0.01)
-		)
+		part.Size = scaledVector(finalSize, startScale)
+
+		local meshRecords = {}
+		for _, child in ipairs(part:GetChildren()) do
+			if child:IsA("SpecialMesh") then
+				local finalScale = child.Scale
+				local meshStartScale = scaledVector(finalScale, startScale)
+				child.Scale = meshStartScale
+				table.insert(meshRecords, {
+					mesh = child,
+					finalScale = finalScale,
+					startScale = meshStartScale,
+				})
+			end
+		end
+
 		table.insert(records, {
 			part = part,
 			finalSize = finalSize,
 			startSize = part.Size,
 			finalTransparency = finalTransparency,
+			meshRecords = meshRecords,
 		})
 	end
 
@@ -187,6 +221,14 @@ local function playVisual(player: Player, definition: AbilityDefinition, activeE
 				Size = record.finalSize,
 				Transparency = record.finalTransparency,
 			}):Play()
+		end
+		for _, meshRecord in ipairs(record.meshRecords) do
+			local mesh = meshRecord.mesh
+			if mesh.Parent then
+				TweenService:Create(mesh, inInfo, {
+					Scale = meshRecord.finalScale,
+				}):Play()
+			end
 		end
 	end
 

@@ -14,6 +14,7 @@ local ATTACHMENT_NAMES = table.freeze({
 })
 local DEFAULT_EXPLOSION_VFX_PATH = table.freeze({ "Assets", "VFX", "Explosion", "Default" })
 local DEFAULT_EXPLOSION_CLEANUP_SECONDS = 8
+local EXPLOSION_VISUAL_POSITION_OFFSET = Vector3.new(0, -1, 0)
 
 local warnedMissingAttachments = {}
 
@@ -82,7 +83,7 @@ local function getSkinTemplate(skinId: any): Instance?
 	end
 
 	for _, child in ipairs(folder:GetChildren()) do
-		if child.Name == "Explosion" then
+		if child.Name == "Explosion" or child.Name == "Beam" then
 			continue
 		end
 		if child:IsA("BasePart") or child:IsA("Model") then
@@ -306,6 +307,21 @@ function BombVisualUtil.GetExplosionTemplate(skinId: any): (Instance?, string, b
 	return getDefaultExplosionTemplate(), resolvedSkinId, true
 end
 
+function BombVisualUtil.GetSkinTrajectoryBeamTemplate(skinId: any): Instance?
+	local resolvedSkinId = BombSkinConfig.NormalizeSkinId(skinId)
+	if resolvedSkinId == "" then
+		resolvedSkinId = BombSkinConfig.DefaultSkinId
+	end
+
+	local skinFolder = getSkinFolder(resolvedSkinId)
+	local beam = skinFolder and skinFolder:FindFirstChild("Beam")
+	if beam and (beam:IsA("Model") or beam:IsA("BasePart")) then
+		return beam
+	end
+
+	return nil
+end
+
 function BombVisualUtil.PlaceEffectInstance(instance: Instance, position: Vector3)
 	local cframe = CFrame.new(position)
 	if instance:IsA("Model") then
@@ -378,7 +394,7 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 
 	local clone = template:Clone()
 	clone.Name = if typeof(options.name) == "string" and options.name ~= "" then options.name else "BombExplosionVFX"
-	BombVisualUtil.PlaceEffectInstance(clone, position)
+	BombVisualUtil.PlaceEffectInstance(clone, position + EXPLOSION_VISUAL_POSITION_OFFSET)
 	local visualScale = if typeof(options.visualScale) == "number" then math.max(options.visualScale, 0.05) else 1
 	scaleEffectInstance(clone, visualScale)
 	clone.Parent = parent

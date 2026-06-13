@@ -12,10 +12,12 @@ local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysi
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
 local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
+local EmoteService = require(ServerScriptService.Services.EmoteService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
 local REMOTES_FOLDER_NAME = "Remotes"
@@ -43,7 +45,7 @@ type CookState = {
 
 type ProjectileState = {
 	id: string,
-	owner: Player,
+	owner: any,
 	skinId: string,
 	path: any,
 	launchedAt: number,
@@ -54,6 +56,11 @@ type ProjectileState = {
 	landed: boolean,
 	physicalProjectile: Instance?,
 	physicalRoot: BasePart?,
+	nextSnapshotAt: number,
+	frozenUntil: number?,
+	frozenVelocity: Vector3?,
+	frozenPosition: Vector3?,
+	frozenBy: string?,
 }
 
 local BombService = {}
@@ -243,8 +250,49 @@ local function getBombCount(player: Player): number
 	return if typeof(count) == "number" then math.clamp(math.floor(count), 0, BombConfig.MaxBombs) else BombConfig.MaxBombs
 end
 
+local function isPlayerOwner(owner: any): boolean
+	return typeof(owner) == "Instance" and owner:IsA("Player")
+end
+
+local function getOwnerUserId(owner: any): number
+	if typeof(owner) == "table" and typeof(owner.UserId) == "number" then
+		return owner.UserId
+	end
+	return owner.UserId
+end
+
+local function isStudioAIBotOwner(owner: any): boolean
+	return RunService:IsStudio()
+		and typeof(owner) == "table"
+		and owner.studioAIBot == true
+		and typeof(owner.UserId) == "number"
+		and typeof(owner.Name) == "string"
+end
+
 local function isActivePlayer(player: Player): boolean
 	return player.Parent == Players and RoundService:IsPlayerActive(player)
+end
+
+local function isActiveBombOwner(owner: any): boolean
+	if isPlayerOwner(owner) then
+		return isActivePlayer(owner)
+	end
+	if not isStudioAIBotOwner(owner) then
+		return false
+	end
+
+	local state = RoundService:GetState()
+	if not state or state.state ~= RoundStates.Active then
+		return false
+	end
+
+	local character = owner.Character
+	if typeof(character) ~= "Instance" or not character:IsA("Model") or not character.Parent then
+		return false
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0
 end
 
 local function getCharacterParts(player: Player): (Model?, Humanoid?, BasePart?)
@@ -262,9 +310,17 @@ local function getCharacterParts(player: Player): (Model?, Humanoid?, BasePart?)
 	return character, humanoid, nil
 end
 
-local function getTeamName(player: Player): string?
-	local teamName = player:GetAttribute(ROUND_TEAM_ATTR)
-	return if typeof(teamName) == "string" and teamName ~= "" then teamName else nil
+local function getTeamName(owner: any): string?
+	if typeof(owner) == "table" and typeof(owner.teamName) == "string" and owner.teamName ~= "" then
+		return owner.teamName
+	end
+
+	if isPlayerOwner(owner) then
+		local teamName = owner:GetAttribute(ROUND_TEAM_ATTR)
+		return if typeof(teamName) == "string" and teamName ~= "" then teamName else nil
+	end
+
+	return nil
 end
 
 local function getHorizontalDirection(direction: any): Vector3?
@@ -326,7 +382,7 @@ local function getProjectileFolder(): Folder
 	return folder
 end
 
-local function preparePhysicalProjectile(projectileId: string, owner: Player, skinId: string): (Instance, BasePart)
+local function preparePhysicalProjectile(projectileId: string, owner: any, skinId: string): (Instance, BasePart)
 	local projectile, rootPart = BombVisualUtil.CreateBombVisual(skinId, "BombProjectile_" .. projectileId, {
 		anchored = false,
 		canCollide = true,
@@ -345,10 +401,10 @@ local function preparePhysicalProjectile(projectileId: string, owner: Player, sk
 	end
 
 	projectile:SetAttribute("ProjectileId", projectileId)
-	projectile:SetAttribute("OwnerUserId", owner.UserId)
+	projectile:SetAttribute("OwnerUserId", getOwnerUserId(owner))
 	projectile:SetAttribute("BombSkinId", skinId)
 	rootPart:SetAttribute("ProjectileId", projectileId)
-	rootPart:SetAttribute("OwnerUserId", owner.UserId)
+	rootPart:SetAttribute("OwnerUserId", getOwnerUserId(owner))
 	rootPart:SetAttribute("BombSkinId", skinId)
 	return projectile, rootPart
 end
@@ -388,9 +444,9 @@ local function calculateRedirectTrajectory(origin: Vector3, aimDirection: Vector
 	)
 end
 
-local function createProjectileId(player: Player): string
+local function createProjectileId(owner: any): string
 	nextProjectileId += 1
-	return string.format("%d:%d", player.UserId, nextProjectileId)
+	return string.format("%d:%d", getOwnerUserId(owner), nextProjectileId)
 end
 
 local function getDamageForDistance(
@@ -569,14 +625,15 @@ local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConf
 	end
 end
 
-local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
+local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
 	local ownerTeam = getTeamName(owner)
+	local ownerUserId = getOwnerUserId(owner)
 	local hitUserIds = {}
 	local killedUserIds = {}
 	local baseDamageMultiplier = readNonNegativeNumber(damageMultiplier, 1)
 
 	for _, player in ipairs(Players:GetPlayers()) do
-		if player == owner then
+		if isPlayerOwner(owner) and player == owner then
 			continue
 		end
 		if ownerTeam and getTeamName(player) == ownerTeam then
@@ -632,10 +689,12 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: stri
 		if hookResult.skipDamage ~= true and damage > 0 then
 			local healthBefore = humanoid.Health
 			local appliedDamage = math.min(damage, healthBefore)
-			RoundService:RecordPlayerDamage(owner, player, appliedDamage, {
-				sourceType = "Bomb",
-				sourceId = sourceId,
-			})
+			if isPlayerOwner(owner) then
+				RoundService:RecordPlayerDamage(owner, player, appliedDamage, {
+					sourceType = "Bomb",
+					sourceId = sourceId,
+				})
+			end
 			humanoid:TakeDamage(damage)
 			local healthAfter = humanoid.Health
 
@@ -645,7 +704,7 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: stri
 			end
 			recordReplayEvent("PlayerDamaged", {
 				victimUserId = player.UserId,
-				attackerUserId = owner.UserId,
+				attackerUserId = ownerUserId,
 				amount = appliedDamage,
 				sourceType = "Bomb",
 				sourceId = sourceId,
@@ -665,8 +724,9 @@ local function damageEnemyPlayers(owner: Player, origin: Vector3, sourceId: stri
 	return hitUserIds, killedUserIds
 end
 
-local function damageEnemyAnchors(owner: Player, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
+local function damageEnemyAnchors(owner: any, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
 	local ownerTeam = getTeamName(owner)
+	local ownerUserId = getOwnerUserId(owner)
 	local bypassTeamProtection = isStudioBombTeamProtectionBypassEnabled()
 	local baseDamageMultiplier = readNonNegativeNumber(damageMultiplier, 1)
 
@@ -718,7 +778,7 @@ local function damageEnemyAnchors(owner: Player, origin: Vector3, sourceId: stri
 			end
 
 			RoundService:DamageCore(trackedCore, damage, {
-				attackerUserId = owner.UserId,
+				attackerUserId = ownerUserId,
 				sourceType = "Bomb",
 				sourceId = sourceId,
 			})
@@ -757,7 +817,7 @@ local function getProjectilePhysicsVelocity(state: ProjectileState): Vector3
 	return Vector3.zero
 end
 
-local function explode(owner: Player, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionOverride)
+local function explode(owner: any, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionOverride)
 	if projectileId then
 		local state = activeProjectiles[projectileId]
 		if state then
@@ -797,7 +857,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 	if typeof(explosionResult.position) == "Vector3" then
 		position = explosionResult.position
 	end
-	if typeof(explosionResult.owner) == "Instance" and explosionResult.owner:IsA("Player") then
+	if isPlayerOwner(explosionResult.owner) or isStudioAIBotOwner(explosionResult.owner) then
 		owner = explosionResult.owner
 	end
 	if typeof(explosionResult.explosion) == "table" then
@@ -815,15 +875,18 @@ local function explode(owner: Player, position: Vector3, source: string, project
 	local killedUserIds = {}
 	local debrisPayloads = {}
 
-	if isActivePlayer(owner) then
+	if isActiveBombOwner(owner) then
+		local ownerUserId = getOwnerUserId(owner)
 		debrisPayloads = DestructionService:DestroySphere(position, explosionConfig.terrainRadius, {
 			sourceType = "Bomb",
 			sourceId = projectileId,
 			bombId = projectileId,
-			ownerUserId = owner.UserId,
+			ownerUserId = ownerUserId,
 			timestamp = impactTimestamp,
 		})
-		applyOwnerKnockback(owner, position, explosionConfig)
+		if isPlayerOwner(owner) then
+			applyOwnerKnockback(owner, position, explosionConfig)
+		end
 		hitUserIds, killedUserIds = damageEnemyPlayers(owner, position, projectileId, playerDamageMultiplier, explosionConfig)
 		damageEnemyAnchors(owner, position, projectileId, coreDamageMultiplier, explosionConfig)
 	end
@@ -863,7 +926,7 @@ local function explode(owner: Player, position: Vector3, source: string, project
 		projectileId = projectileId,
 		source = source,
 		sourceType = "Bomb",
-		ownerUserId = owner.UserId,
+		ownerUserId = getOwnerUserId(owner),
 		bombType = BombProjectileConfig.BombType.Normal,
 		bombSkinId = bombSkinId,
 		position = position,
@@ -1223,6 +1286,11 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		landed = false,
 		physicalProjectile = nil,
 		physicalRoot = nil,
+		nextSnapshotAt = launchTime,
+		frozenUntil = nil,
+		frozenVelocity = nil,
+		frozenPosition = nil,
+		frozenBy = nil,
 	}
 	activeProjectiles[projectileId] = state
 
@@ -1248,13 +1316,24 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		fuseDuration = remainingFuse,
 	})
 
-	task.delay(remainingFuse + BombConfig.ProjectileLifetimePadding, function()
-		local currentState = activeProjectiles[projectileId]
-		if currentState then
+	local function scheduleCleanup(delaySeconds: number)
+		task.delay(math.max(delaySeconds, 0), function()
+			local currentState = activeProjectiles[projectileId]
+			if not currentState then
+				return
+			end
+
+			local cleanupDelay = currentState.explodeAt + BombConfig.ProjectileLifetimePadding - now()
+			if cleanupDelay > 0 then
+				scheduleCleanup(cleanupDelay)
+				return
+			end
+
 			destroyPhysicalProjectile(currentState)
 			activeProjectiles[projectileId] = nil
-		end
-	end)
+		end)
+	end
+	scheduleCleanup(remainingFuse + BombConfig.ProjectileLifetimePadding)
 end
 
 local function redirectProjectile(state: ProjectileState, result, currentTime: number): boolean
@@ -1266,6 +1345,9 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 	end
 
 	destroyPhysicalProjectile(state)
+	if isPlayerOwner(result.owner) or isStudioAIBotOwner(result.owner) then
+		state.owner = result.owner
+	end
 
 	local trajectory = calculateRedirectTrajectory(result.origin, result.aimDirection, result)
 	state.path = trajectory
@@ -1291,11 +1373,193 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 	return true
 end
 
+local function applyProjectileVelocity(
+	state: ProjectileState,
+	result,
+	currentTime: number,
+	currentVelocity: Vector3,
+	nextPosition: Vector3
+): boolean
+	if typeof(result) ~= "table" then
+		return false
+	end
+
+	local velocity = if BombTrajectory.IsFiniteVector(result.velocity) then result.velocity else currentVelocity
+	local maxSpeed = math.max(tonumber(result.maxSpeed) or 220, 1)
+	if velocity.Magnitude > maxSpeed then
+		velocity = velocity.Unit * maxSpeed
+	end
+
+	if state.landed then
+		local rootPart = state.physicalRoot
+		if rootPart and rootPart.Parent then
+			rootPart.AssemblyLinearVelocity = velocity
+			state.position = rootPart.Position
+			state.lastPosition = state.position
+			return true
+		end
+	end
+
+	local remainingFuse = math.max(state.explodeAt - currentTime, 0)
+	state.lastPosition = state.position
+	state.position = nextPosition
+	state.path = {
+		origin = state.position,
+		initialVelocity = velocity,
+		acceleration = Vector3.new(0, -workspace.Gravity * BombConfig.ProjectileGravityScale, 0),
+		duration = math.max(tonumber(result.maxFlightSeconds) or BombConfig.ProjectileMaxFlightSeconds, remainingFuse, 0.12),
+	}
+	state.launchedAt = currentTime
+	state.lastPosition = state.position
+	state.landed = false
+	return true
+end
+
+local function fireProjectileSnapshot(state: ProjectileState, currentTime: number, force: boolean?, velocity: Vector3?)
+	local interval = 1 / math.max(BombProjectileConfig.SnapshotHz, 1)
+	if not force and currentTime < state.nextSnapshotAt then
+		return
+	end
+
+	state.nextSnapshotAt = currentTime + interval
+	local position = state.position
+	local currentVelocity = velocity
+	if state.landed then
+		position = getProjectilePhysicsPosition(state)
+		currentVelocity = currentVelocity or getProjectilePhysicsVelocity(state)
+	end
+
+	fireEffect("ProjectileSnapshot", {
+		player = state.owner,
+		projectileId = state.id,
+		customProjectile = true,
+		bombSkinId = state.skinId,
+		position = position,
+		velocity = currentVelocity or Vector3.zero,
+		acceleration = Vector3.new(0, -workspace.Gravity * BombConfig.ProjectileGravityScale, 0),
+		serverTime = currentTime,
+		remainingFuse = math.max(state.explodeAt - currentTime, 0),
+		settled = state.landed,
+		grounded = state.landed,
+		radius = BombConfig.SweepRadius,
+		visualScale = BombConfig.ProjectileVisualScale,
+		frozen = state.frozenUntil ~= nil and currentTime < state.frozenUntil,
+		frozenUntil = state.frozenUntil,
+		frozenBy = state.frozenBy,
+	})
+end
+
+local function getFrozenUntil(result, currentTime: number): number?
+	local frozenUntil = tonumber(result.frozenUntil)
+	if frozenUntil and frozenUntil > currentTime then
+		return frozenUntil
+	end
+
+	local durationSeconds = tonumber(result.durationSeconds)
+	if durationSeconds and durationSeconds > 0 then
+		return currentTime + durationSeconds
+	end
+
+	return nil
+end
+
+local function applyFreezeResult(
+	state: ProjectileState,
+	result,
+	currentTime: number,
+	currentVelocity: Vector3,
+	position: Vector3
+): boolean
+	if typeof(result) ~= "table" then
+		return false
+	end
+	if state.frozenUntil and currentTime < state.frozenUntil then
+		return true
+	end
+
+	local frozenUntil = getFrozenUntil(result, currentTime)
+	if not frozenUntil then
+		return false
+	end
+
+	local frozenPosition = if typeof(result.position) == "Vector3" then result.position else position
+	local frozenVelocity = if BombTrajectory.IsFiniteVector(result.velocity) then result.velocity else currentVelocity
+	state.frozenUntil = frozenUntil
+	state.frozenVelocity = frozenVelocity
+	state.frozenPosition = frozenPosition
+	state.frozenBy = if typeof(result.frozenBy) == "string" then result.frozenBy else nil
+	state.position = frozenPosition
+	state.lastPosition = frozenPosition
+	state.landed = true
+
+	destroyPhysicalProjectile(state)
+	fireProjectileSnapshot(state, currentTime, true, Vector3.zero)
+	return true
+end
+
+local function releaseFrozenProjectile(state: ProjectileState, currentTime: number)
+	if not state.frozenUntil or currentTime < state.frozenUntil then
+		return
+	end
+
+	local restoreVelocity = state.frozenVelocity
+	local frozenPosition = state.frozenPosition
+	state.frozenUntil = nil
+	state.frozenVelocity = nil
+	state.frozenPosition = nil
+	state.frozenBy = nil
+
+	if frozenPosition then
+		state.position = frozenPosition
+		state.lastPosition = frozenPosition
+	end
+
+	if restoreVelocity and restoreVelocity.Magnitude > 0.05 then
+		local remainingFuse = math.max(state.explodeAt - currentTime, 0)
+		state.path = {
+			origin = state.position,
+			initialVelocity = restoreVelocity,
+			acceleration = Vector3.new(0, -workspace.Gravity * BombConfig.ProjectileGravityScale, 0),
+			duration = math.max(BombConfig.ProjectileMaxFlightSeconds, remainingFuse, 0.12),
+		}
+		state.launchedAt = currentTime
+		state.landed = false
+	else
+		state.landed = true
+	end
+
+	fireProjectileSnapshot(state, currentTime, true, restoreVelocity or Vector3.zero)
+end
+
+local function stepFrozenProjectile(state: ProjectileState, deltaTime: number, currentTime: number): boolean
+	local frozenUntil = state.frozenUntil
+	if not frozenUntil then
+		return false
+	end
+	if currentTime >= frozenUntil then
+		releaseFrozenProjectile(state, currentTime)
+		return false
+	end
+
+	state.explodeAt += math.max(deltaTime, 0)
+	local frozenPosition = state.frozenPosition or state.position
+	state.position = frozenPosition
+	state.lastPosition = frozenPosition
+	state.landed = true
+
+	destroyPhysicalProjectile(state)
+	fireProjectileSnapshot(state, currentTime, false, Vector3.zero)
+	return true
+end
+
 local function updateProjectileStates(currentTime: number, deltaTime: number)
 	for projectileId, state in pairs(activeProjectiles) do
-		if not state.owner.Parent then
+		if not isActiveBombOwner(state.owner) then
 			destroyPhysicalProjectile(state)
 			activeProjectiles[projectileId] = nil
+			continue
+		end
+		if stepFrozenProjectile(state, deltaTime, currentTime) then
 			continue
 		end
 		local expired = currentTime >= state.explodeAt
@@ -1330,6 +1594,8 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 			explodeAt = state.explodeAt,
 			remainingFuse = math.max(state.explodeAt - currentTime, 0),
 			sweepRadius = BombConfig.SweepRadius,
+			deltaTime = deltaTime,
+			attached = false,
 		})
 		if stepResult.kind == RESULT_KIND.DestroyProjectile then
 			destroyPhysicalProjectile(state)
@@ -1341,6 +1607,16 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 			continue
 		end
 		if stepResult.kind == RESULT_KIND.RedirectProjectile and redirectProjectile(state, stepResult, currentTime) then
+			continue
+		end
+		if stepResult.kind == RESULT_KIND.FreezeProjectile
+			and applyFreezeResult(state, stepResult, currentTime, currentVelocity, nextPosition)
+		then
+			continue
+		end
+		if stepResult.kind == RESULT_KIND.ModifyProjectileVelocity
+			and applyProjectileVelocity(state, stepResult, currentTime, currentVelocity, nextPosition)
+		then
 			continue
 		end
 
@@ -1359,6 +1635,7 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 		if state.landed then
 			state.position = nextPosition
 			state.lastPosition = state.position
+			fireProjectileSnapshot(state, currentTime, false, currentVelocity)
 			continue
 		end
 
@@ -1371,6 +1648,7 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 		else
 			state.position = nextPosition
 			state.lastPosition = nextPosition
+			fireProjectileSnapshot(state, currentTime, false, currentVelocity)
 		end
 	end
 end
@@ -1385,6 +1663,8 @@ local function beginCook(player: Player)
 	if getBombCount(player) <= 0 then
 		return
 	end
+
+	EmoteService:CancelActive(player, "Bomb")
 
 	local skinId = BombSkinService:GetEquippedSkinId(player)
 	local state = {
@@ -1409,6 +1689,8 @@ local function releaseCook(player: Player, targetPayload: any)
 	if not state then
 		return
 	end
+
+	EmoteService:CancelActive(player, "Bomb")
 
 	if not isActivePlayer(player) then
 		stopCooking(player)
@@ -1555,6 +1837,79 @@ function BombService:OnPlayerRemoving(player: Player)
 	seenRoundIds[player] = nil
 	clearPlayerProjectiles(player)
 	disconnectCharacter(player)
+end
+
+function BombService:LaunchStudioAIBomb(request): boolean
+	if not RunService:IsStudio() or typeof(request) ~= "table" then
+		return false
+	end
+
+	local owner = request.owner
+	if not isStudioAIBotOwner(owner) or not isActiveBombOwner(owner) then
+		return false
+	end
+
+	local origin = request.origin
+	local aimDirection = request.aimDirection
+	if not BombTrajectory.IsFiniteVector(origin) or not BombTrajectory.IsFiniteVector(aimDirection) then
+		return false
+	end
+
+	local skinId = BombSkinConfig.NormalizeSkinId(request.skinId)
+	if skinId == "" then
+		skinId = BombSkinConfig.DefaultSkinId
+	end
+
+	local currentTime = now()
+	local remainingFuse = readPositiveNumber(request.remainingFuse, BombConfig.FuseSeconds)
+	local projectileId = createProjectileId(owner)
+	if BombProjectileService:IsEnabled() then
+		return BombProjectileService:Launch({
+			owner = owner,
+			projectileId = projectileId,
+			bombType = BombProjectileConfig.BombType.Normal,
+			skinId = skinId,
+			origin = origin,
+			aimDirection = sanitizeAimDirection(aimDirection, Vector3.zAxis),
+			fuseStartedAt = currentTime,
+			launchedAt = currentTime,
+			remainingFuse = remainingFuse,
+		})
+	end
+
+	local trajectory = calculateTrajectory(origin, sanitizeAimDirection(aimDirection, Vector3.zAxis))
+	activeProjectiles[projectileId] = {
+		id = projectileId,
+		owner = owner,
+		skinId = skinId,
+		path = trajectory,
+		launchedAt = currentTime,
+		fuseStartedAt = currentTime,
+		explodeAt = currentTime + remainingFuse,
+		position = origin,
+		lastPosition = origin,
+		landed = false,
+		physicalProjectile = nil,
+		physicalRoot = nil,
+		nextSnapshotAt = currentTime,
+		frozenUntil = nil,
+		frozenVelocity = nil,
+		frozenPosition = nil,
+		frozenBy = nil,
+	}
+	fireEffect("Throw", {
+		player = owner,
+		projectileId = projectileId,
+		bombSkinId = skinId,
+		origin = trajectory.origin,
+		initialVelocity = trajectory.initialVelocity,
+		acceleration = trajectory.acceleration,
+		duration = trajectory.duration,
+		startedAt = currentTime,
+		fuseStartedAt = currentTime,
+		remainingFuse = remainingFuse,
+	})
+	return true
 end
 
 function BombService:AdminRefillBombs(player: Player): (boolean, string?)

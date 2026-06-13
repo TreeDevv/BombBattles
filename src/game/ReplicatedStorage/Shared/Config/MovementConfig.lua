@@ -154,6 +154,17 @@ return table.freeze({
 	LandingSettleTime = 0.08,
 	LandingStopResponsiveness = 80,
 
+	SpeedScreenEffect = table.freeze({
+		Enabled = true,
+		PresetName = "Speed",
+		StartSpeed = 28,
+		StrongSpeed = 42,
+		StopSpeed = 24,
+		MinIntensity = 0.35,
+		MaxIntensity = 1,
+		SpeedResponsiveness = 12,
+	}),
+
 	DebugAttributesEnabled = true,
 
 	MinMoveMagnitude = 0.04,

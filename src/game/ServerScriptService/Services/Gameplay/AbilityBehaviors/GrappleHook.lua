@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
@@ -32,10 +33,13 @@ type GrappleSession = {
 	releaseDistance: number,
 	maxRange: number,
 	lineOfSightBreaksHook: boolean,
+	currentPullSpeed: number?,
+	lastStepAt: number?,
 }
 
 local GrappleHook = {} :: AbilityTypes.ServerBehavior
 
+local RESULT_KIND = AbilityResult.Kind
 local DEBUG_GRAPPLE = false
 local MAX_ABS_POSITION = 100000
 local ORIGIN_SLACK = 45
@@ -385,18 +389,12 @@ local function cancelSession(session: GrappleSession, reason: string)
 	end
 
 	local targetRoot = session.targetRoot
-	if targetRoot and targetRoot.Parent then
+	if targetRoot and targetRoot.Parent and session.kind ~= "Bomb" then
 		targetRoot.AssemblyLinearVelocity = Vector3.zero
 		if session.targetPlayer then
 			pcall(function()
 				targetRoot:SetNetworkOwner(session.targetPlayer)
 			end)
-		end
-	end
-	if session.kind == "Bomb" and session.targetProjectileId then
-		local service = getBombProjectileService()
-		if service and type(service.ApplyExternalVelocity) == "function" then
-			service:ApplyExternalVelocity(session.targetProjectileId, Vector3.zero)
 		end
 	end
 
@@ -424,6 +422,44 @@ local function getHookWorldPosition(session: GrappleSession): Vector3?
 		return session.hookPosition
 	end
 	return nil
+end
+
+local function resolveEnemyHitDamage(
+	owner: Player,
+	target: Player,
+	humanoid: Humanoid,
+	rootPart: BasePart,
+	damage: number
+): (number, boolean)
+	local service = abilityService
+	if not service then
+		return damage, false
+	end
+
+	local hookResult = service:RunHook("OnBeforePlayerDamage", {
+		owner = owner,
+		target = target,
+		character = target.Character,
+		humanoid = humanoid,
+		rootPart = rootPart,
+		damage = damage,
+		sourceType = "Ability",
+		sourceId = "GrappleHook",
+	})
+	if typeof(hookResult) ~= "table" then
+		return damage, false
+	end
+	if hookResult.kind == RESULT_KIND.Block or hookResult.kind == RESULT_KIND.Absorb or hookResult.skipDamage == true then
+		return 0, true
+	end
+	if typeof(hookResult.damage) == "number" then
+		return math.max(hookResult.damage, 0), false
+	end
+	if typeof(hookResult.damageMultiplier) == "number" then
+		return math.max(damage * hookResult.damageMultiplier, 0), false
+	end
+
+	return damage, false
 end
 
 local function hasLineOfSight(session: GrappleSession, fromPart: BasePart, toPosition: Vector3): boolean
@@ -537,7 +573,7 @@ local function stepEnemySession(session: GrappleSession, now: number)
 	targetRoot.AssemblyLinearVelocity = offset.Unit * pullSpeed + Vector3.yAxis * upwardBias
 end
 
-local function stepBombSession(session: GrappleSession, now: number)
+local function stepBombSession(session: GrappleSession, now: number, dt: number)
 	local shooterRoot = getCharacterRoot(session.shooter)
 	if not shooterRoot then
 		cancelSession(session, "MissingBomb")
@@ -582,9 +618,14 @@ local function stepBombSession(session: GrappleSession, now: number)
 	end
 
 	local definition = AbilityConfig.GetDefinition("GrappleHook")
-	local pullSpeed = getDefinitionNumber(definition, "bombPullSpeed", 115)
+	local maxPullSpeed = getDefinitionNumber(definition, "bombPullSpeed", 115)
+	local minPullSpeed = getDefinitionNumber(definition, "bombMinPullSpeed", 42)
+	local pullAcceleration = getDefinitionNumber(definition, "bombPullAcceleration", 180)
+	local currentPullSpeed = session.currentPullSpeed or minPullSpeed
+	currentPullSpeed = math.min(currentPullSpeed + math.max(dt, 0) * pullAcceleration, maxPullSpeed)
+	session.currentPullSpeed = currentPullSpeed
 	local upwardBias = getDefinitionNumber(definition, "bombUpwardBias", 10)
-	local velocity = offset.Unit * pullSpeed + Vector3.yAxis * upwardBias
+	local velocity = offset.Unit * currentPullSpeed + Vector3.yAxis * upwardBias
 	if targetRoot and targetRoot.Parent then
 		targetRoot.AssemblyLinearVelocity = velocity
 	end
@@ -601,7 +642,7 @@ local function ensureHeartbeat()
 		return
 	end
 
-	heartbeatConnection = RunService.Heartbeat:Connect(function()
+	heartbeatConnection = RunService.Heartbeat:Connect(function(dt)
 		local now = workspace:GetServerTimeNow()
 		for _, session in pairs(activeByShooter) do
 			if session.kind == "Wall" then
@@ -617,12 +658,12 @@ local function ensureHeartbeat()
 		for _, session in pairs(activeByBombRoot) do
 			if session.kind == "Bomb" then
 				steppedBombSessions[session] = true
-				stepBombSession(session, now)
+				stepBombSession(session, now, dt)
 			end
 		end
 		for _, session in pairs(activeByBombProjectile) do
 			if session.kind == "Bomb" and not steppedBombSessions[session] then
-				stepBombSession(session, now)
+				stepBombSession(session, now, dt)
 			end
 		end
 	end)
@@ -719,7 +760,10 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 	local damage = getDefinitionNumber(definition, "damageOnEnemyHit", 20)
 	local humanoid = enemyPlayer.Character and enemyPlayer.Character:FindFirstChildOfClass("Humanoid")
 	if humanoid and damage > 0 then
-		humanoid:TakeDamage(damage)
+		local resolvedDamage, blocked = resolveEnemyHitDamage(context.player, enemyPlayer, humanoid, enemyRoot, damage)
+		if not blocked and resolvedDamage > 0 then
+			humanoid:TakeDamage(resolvedDamage)
+		end
 	end
 	enemyPlayer:SetAttribute("GrappleHook_StunnedUntil", context.now + getDefinitionNumber(definition, "enemyStunTime", 0.5))
 
@@ -790,6 +834,8 @@ local function createBombSession(
 		releaseDistance = getDefinitionNumber(definition, "bombReleaseDistance", 5),
 		maxRange = getDefinitionNumber(definition, "maxRange", 350),
 		lineOfSightBreaksHook = getDefinitionBoolean(definition, "lineOfSightBreaksHook", true),
+		currentPullSpeed = getDefinitionNumber(definition, "bombMinPullSpeed", 42),
+		lastStepAt = context.now,
 	}
 	activeByShooter[context.player] = session
 	if bombRoot then

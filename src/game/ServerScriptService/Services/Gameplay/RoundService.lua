@@ -1217,21 +1217,93 @@ local function bindCore(core: Instance, map: Instance)
 	end
 end
 
+local function hasBasePartDescendant(instance: Instance): boolean
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			return true
+		end
+	end
+	return false
+end
+
+local function getSpawnAnchorTemplate(teamName: string): Model?
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	local spawnAnchors = assets and assets:FindFirstChild("SpawnAnchors")
+	local template = spawnAnchors and spawnAnchors:FindFirstChild(teamName)
+	return if template and template:IsA("Model") then template else nil
+end
+
+local function copyCoreAttributes(source: Instance, target: Instance, teamName: string)
+	for attributeName, value in pairs(source:GetAttributes()) do
+		target:SetAttribute(attributeName, value)
+	end
+
+	target:SetAttribute("Team", teamName)
+	if typeof(target:GetAttribute(CORE_HEALTH_ATTR)) ~= "number" then
+		target:SetAttribute(CORE_HEALTH_ATTR, RoundConfig.Cores.DefaultHealth)
+	end
+	if typeof(target:GetAttribute(CORE_DESTROYED_ATTR)) ~= "boolean" then
+		target:SetAttribute(CORE_DESTROYED_ATTR, false)
+	end
+end
+
+local function anchorBaseParts(instance: Instance)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+		end
+	end
+end
+
+local function repairEmptyCoreModel(core: Instance, teamName: string): Instance
+	if hasBasePartDescendant(core) or not core:IsA("Model") then
+		return core
+	end
+
+	local template = getSpawnAnchorTemplate(teamName)
+	if not template then
+		warn("[RoundService] TeamCore model has no BasePart descendants and no SpawnAnchors template exists:", teamName)
+		return core
+	end
+
+	local parent = core.Parent
+	if not parent then
+		return core
+	end
+
+	local replacement = template:Clone()
+	replacement.Name = core.Name
+	copyCoreAttributes(core, replacement, teamName)
+	anchorBaseParts(replacement)
+	replacement.Parent = parent
+	replacement:PivotTo(core:GetPivot())
+	CollectionService:AddTag(replacement, RoundConfig.Tags.TeamCore)
+	CollectionService:RemoveTag(core, RoundConfig.Tags.TeamCore)
+	core:Destroy()
+
+	warn("[RoundService] Repaired empty TeamCore model from SpawnAnchors template:", teamName)
+	return replacement
+end
+
 local function setupTeamCores(map: Model): boolean
 	disconnectCoreConnections()
 	teamCoreInstances = {}
 
 	for _, teamName in ipairs(TEAM_ORDER) do
 		local cores = getTeamCores(teamName, map)
-		teamCoreInstances[teamName] = cores
+		local repairedCores = {}
+		for _, core in ipairs(cores) do
+			table.insert(repairedCores, repairEmptyCoreModel(core, teamName))
+		end
+		teamCoreInstances[teamName] = repairedCores
 
-		if #cores < RoundConfig.Cores.MinPerTeam then
+		if #repairedCores < RoundConfig.Cores.MinPerTeam then
 			warn("[RoundService] Missing TeamCore tagged instances for team:", teamName)
 			syncCoreState()
 			return false
 		end
 
-		for _, core in ipairs(cores) do
+		for _, core in ipairs(repairedCores) do
 			bindCore(core, map)
 		end
 	end

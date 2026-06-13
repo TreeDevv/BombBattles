@@ -30,6 +30,7 @@ type AdminResult = {
 local AdminService = {}
 
 local requestRemote: RemoteFunction? = nil
+local potgCutsceneRemote: RemoteEvent? = nil
 local lastRequestAtByUserId: { [number]: number } = {}
 local explosionDemoSerial = 0
 
@@ -60,6 +61,22 @@ local function ensureRequestRemote(): RemoteFunction
 
 	local remote = Instance.new("RemoteFunction")
 	remote.Name = AdminConfig.RequestRemoteName
+	remote.Parent = folder
+	return remote
+end
+
+local function ensurePOTGCutsceneRemote(): RemoteEvent
+	local folder = ensureRemotesFolder()
+	local existing = folder:FindFirstChild(AdminConfig.POTGCutsceneRemoteName)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = AdminConfig.POTGCutsceneRemoteName
 	remote.Parent = folder
 	return remote
 end
@@ -349,6 +366,13 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 		return result(ok, message or "", getStatePayload())
 	elseif string.sub(command, 1, 7) == "replay." then
 		return dispatchReplayDebugCommand(adminPlayer, command)
+	elseif command == "cutscene.playPOTG" then
+		local remote = potgCutsceneRemote or ensurePOTGCutsceneRemote()
+		potgCutsceneRemote = remote
+		remote:FireClient(adminPlayer, {
+			requestedAt = workspace:GetServerTimeNow(),
+		})
+		return result(true, "Playing POTG cutscene", getStatePayload())
 	elseif command == "bomb.demoAllExplosions" then
 		local ok, message = runExplosionDemo(adminPlayer)
 		return result(ok, message or "", getStatePayload())
@@ -467,6 +491,7 @@ end
 
 function AdminService:OnStart()
 	requestRemote = ensureRequestRemote()
+	potgCutsceneRemote = ensurePOTGCutsceneRemote()
 	requestRemote.OnServerInvoke = onInvoke
 end
 

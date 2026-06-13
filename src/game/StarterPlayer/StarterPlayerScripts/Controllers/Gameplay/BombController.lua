@@ -53,6 +53,9 @@ local HIT_FLASH_FILL_TRANSPARENCY = 0.28
 local HIT_FLASH_OUTLINE_TRANSPARENCY = 0.05
 local HIT_FLASH_FADE_SECONDS = 0.26
 local HIT_FLASH_CLEANUP_SECONDS = 0.6
+local FROZEN_BOMB_COLOR = Color3.fromRGB(91, 226, 255)
+local FROZEN_BOMB_FILL_TRANSPARENCY = 0.18
+local FROZEN_BOMB_OUTLINE_TRANSPARENCY = 0.02
 local MIN_AIM_HORIZONTAL = 0.08
 local BEAM_CURVE_EPSILON = 1e-4
 local ATTR = BombConfig.Attributes
@@ -65,6 +68,7 @@ type TrajectoryPreview = {
 	endAttachment: Attachment,
 	beams: { Beam },
 	emitters: { ParticleEmitter },
+	custom: boolean,
 }
 
 type AbilityTrajectoryPreviewOptions = {
@@ -108,6 +112,7 @@ BombController._releaseMarkerConnection = nil :: RBXScriptConnection?
 BombController._previewFolder = nil :: Folder?
 BombController._trajectoryPreview = nil :: TrajectoryPreview?
 BombController._extraTrajectoryPreviews = {} :: { TrajectoryPreview }
+BombController._trajectoryPreviewSkinId = nil :: string?
 BombController._warnedMissingTrajectoryPreview = false
 BombController._holding = false
 BombController._previewing = false
@@ -128,6 +133,8 @@ BombController._heldBombs = {} :: {
 		pulseConnection: RBXScriptConnection?,
 		fuseStartedAt: number?,
 		fuseEndsAt: number?,
+		frozen: boolean?,
+		frozenUntil: number?,
 	},
 }
 BombController._heldBombWanted = {} :: { [Player]: boolean }
@@ -162,6 +169,8 @@ BombController._projectileVisuals = {} :: {
 		pulseConnection: RBXScriptConnection?,
 		fuseStartedAt: number?,
 		fuseEndsAt: number?,
+		visuals: { [string]: any }?,
+		burrowing: boolean?,
 	},
 }
 
@@ -686,37 +695,72 @@ function BombController:_warnMissingTrajectoryPreview(reason: string)
 	warn("[BombController] Missing or malformed trajectory preview VFX: " .. reason)
 end
 
-function BombController:_createTrajectoryPreview(name: string): TrajectoryPreview?
-	local template = getTrajectoryLineAsset()
-	if not template then
-		self:_warnMissingTrajectoryPreview("ReplicatedStorage.Assets.VFX.Trajectory.TrajectoryLine was not found")
-		return nil
+local warnedCustomTrajectorySkins: { [string]: boolean } = {}
+
+local function warnMalformedCustomTrajectory(skinId: string, reason: string)
+	if warnedCustomTrajectorySkins[skinId] then
+		return
 	end
 
-	local clone = template:Clone()
-	clone.Name = name
+	warnedCustomTrajectorySkins[skinId] = true
+	warn(("[BombController] Bomb skin %s has a malformed trajectory Beam asset (%s); using the default"):format(skinId, reason))
+end
 
+local function normalizeTrajectoryTemplateClone(clone: Instance): (Model?, string)
+	if clone:IsA("Model") then
+		return clone, ""
+	end
+
+	if clone:IsA("BasePart") then
+		local startAttachment = getNamedAttachment(clone, "Start")
+		local endAttachment = getNamedAttachment(clone, "End")
+		if not (startAttachment and endAttachment) then
+			clone:Destroy()
+			return nil, "expected Start and End attachments on the Beam part"
+		end
+
+		local model = Instance.new("Model")
+		model.Name = clone.Name
+
+		local startPart = Instance.new("Part")
+		startPart.Name = "Start"
+		startPart.Size = Vector3.one
+		startAttachment.Parent = startPart
+		startPart.Parent = model
+
+		local endPart = Instance.new("Part")
+		endPart.Name = "End"
+		endPart.Size = Vector3.one
+		endAttachment.Parent = endPart
+		endPart.Parent = model
+
+		clone:Destroy()
+		return model, ""
+	end
+
+	clone:Destroy()
+	return nil, "expected a Model or BasePart"
+end
+
+local function assembleTrajectoryPreview(clone: Model, custom: boolean): (TrajectoryPreview?, string)
 	local startPart = getNamedBasePart(clone, "Start")
 	local endPart = getNamedBasePart(clone, "End")
 	if not (startPart and endPart) then
 		clone:Destroy()
-		self:_warnMissingTrajectoryPreview("expected Start and End BasePart children")
-		return nil
+		return nil, "expected Start and End BasePart children"
 	end
 
 	local startAttachment = getNamedAttachment(startPart, "Start")
 	local endAttachment = getNamedAttachment(endPart, "End")
 	if not (startAttachment and endAttachment) then
 		clone:Destroy()
-		self:_warnMissingTrajectoryPreview("expected Start.Start and End.End attachments")
-		return nil
+		return nil, "expected Start.Start and End.End attachments"
 	end
 
 	local beams, emitters = collectTrajectoryPreviewDescendants(clone)
 	if #beams == 0 then
 		clone:Destroy()
-		self:_warnMissingTrajectoryPreview("expected at least one Beam descendant")
-		return nil
+		return nil, "expected at least one Beam descendant"
 	end
 
 	for _, part in ipairs({ startPart, endPart }) do
@@ -743,15 +787,80 @@ function BombController:_createTrajectoryPreview(name: string): TrajectoryPrevie
 		endAttachment = endAttachment,
 		beams = beams,
 		emitters = emitters,
+		custom = custom,
 	}
 
+	return preview, ""
+end
+
+function BombController:_createTrajectoryPreview(name: string): TrajectoryPreview?
+	local preview: TrajectoryPreview?
+
+	local skinId = getPlayerBombSkinId(LocalPlayer)
+	local customTemplate = BombVisualUtil.GetSkinTrajectoryBeamTemplate(skinId)
+	if customTemplate then
+		local clone, normalizeReason = normalizeTrajectoryTemplateClone(customTemplate:Clone())
+		if clone then
+			clone.Name = name
+			local assembled, assembleReason = assembleTrajectoryPreview(clone, true)
+			if assembled then
+				preview = assembled
+			else
+				warnMalformedCustomTrajectory(skinId, assembleReason)
+			end
+		else
+			warnMalformedCustomTrajectory(skinId, normalizeReason)
+		end
+	end
+
+	if not preview then
+		local template = getTrajectoryLineAsset()
+		if not template then
+			self:_warnMissingTrajectoryPreview("ReplicatedStorage.Assets.VFX.Trajectory.TrajectoryLine was not found")
+			return nil
+		end
+
+		local clone = template:Clone()
+		clone.Name = name
+		local assembled, assembleReason = assembleTrajectoryPreview(clone, false)
+		if not assembled then
+			self:_warnMissingTrajectoryPreview(assembleReason)
+			return nil
+		end
+		preview = assembled
+	end
+
 	setTrajectoryPreviewEnabled(preview, false)
-	clone.Parent = self:_getPreviewFolder()
+	preview.model.Parent = self:_getPreviewFolder()
 
 	return preview
 end
 
+function BombController:_destroyTrajectoryPreviews()
+	if self._trajectoryPreview then
+		self._trajectoryPreview.model:Destroy()
+		self._trajectoryPreview = nil
+	end
+
+	for _, preview in pairs(self._extraTrajectoryPreviews) do
+		preview.model:Destroy()
+	end
+	table.clear(self._extraTrajectoryPreviews)
+end
+
+function BombController:_refreshTrajectoryPreviewSkin()
+	local skinId = getPlayerBombSkinId(LocalPlayer)
+	if self._trajectoryPreviewSkinId == skinId then
+		return
+	end
+
+	self._trajectoryPreviewSkinId = skinId
+	self:_destroyTrajectoryPreviews()
+end
+
 function BombController:_ensureTrajectoryPreview(): TrajectoryPreview?
+	self:_refreshTrajectoryPreviewSkin()
+
 	if self._trajectoryPreview and self._trajectoryPreview.model.Parent then
 		return self._trajectoryPreview
 	end
@@ -764,6 +873,8 @@ function BombController:_ensureTrajectoryPreviewAt(index: number): TrajectoryPre
 	if index <= 1 then
 		return self:_ensureTrajectoryPreview()
 	end
+
+	self:_refreshTrajectoryPreviewSkin()
 
 	local existing = self._extraTrajectoryPreviews[index - 1]
 	if existing and existing.model.Parent then
@@ -1465,7 +1576,9 @@ function BombController:_showTrajectoryPreview(
 		beam.CurveSize1 = startCurveSize
 	end
 
-	tintTrajectoryPreview(preview, color)
+	if not preview.custom then
+		tintTrajectoryPreview(preview, color)
+	end
 	setTrajectoryPreviewEnabled(preview, true)
 	return true
 end
@@ -1812,6 +1925,26 @@ function BombController:_setProjectileVisualCFrame(visual, position: Vector3, ta
 	end
 end
 
+local function getVisualNumber(visual, key: string, fallback: number): number
+	local visuals = visual and visual.visuals
+	local value = if typeof(visuals) == "table" then visuals[key] else nil
+	return if typeof(value) == "number" then value else fallback
+end
+
+local function getVisualColor(visual, key: string, fallback: Color3): Color3
+	local visuals = visual and visual.visuals
+	local value = if typeof(visuals) == "table" then visuals[key] else nil
+	return if typeof(value) == "Color3" then value else fallback
+end
+
+local function getProjectileSpinSpeed(visual): number
+	local fallback = BombConfig.VisualSpinRadiansPerSecond
+	if visual and visual.burrowing == true then
+		return getVisualNumber(visual, "burrowSpinRadiansPerSecond", fallback * 2.4)
+	end
+	return getVisualNumber(visual, "spinRadiansPerSecond", fallback)
+end
+
 function BombController:_getBombPulseProgress(visual): (number, number)
 	local fuseStartedAt = visual.fuseStartedAt or getServerTime()
 	local fuseEndsAt = visual.fuseEndsAt or (fuseStartedAt + BombConfig.FuseSeconds)
@@ -1827,7 +1960,8 @@ function BombController:_getBombPulseColor(visual, fuseProgress: number?, elapse
 	local endHz = math.max(BombConfig.PulseEndHz, startHz)
 	local cycles = (startHz * pulseElapsed) + (0.5 * (endHz - startHz) * progress * pulseElapsed)
 	local alpha = (1 - math.cos(cycles * math.pi * 2)) * 0.5
-	return BombConfig.PulseWhite:Lerp(BombConfig.PulseRed, alpha)
+	local baseColor = getVisualColor(visual, "highlightColor", BombConfig.PulseWhite)
+	return baseColor:Lerp(BombConfig.PulseRed, alpha)
 end
 
 function BombController:_updateBombPulse(visual)
@@ -1836,11 +1970,21 @@ function BombController:_updateBombPulse(visual)
 		return
 	end
 
+	if visual.frozen == true then
+		highlight.FillColor = FROZEN_BOMB_COLOR
+		highlight.OutlineColor = FROZEN_BOMB_COLOR
+		highlight.FillTransparency = FROZEN_BOMB_FILL_TRANSPARENCY
+		highlight.OutlineTransparency = FROZEN_BOMB_OUTLINE_TRANSPARENCY
+		return
+	end
+
 	local fuseProgress, elapsed = self:_getBombPulseProgress(visual)
 	local color = self:_getBombPulseColor(visual, fuseProgress, elapsed)
-	local fillTransparency = BombConfig.PulseStartFillTransparency
+	local fillStart = getVisualNumber(visual, "highlightFillTransparency", BombConfig.PulseStartFillTransparency)
+	local outlineStart = getVisualNumber(visual, "highlightOutlineTransparency", BombConfig.PulseStartOutlineTransparency)
+	local fillTransparency = fillStart
 		+ ((BombConfig.PulseEndFillTransparency - BombConfig.PulseStartFillTransparency) * fuseProgress)
-	local outlineTransparency = BombConfig.PulseStartOutlineTransparency
+	local outlineTransparency = outlineStart
 		+ ((BombConfig.PulseEndOutlineTransparency - BombConfig.PulseStartOutlineTransparency) * fuseProgress)
 
 	highlight.FillColor = color
@@ -2012,6 +2156,10 @@ function BombController:_createProjectileVisual(projectileId: string, skinId: an
 		pulseConnection = nil,
 		fuseStartedAt = nil,
 		fuseEndsAt = nil,
+		frozen = false,
+		frozenUntil = nil,
+		visuals = nil,
+		burrowing = false,
 	}
 end
 
@@ -2058,6 +2206,7 @@ function BombController:_playThrowEffect(payload)
 	end
 	visual.path = path
 	visual.customProjectile = customProjectile
+	visual.visuals = if typeof(payload.visuals) == "table" then payload.visuals else nil
 	if customProjectile then
 		local velocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else payload.initialVelocity
 		local acceleration = if typeof(payload.acceleration) == "Vector3" then payload.acceleration else Vector3.new(0, -workspace.Gravity, 0)
@@ -2079,7 +2228,7 @@ function BombController:_playThrowEffect(payload)
 
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
 		if not visual.spinLocked then
-			visual.spin += deltaTime * BombConfig.VisualSpinRadiansPerSecond
+			visual.spin += deltaTime * getProjectileSpinSpeed(visual)
 		end
 		if visual.customProjectile then
 			local position = visual.position or visual.targetPosition or rootPart.Position
@@ -2145,6 +2294,64 @@ function BombController:_playImpactEffect(position: Vector3)
 	tween:Play()
 end
 
+function BombController:_playDrillPulse(position: Vector3, radius: number?, color: Color3?, duration: number?)
+	local part = Instance.new("Part")
+	part.Name = "DrillBombPulse"
+	part.Shape = Enum.PartType.Ball
+	part.Size = Vector3.new(0.35, 0.35, 0.35)
+	part.CFrame = CFrame.new(position)
+	part.Material = Enum.Material.Neon
+	part.Color = color or Color3.fromRGB(255, 207, 84)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Transparency = 0.2
+	part.Parent = workspace
+
+	local finalRadius = math.max(radius or 4, 0.5)
+	local tween = TweenService:Create(part, TweenInfo.new(duration or 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size = Vector3.new(finalRadius, finalRadius, finalRadius),
+		Transparency = 1,
+	})
+	tween.Completed:Connect(function()
+		part:Destroy()
+	end)
+	tween:Play()
+end
+
+function BombController:_playDrillTrail(fromPosition: Vector3, toPosition: Vector3, radius: number?, color: Color3?)
+	local delta = toPosition - fromPosition
+	local distance = delta.Magnitude
+	if distance <= 0.05 then
+		self:_playDrillPulse(toPosition, radius, color, 0.12)
+		return
+	end
+
+	local part = Instance.new("Part")
+	part.Name = "DrillBombTrail"
+	part.Shape = Enum.PartType.Cylinder
+	part.Size = Vector3.new(math.max(radius or 1.8, 0.2), distance, math.max(radius or 1.8, 0.2))
+	part.CFrame = CFrame.lookAt(fromPosition + delta * 0.5, toPosition) * CFrame.Angles(math.pi / 2, 0, 0)
+	part.Material = Enum.Material.Neon
+	part.Color = color or Color3.fromRGB(255, 207, 84)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.Transparency = 0.58
+	part.Parent = workspace
+
+	local tween = TweenService:Create(part, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+		Size = Vector3.new(part.Size.X * 1.6, part.Size.Y, part.Size.Z * 1.6),
+		Transparency = 1,
+	})
+	tween.Completed:Connect(function()
+		part:Destroy()
+	end)
+	tween:Play()
+end
+
 function BombController:_handleProjectileSnapshot(payload)
 	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
 		return
@@ -2170,6 +2377,7 @@ function BombController:_handleProjectileSnapshot(payload)
 			fuseStartedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
 			remainingFuse = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds,
 			bombSkinId = payload.bombSkinId,
+			visuals = payload.visuals,
 		})
 		visual = self._projectileVisuals[projectileId]
 		if not visual then
@@ -2185,21 +2393,38 @@ function BombController:_handleProjectileSnapshot(payload)
 	end
 
 	visual.customProjectile = true
+	if typeof(payload.visuals) == "table" then
+		visual.visuals = payload.visuals
+	end
+	local wasFrozen = visual.frozen == true
+	local frozen = payload.frozen == true
+	visual.burrowing = payload.burrowing == true
+	visual.frozen = frozen
+	visual.frozenUntil = if typeof(payload.frozenUntil) == "number" then payload.frozenUntil else nil
 	visual.targetPosition = payload.position
-	visual.targetVelocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else Vector3.zero
+	visual.targetVelocity = if frozen then Vector3.zero elseif typeof(payload.velocity) == "Vector3" then payload.velocity else Vector3.zero
 	if payload.attached == true then
 		visual.spinLocked = true
+	elseif frozen then
+		visual.spinLocked = true
+	elseif wasFrozen then
+		visual.spinLocked = false
 	end
 	if typeof(payload.acceleration) == "Vector3" then
-		visual.acceleration = payload.acceleration
+		visual.acceleration = if frozen then Vector3.zero else payload.acceleration
 	end
-	visual.settled = payload.settled == true
-	if visual.position == nil or visual.settled then
+	visual.settled = frozen or payload.settled == true
+	if visual.position == nil or visual.settled or frozen then
 		visual.position = payload.position
 	end
-	if visual.velocity == nil or visual.settled then
+	if visual.velocity == nil or visual.settled or frozen then
 		visual.velocity = visual.targetVelocity
 	end
+	if wasFrozen and not frozen and typeof(payload.serverTime) == "number" and typeof(payload.remainingFuse) == "number" then
+		visual.fuseStartedAt = payload.serverTime
+		visual.fuseEndsAt = payload.serverTime + math.max(payload.remainingFuse, 0)
+	end
+	self:_updateBombPulse(visual)
 end
 
 function BombController:_handleProjectileAttach(payload)
@@ -2316,6 +2541,57 @@ function BombController:_handleProjectileImpact(payload)
 	self:_playImpactEffect(payload.position)
 end
 
+function BombController:_handleProjectileBurrowStart(payload)
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" or typeof(payload.position) ~= "Vector3" then
+		return
+	end
+
+	local visual = self._projectileVisuals[payload.projectileId]
+	local color = getVisualColor(visual, "highlightColor", Color3.fromRGB(255, 207, 84))
+	if visual then
+		visual.burrowing = true
+		visual.spinLocked = false
+		if typeof(payload.direction) == "Vector3" and payload.direction.Magnitude > 0.05 then
+			visual.targetVelocity = payload.direction.Unit * math.max(tonumber(payload.speed) or 60, 1)
+		end
+	end
+	self:_playDrillPulse(payload.position, (tonumber(payload.radius) or 4.5) * 1.8, color, 0.18)
+end
+
+function BombController:_handleProjectileBurrowStep(payload)
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" or typeof(payload.position) ~= "Vector3" then
+		return
+	end
+
+	local visual = self._projectileVisuals[payload.projectileId]
+	local color = getVisualColor(visual, "highlightColor", Color3.fromRGB(255, 207, 84))
+	if visual then
+		visual.burrowing = true
+		visual.targetPosition = payload.position
+		if typeof(payload.direction) == "Vector3" and payload.direction.Magnitude > 0.05 then
+			visual.targetVelocity = payload.direction.Unit * math.max(tonumber(payload.speed) or 60, 1)
+		end
+	end
+
+	local lastPosition = if typeof(payload.lastPosition) == "Vector3" then payload.lastPosition else payload.position
+	self:_playDrillTrail(lastPosition, payload.position, tonumber(payload.radius) or 2.4, color)
+end
+
+function BombController:_handleProjectileBurrowEnd(payload)
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
+		return
+	end
+
+	local visual = self._projectileVisuals[payload.projectileId]
+	if visual then
+		visual.burrowing = false
+	end
+	if typeof(payload.position) == "Vector3" then
+		local color = getVisualColor(visual, "highlightColor", Color3.fromRGB(255, 207, 84))
+		self:_playDrillPulse(payload.position, 5.5, color, 0.14)
+	end
+end
+
 function BombController:_playTerrainDebris(payloads)
 	if typeof(payloads) ~= "table" then
 		return
@@ -2424,6 +2700,12 @@ function BombController:_bindEffects()
 			self:_handleProjectileSettle(payload)
 		elseif effectName == "ProjectileDestroy" and typeof(payload) == "table" then
 			self:_handleProjectileDestroy(payload)
+		elseif effectName == "ProjectileBurrowStart" and typeof(payload) == "table" then
+			self:_handleProjectileBurrowStart(payload)
+		elseif effectName == "ProjectileBurrowStep" and typeof(payload) == "table" then
+			self:_handleProjectileBurrowStep(payload)
+		elseif effectName == "ProjectileBurrowEnd" and typeof(payload) == "table" then
+			self:_handleProjectileBurrowEnd(payload)
 		elseif effectName == "Explode" and typeof(payload) == "table" and typeof(payload.position) == "Vector3" then
 			if payloadPlayer and payload.source == "InHand" then
 				self:_hideHeldBomb(payloadPlayer)
@@ -2433,11 +2715,8 @@ function BombController:_bindEffects()
 			end
 			if payload.player == LocalPlayer then
 				applyOwnerClientExplosionLaunch(payload.position)
+				CameraController:PlayLocalBombExplosionShake()
 			end
-			CameraController:PlayExplosionShake(
-				payload.position,
-				if typeof(payload.outerRadius) == "number" then payload.outerRadius else BombConfig.OuterRadius
-			)
 			self:_playHitFlashes(payload.hitUserIds)
 			self:_playExplosionEffect(payload.position, payload.bombSkinId, payload.explosionVisualScale)
 		elseif effectName == "TerrainDebris" and typeof(payload) == "table" then

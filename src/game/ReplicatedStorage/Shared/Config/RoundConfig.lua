@@ -12,7 +12,6 @@ return {
 	StudioTesting = {
 		MinPlayers = 1,
 		HoldSoloRoundsActive = true,
-		AllowBombTeamProtectionBypass = true,
 		AIBots = {
 			Enabled = true,
 			TargetTeamSize = 6,
@@ -22,7 +21,9 @@ return {
 			ThrowMinSeconds = 1.8,
 			ThrowMaxSeconds = 3.4,
 			ThrowOriginHeight = 3.2,
-			AimSpreadStuds = 10,
+			AimSpreadStuds = 3,
+			AimResampleAttempts = 6,
+			MinExpectedPlayerDamage = 20,
 			RespawnSeconds = 4,
 			WalkSpeed = 18,
 			JumpPower = 45,

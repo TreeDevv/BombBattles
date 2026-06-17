@@ -47,6 +47,16 @@ local function copyRemovedBlocks(removedBlocks)
 	return blocks
 end
 
+local function getBlockWorldCFrame(payload, block): CFrame?
+	if typeof(block.cframe) == "CFrame" then
+		return block.cframe
+	end
+	if typeof(payload.sourceCFrame) == "CFrame" and typeof(block.center) == "Vector3" then
+		return payload.sourceCFrame * CFrame.new(block.center)
+	end
+	return nil
+end
+
 local function randomUnitVector(random: Random): Vector3
 	local vector = Vector3.new(random:NextNumber() - 0.5, random:NextNumber() - 0.25, random:NextNumber() - 0.5)
 	if vector.Magnitude < 0.05 then
@@ -204,7 +214,11 @@ function Debris.spawnPayload(payload, options)
 		if spawned >= maxParts then
 			break
 		end
-		if typeof(block) ~= "table" or typeof(block.center) ~= "Vector3" or typeof(block.size) ~= "Vector3" then
+		if typeof(block) ~= "table" or typeof(block.size) ~= "Vector3" then
+			continue
+		end
+		local worldCFrame = getBlockWorldCFrame(payload, block)
+		if not worldCFrame then
 			continue
 		end
 		local passesSampling = shouldSpawnBlock(seed, index, samplingDivisor)
@@ -213,7 +227,6 @@ function Debris.spawnPayload(payload, options)
 		end
 		spawnAttempts += 1
 
-		local worldCFrame = payload.sourceCFrame * CFrame.new(block.center)
 		local worldPosition = worldCFrame.Position
 		local away = worldPosition - payload.explosionPosition
 		local direction = if away.Magnitude >= 0.05 then away.Unit else randomUnitVector(random)

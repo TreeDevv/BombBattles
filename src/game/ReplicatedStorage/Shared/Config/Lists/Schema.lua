@@ -62,9 +62,21 @@ return {
 		value = {},
 	},
 
+	BombSkinCopies = {
+		key = "bombSkinCopies",
+		value = {},
+	},
+
 	EquippedBombSkin = {
 		key = "equippedBombSkin",
 		value = "Default",
+	},
+
+	CrateRollHistory = {
+		key = "crateRollHistory",
+		value = {
+			recent = {},
+		},
 	},
 
 	Quests = {

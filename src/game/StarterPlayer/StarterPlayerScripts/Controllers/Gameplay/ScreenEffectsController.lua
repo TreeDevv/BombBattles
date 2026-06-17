@@ -3,6 +3,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+
 local LocalPlayer = Players.LocalPlayer
 
 type ColorCorrectionConfig = {
@@ -254,12 +256,17 @@ function ScreenEffectsController:_startHeartbeat()
 	end
 
 	self._heartbeatConnection = RunService.Heartbeat:Connect(function()
+		local token = RuntimeProfiler.Begin("Client/ScreenEffectsController/Heartbeat")
 		local now = os.clock()
+		local activeCount = 0
 		for presetName, active in pairs(self._activeEffects) do
+			activeCount += 1
 			if now >= active.endTime then
 				self:Stop(presetName)
 			end
 		end
+		RuntimeProfiler.Gauge("Client/ScreenEffectsController/ActiveEffects", activeCount)
+		RuntimeProfiler.End("Client/ScreenEffectsController/Heartbeat", token)
 	end)
 end
 
@@ -293,9 +300,11 @@ function ScreenEffectsController:_startPreset(presetName: string, config: Preset
 	local originalSize = template.Size
 	active.effectPart = part
 	active.renderConn = RunService.RenderStepped:Connect(function()
+		local token = RuntimeProfiler.Begin("Client/ScreenEffectsController/EffectRender")
 		if part.Parent and workspace.CurrentCamera then
 			updatePartForCamera(part, workspace.CurrentCamera, config, originalSize)
 		end
+		RuntimeProfiler.End("Client/ScreenEffectsController/EffectRender", token)
 	end)
 
 	updatePartForCamera(part, camera, config, originalSize)

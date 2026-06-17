@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local MovementConfig = require(ReplicatedStorage.Shared.Config.MovementConfig)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local CameraController = require(script.Parent:WaitForChild("CameraController"))
 local ScreenEffectsController = require(script.Parent:WaitForChild("ScreenEffectsController"))
 
@@ -136,7 +137,9 @@ function MovementEffectsController:OnStart()
 		self:_bindCharacter(nil)
 	end)
 	self._renderConnection = RunService.RenderStepped:Connect(function(dt)
+		local token = RuntimeProfiler.Begin("Client/MovementEffectsController/Render")
 		self:_step(dt)
+		RuntimeProfiler.End("Client/MovementEffectsController/Render", token)
 	end)
 end
 

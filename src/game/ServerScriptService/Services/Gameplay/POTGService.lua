@@ -187,6 +187,20 @@ local function applySourceContext(context, event)
 	context.sourceConfidence = getSourceConfidence(event, context.playerUserId)
 end
 
+local function applyPlayerMetadata(context, event, prefix: string?)
+	local nameField = if prefix then prefix .. "Name" else "name"
+	local displayNameField = if prefix then prefix .. "DisplayName" else "displayName"
+	local teamField = if prefix then prefix .. "Team" else "teamName"
+	local npcField = if prefix then prefix .. "IsNPC" else "isNPC"
+
+	context.playerName = getString(event[nameField]) or context.playerName
+	context.playerDisplayName = getString(event[displayNameField]) or context.playerDisplayName
+	context.playerTeam = getString(event[teamField]) or context.playerTeam
+	if typeof(event[npcField]) == "boolean" then
+		context.playerIsNPC = event[npcField]
+	end
+end
+
 local function pruneListByTime(list, cutoffTime: number, timeField: string)
 	local writeIndex = 1
 	for readIndex = 1, #list do
@@ -395,6 +409,10 @@ local function newScoreContext(playerUserId: number, timestamp: number, eventTyp
 		timestamp = timestamp,
 		sourceId = nil,
 		sourceType = nil,
+		playerName = nil,
+		playerDisplayName = nil,
+		playerTeam = nil,
+		playerIsNPC = nil,
 		score = 0,
 		reasons = {},
 		reasonSet = {},
@@ -445,6 +463,10 @@ local function buildCandidate(context)
 	return {
 		roundId = roundId,
 		playerUserId = context.playerUserId,
+		playerName = context.playerName,
+		playerDisplayName = context.playerDisplayName,
+		playerTeam = context.playerTeam,
+		playerIsNPC = context.playerIsNPC,
 		sourceId = context.sourceId,
 		sourceType = context.sourceType,
 		startTime = timestamp - ReplayConstants.POTG_PRE_SECONDS,
@@ -475,6 +497,10 @@ local function copyCandidate(candidate)
 	return {
 		roundId = candidate.roundId,
 		playerUserId = candidate.playerUserId,
+		playerName = candidate.playerName,
+		playerDisplayName = candidate.playerDisplayName,
+		playerTeam = candidate.playerTeam,
+		playerIsNPC = candidate.playerIsNPC,
 		sourceId = candidate.sourceId,
 		sourceType = candidate.sourceType,
 		startTime = candidate.startTime,
@@ -869,6 +895,7 @@ local function processKillEvent(event, timestamp: number)
 	context.kills = killCount
 	context.baseDamage = objectiveDamage
 	applySourceContext(context, event)
+	applyPlayerMetadata(context, event, "killer")
 
 	local killScore = if cleanupKill then SCORE_CLEANUP_KILL else SCORE_KILL
 	addScore(context, killScore * killCount, if killCount > 1 then tostring(killCount) .. " Kills" else "Kill", RARITY.Kill)
@@ -941,6 +968,7 @@ local function processBaseDamageEvent(event, timestamp: number)
 	local context = newScoreContext(playerUserId, timestamp, event.eventType)
 	context.baseDamage = baseDamageBurst
 	applySourceContext(context, event)
+	applyPlayerMetadata(context, event, "owner")
 
 	local sustainedDamage = math.max(baseDamage - baseDamageBurst, 0)
 	local burstScore = (baseDamageBurst / 100) * SCORE_BASE_DAMAGE_BURST_PER_100
@@ -975,6 +1003,7 @@ local function processDamageEvent(event, timestamp: number)
 
 	local context = newScoreContext(playerUserId, timestamp, event.eventType)
 	applySourceContext(context, event)
+	applyPlayerMetadata(context, event, "attacker")
 	addScore(context, SCORE_DIRECT_HIT, "Direct Hit", RARITY.DirectHit)
 	addCandidate(buildCandidate(context))
 end
@@ -997,6 +1026,7 @@ local function processBombExplodedEvent(event, timestamp: number)
 	local context = newScoreContext(playerUserId, timestamp, event.eventType)
 	context.kills = killedCount
 	applySourceContext(context, event)
+	applyPlayerMetadata(context, event, "owner")
 
 	if killedCount > 0 then
 		addScore(

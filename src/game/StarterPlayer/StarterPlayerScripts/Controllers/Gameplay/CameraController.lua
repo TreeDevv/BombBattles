@@ -7,6 +7,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local CameraConfig = require(ReplicatedStorage.Shared.Config.CameraConfig)
 local CameraShaker = require(ReplicatedStorage.Shared.Camera.CameraShaker)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesCameraController"
@@ -984,7 +985,9 @@ function CameraController:OnStart()
 
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function(dt)
+		local token = RuntimeProfiler.Begin("Client/CameraController/Render")
 		self:_step(dt)
+		RuntimeProfiler.End("Client/CameraController/Render", token)
 	end)
 
 	if self._characterConnection then

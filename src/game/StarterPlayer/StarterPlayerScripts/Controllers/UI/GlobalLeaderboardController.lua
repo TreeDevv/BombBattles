@@ -64,7 +64,7 @@ type BoardRecord = {
 	timer: TextLabel?,
 	templates: { [string]: Frame },
 	displayModel: Model?,
-	displayPivot: CFrame?,
+	displayRootCFrame: CFrame?,
 	displayUsernameLabel: TextLabel?,
 	displayCountLabel: TextLabel?,
 	displayRankLabel: TextLabel?,
@@ -229,6 +229,11 @@ local function getDisplayRig(record: BoardRecord): Model?
 	return if rig and rig:IsA("Model") then rig else nil
 end
 
+local function getRigRootPart(rig: Model): BasePart?
+	local rootPart = rig:FindFirstChild("HumanoidRootPart")
+	return if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+end
+
 local function configureDisplayRig(rig: Model)
 	for _, descendant in ipairs(rig:GetDescendants()) do
 		if descendant:IsA("Script") or descendant:IsA("LocalScript") then
@@ -251,6 +256,18 @@ local function configureDisplayRig(rig: Model)
 			animator.Parent = humanoid
 		end
 	end
+end
+
+local function pivotRigRootToCFrame(rig: Model, targetRootCFrame: CFrame)
+	local rootPart = getRigRootPart(rig)
+	if not rootPart then
+		warn("[GlobalLeaderboardController] Display avatar is missing HumanoidRootPart; using model pivot fallback")
+		rig:PivotTo(targetRootCFrame)
+		return
+	end
+
+	local pivotToRoot = rig:GetPivot():ToObjectSpace(rootPart.CFrame)
+	rig:PivotTo(targetRootCFrame * pivotToRoot:Inverse())
 end
 
 local function createDisplayAvatar(userId: number): Model?
@@ -364,8 +381,11 @@ local function clearDisplayRig(record: BoardRecord)
 
 	local rig = getDisplayRig(record)
 	if rig then
-		if not record.displayPivot then
-			record.displayPivot = rig:GetPivot()
+		if not record.displayRootCFrame then
+			local rootPart = getRigRootPart(rig)
+			if rootPart then
+				record.displayRootCFrame = rootPart.CFrame
+			end
 		end
 		rig:Destroy()
 	end
@@ -398,7 +418,7 @@ end
 
 local function updateDisplayRig(record: BoardRecord, entry)
 	local userId = entry and getPositiveUserId(entry.userId) or nil
-	if not (record.displayModel and record.displayPivot and userId) then
+	if not (record.displayModel and record.displayRootCFrame and userId) then
 		clearDisplayRig(record)
 		return
 	end
@@ -409,7 +429,7 @@ local function updateDisplayRig(record: BoardRecord, entry)
 
 	record.displaySerial += 1
 	local serial = record.displaySerial
-	local pivot = record.displayPivot
+	local rootCFrame = record.displayRootCFrame
 	local parent = record.displayModel
 	clearDisplayRig(record)
 
@@ -427,7 +447,7 @@ local function updateDisplayRig(record: BoardRecord, entry)
 
 		rig.Name = "Rig"
 		rig.Parent = parent
-		rig:PivotTo(pivot)
+		pivotRigRootToCFrame(rig, rootCFrame)
 		configureDisplayRig(rig)
 		playRandomDisplayEmote(record, rig)
 
@@ -841,10 +861,11 @@ local function findBoardRecord(config): BoardRecord?
 	local displayModelInstance = model:FindFirstChild(config.displayModelName)
 	local displayModel = if displayModelInstance and displayModelInstance:IsA("Model") then displayModelInstance else nil
 	local displayRig = displayModel and displayModel:FindFirstChild("Rig")
-	local displayPivot = if displayRig and displayRig:IsA("Model") then displayRig:GetPivot() else nil
+	local displayRootPart = if displayRig and displayRig:IsA("Model") then getRigRootPart(displayRig) else nil
+	local displayRootCFrame = displayRootPart and displayRootPart.CFrame or nil
 
-	if displayModel and not displayPivot then
-		warn("[GlobalLeaderboardController] Missing display Rig for", config.modelName)
+	if displayModel and not displayRootCFrame then
+		warn("[GlobalLeaderboardController] Missing display Rig HumanoidRootPart for", config.modelName)
 	elseif not displayModel then
 		warn("[GlobalLeaderboardController] Missing player display model for", config.modelName)
 	end
@@ -867,7 +888,7 @@ local function findBoardRecord(config): BoardRecord?
 			normal = normal,
 		},
 		displayModel = displayModel,
-		displayPivot = displayPivot,
+		displayRootCFrame = displayRootCFrame,
 		displayUsernameLabel = findDescendantTextLabel(displayModel, "Username"),
 		displayCountLabel = findDescendantTextLabel(displayModel, "Count"),
 		displayRankLabel = findDescendantTextLabel(displayModel, "Rank"),

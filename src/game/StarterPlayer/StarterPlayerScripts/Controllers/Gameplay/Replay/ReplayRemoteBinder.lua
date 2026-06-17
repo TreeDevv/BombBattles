@@ -1,6 +1,8 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+
 local ReplayRemoteBinder = {}
 
 local function debug(deps, ...)
@@ -11,11 +13,13 @@ local function debug(deps, ...)
 end
 
 function ReplayRemoteBinder.RequestKillReplay(client, reason: string?, deps): boolean
+	local token = RuntimeProfiler.Begin("Client/Replay/Death/RequestKillReplay")
 	local constants = deps.getReplayConstants()
 	local remotes = constants and constants.REMOTES
 	local remoteName = remotes and remotes.KillReplayRequest
 	if typeof(remoteName) ~= "string" or remoteName == "" then
 		debug(deps, "KillReplay request remote missing from constants")
+		RuntimeProfiler.End("Client/Replay/Death/RequestKillReplay", token)
 		return false
 	end
 
@@ -26,20 +30,26 @@ function ReplayRemoteBinder.RequestKillReplay(client, reason: string?, deps): bo
 	end
 	if not (remote and remote:IsA("RemoteEvent")) then
 		debug(deps, "KillReplay request remote unavailable", remoteName)
+		RuntimeProfiler.End("Client/Replay/Death/RequestKillReplay", token)
 		return false
 	end
 
 	local requestReason = if typeof(reason) == "string" and reason ~= "" then reason else "DeadNoReplay"
 	debug(deps, "Requesting KillReplay", requestReason)
+	local fireToken = RuntimeProfiler.Begin("Client/Replay/Death/RequestKillReplay/FireServer")
 	local ok, err = pcall(function()
 		remote:FireServer({
 			reason = requestReason,
 		})
 	end)
+	RuntimeProfiler.End("Client/Replay/Death/RequestKillReplay/FireServer", fireToken)
 	if not ok then
 		warn("[ReplayClient] KillReplay request failed: " .. tostring(err))
+		RuntimeProfiler.End("Client/Replay/Death/RequestKillReplay", token)
 		return false
 	end
+	RuntimeProfiler.Count("Client/Replay/Death/KillReplayRequests")
+	RuntimeProfiler.End("Client/Replay/Death/RequestKillReplay", token)
 	return true
 end
 
@@ -61,9 +71,13 @@ function ReplayRemoteBinder.BindRemoteInstance(client, remoteName: string, remot
 		end
 
 		if typeof(payload) == "table" and payload.type == "KillReplay" then
+			local token = RuntimeProfiler.Begin("Client/Replay/Death/RemoteKillReplayReceived")
 			local frameCount = if typeof(payload.frames) == "table" then #payload.frames else 0
 			local eventCount = if typeof(payload.events) == "table" then #payload.events else 0
 			local destructionEventCount = if typeof(payload.destructionEvents) == "table" then #payload.destructionEvents else 0
+			RuntimeProfiler.Count("Client/Replay/Death/RemoteFrames", frameCount)
+			RuntimeProfiler.Count("Client/Replay/Death/RemoteEvents", eventCount)
+			RuntimeProfiler.Count("Client/Replay/Death/RemoteDestructionEvents", destructionEventCount)
 			print(
 				("[ReplayClient] Received KillReplay start=%.3f end=%.3f frames=%d events=%d destruction=%d killer=%s victim=%s"):format(
 					if typeof(payload.startTime) == "number" then payload.startTime else 0,
@@ -75,7 +89,12 @@ function ReplayRemoteBinder.BindRemoteInstance(client, remoteName: string, remot
 					tostring(payload.victimUserId)
 				)
 			)
-			client:PlayKillReplay(payload)
+			if type(client.ReceiveKillReplay) == "function" then
+				client:ReceiveKillReplay(payload)
+			else
+				client:PlayKillReplay(payload)
+			end
+			RuntimeProfiler.End("Client/Replay/Death/RemoteKillReplayReceived", token)
 			return
 		end
 

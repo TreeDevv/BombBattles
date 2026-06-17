@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
@@ -24,7 +25,7 @@ BottomButtonsController._spectate = nil :: GuiObject?
 BottomButtonsController._spectateConnection = nil :: RBXScriptConnection?
 
 local function shouldShowButtons(state: string?, spectateVisible: boolean): boolean
-	return state == RoundStates.Active and not spectateVisible
+	return (state == RoundStates.Active or CombatEligibility.IsPracticeRangeActive(LocalPlayer)) and not spectateVisible
 end
 
 local function getHiddenBottomPosition(buttons: GuiObject): UDim2
@@ -155,6 +156,12 @@ function BottomButtonsController:OnStart()
 		if key == "state" then
 			self:_updateVisibility(false)
 		end
+	end))
+	table.insert(self._connections, LocalPlayer:GetAttributeChangedSignal(CombatEligibility.PracticeRangeActiveAttribute):Connect(function()
+		self:_updateVisibility(false)
+	end))
+	table.insert(self._connections, LocalPlayer:GetAttributeChangedSignal(CombatEligibility.AFKAttribute):Connect(function()
+		self:_updateVisibility(false)
 	end))
 
 	self:_bindCurrentHud()

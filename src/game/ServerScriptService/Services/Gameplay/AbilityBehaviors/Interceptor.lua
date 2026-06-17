@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
@@ -179,7 +180,7 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloor(rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
 	local distance = definition.placementDistance or 8
 	local rayUp = definition.floorRaycastUp or 8
 	local rayDown = definition.floorRaycastDown or 32
@@ -198,8 +199,8 @@ local function findFloor(rootPart: BasePart, definition: AbilityDefinition): Flo
 		return nil
 	end
 
-	local activeMap = getActiveMap()
-	if activeMap and not hit.Instance:IsDescendantOf(activeMap) then
+	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
+	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
 		return nil
 	end
 
@@ -218,6 +219,17 @@ local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing
 	local bottomY = boundsCFrame.Position.Y - boundsSize.Y * 0.5
 	local finalPivot = pivot + Vector3.yAxis * (floorPosition.Y - bottomY)
 	pivotTo(clone, finalPivot)
+
+	return getBounds(clone)
+end
+
+local function alignCloneToRootPosition(clone: Instance, rootPart: BasePart): (CFrame, Vector3)
+	local rootCFrame = rootPart.CFrame
+	pivotTo(clone, rootCFrame)
+
+	local boundsCFrame = getBounds(clone)
+	local centeredCFrame = rootCFrame + (rootPart.Position - boundsCFrame.Position)
+	pivotTo(clone, centeredCFrame)
 
 	return getBounds(clone)
 end
@@ -266,7 +278,7 @@ local function validatePlacement(player: Player, definition: AbilityDefinition, 
 		return nil
 	end
 
-	local floor = findFloor(rootPart, definition)
+	local floor = findFloor(player, rootPart, definition)
 	if not floor then
 		return nil
 	end
@@ -435,8 +447,8 @@ function Interceptor.OnActivate(context: ServerActivateContext): AbilityActivati
 		return false
 	end
 
-	local placement = validatePlacement(context.player, context.definition, centerTemplate)
-	if not placement then
+	local rootPart = getCharacterRoot(context.player)
+	if not rootPart then
 		return false
 	end
 
@@ -452,7 +464,11 @@ function Interceptor.OnActivate(context: ServerActivateContext): AbilityActivati
 	centerPiece:SetAttribute(ID_ATTR, interceptorId)
 	centerPiece:SetAttribute(OWNER_ATTR, context.player.UserId)
 	centerPiece:SetAttribute("AbilityId", context.abilityId)
-	alignCloneToFloor(centerPiece, placement.position, placement.facing)
+	local _boundsCFrame, boundsSize = alignCloneToRootPosition(centerPiece, rootPart)
+	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
+		folder:Destroy()
+		return false
+	end
 	prepareCenterPiece(centerPiece)
 	centerPiece.Parent = folder
 	folder.Parent = getInterceptorRootFolder()

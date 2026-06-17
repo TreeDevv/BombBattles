@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Loader = require(ReplicatedStorage.Loader)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local DISABLED_SERVER_MODULES = {}
 
@@ -24,9 +25,12 @@ local function callServiceMethod(service, methodName: string)
 		return
 	end
 
+	local label = "Lifecycle/ReplayService/" .. methodName
+	local token = RuntimeProfiler.Begin(label)
 	local ok, err = pcall(function()
 		method(service)
 	end)
+	RuntimeProfiler.End(label, token)
 	if not ok then
 		warn(("[Start] %s.%s failed: %s"):format("ReplayService", methodName, tostring(err)))
 	end

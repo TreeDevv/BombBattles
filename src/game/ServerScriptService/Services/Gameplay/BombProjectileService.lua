@@ -12,8 +12,10 @@ local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionCon
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
+local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatants)
 
 local RESULT_KIND = AbilityResult.Kind
 local DEBUG_REPLAY_EVENTS = false
@@ -159,11 +161,7 @@ local function isValidOwner(owner: any): boolean
 		return owner:IsA("Player") and owner.Parent == Players
 	end
 
-	return RunService:IsStudio()
-		and typeof(owner) == "table"
-		and owner.studioAIBot == true
-		and typeof(owner.UserId) == "number"
-		and typeof(owner.Name) == "string"
+	return StudioAICombatants.IsBotOwner(owner)
 end
 
 local function isOwnerActive(owner: any): boolean
@@ -282,11 +280,14 @@ local function getPartContactRadius(part: BasePart): number
 end
 
 local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vector3)
+	local token = RuntimeProfiler.Begin("Server/BombProjectile/FindSweptPlayerContact")
 	if state.collision.playerContactExplodes ~= true and state.collision.playerContactImpacts ~= true then
+		RuntimeProfiler.End("Server/BombProjectile/FindSweptPlayerContact", token)
 		return nil
 	end
 
 	local sweepRadius = math.max(state.physics.radius, 0)
+	local scannedParts = 0
 	for _, player in ipairs(Players:GetPlayers()) do
 		if typeof(state.owner) == "Instance" and player == state.owner then
 			continue
@@ -303,10 +304,13 @@ local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vect
 				continue
 			end
 
+			scannedParts += 1
 			local contactPoint = closestPointOnSegment(state.position, nextPosition, descendant.Position)
 			local contactRadius = sweepRadius + getPartContactRadius(descendant)
 			if (descendant.Position - contactPoint).Magnitude <= contactRadius then
 				local normal = if state.velocity.Magnitude > 0.05 then -state.velocity.Unit else Vector3.yAxis
+				RuntimeProfiler.Count("Server/BombProjectile/SweptPlayerPartsScanned", scannedParts)
+				RuntimeProfiler.End("Server/BombProjectile/FindSweptPlayerContact", token)
 				return {
 					position = contactPoint,
 					normal = normal,
@@ -316,6 +320,38 @@ local function findSweptPlayerContact(state: ProjectileState, nextPosition: Vect
 		end
 	end
 
+	local ownerTeam = nil
+	local ownerIdentity = StudioAICombatants.GetOwnerIdentity(state.owner)
+	if ownerIdentity then
+		ownerTeam = ownerIdentity.teamName
+	end
+	for _, bot in ipairs(StudioAICombatants.GetAliveBots({
+		enemyOfTeam = ownerTeam,
+		excludeUserId = getOwnerUserId(state.owner),
+	})) do
+		for _, descendant in ipairs(bot.model:GetDescendants()) do
+			if not descendant:IsA("BasePart") then
+				continue
+			end
+
+			scannedParts += 1
+			local contactPoint = closestPointOnSegment(state.position, nextPosition, descendant.Position)
+			local contactRadius = sweepRadius + getPartContactRadius(descendant)
+			if (descendant.Position - contactPoint).Magnitude <= contactRadius then
+				local normal = if state.velocity.Magnitude > 0.05 then -state.velocity.Unit else Vector3.yAxis
+				RuntimeProfiler.Count("Server/BombProjectile/SweptPlayerPartsScanned", scannedParts)
+				RuntimeProfiler.End("Server/BombProjectile/FindSweptPlayerContact", token)
+				return {
+					position = contactPoint,
+					normal = normal,
+					hitInstance = descendant,
+				}
+			end
+		end
+	end
+
+	RuntimeProfiler.Count("Server/BombProjectile/SweptPlayerPartsScanned", scannedParts)
+	RuntimeProfiler.End("Server/BombProjectile/FindSweptPlayerContact", token)
 	return nil
 end
 
@@ -370,22 +406,31 @@ local function preparePhysicalProjectile(projectileId: string, owner: any, bombT
 	return projectile, rootPart
 end
 
-local function setPhysicalMotion(projectile: Instance, velocity: Vector3, angularVelocity: Vector3)
+local function setPhysicalNetworkOwner(projectile: Instance)
 	for _, descendant in ipairs(projectile:GetDescendants()) do
 		if descendant:IsA("BasePart") then
-			descendant.AssemblyLinearVelocity = velocity
-			descendant.AssemblyAngularVelocity = angularVelocity
 			pcall(function()
 				descendant:SetNetworkOwner(nil)
 			end)
 		end
 	end
 	if projectile:IsA("BasePart") then
-		projectile.AssemblyLinearVelocity = velocity
-		projectile.AssemblyAngularVelocity = angularVelocity
 		pcall(function()
 			projectile:SetNetworkOwner(nil)
 		end)
+	end
+end
+
+local function setPhysicalMotion(projectile: Instance, velocity: Vector3, angularVelocity: Vector3)
+	for _, descendant in ipairs(projectile:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.AssemblyLinearVelocity = velocity
+			descendant.AssemblyAngularVelocity = angularVelocity
+		end
+	end
+	if projectile:IsA("BasePart") then
+		projectile.AssemblyLinearVelocity = velocity
+		projectile.AssemblyAngularVelocity = angularVelocity
 	end
 end
 
@@ -609,6 +654,7 @@ local function spawnPhysicalProjectile(state: ProjectileState): Instance?
 	local angularAxis = Vector3.yAxis:Cross(velocity)
 	local angularVelocity = if angularAxis.Magnitude > 0.05 then angularAxis.Unit * (velocity.Magnitude / radius) else Vector3.zero
 	setPhysicalMotion(projectile, velocity, angularVelocity)
+	setPhysicalNetworkOwner(projectile)
 
 	state.physicalProjectile = projectile
 	state.physicalRoot = rootPart
@@ -1194,6 +1240,7 @@ local function stepBurrowProjectile(state: ProjectileState, fixedDt: number, cur
 end
 
 local function handleStepHook(state: ProjectileState, nextPosition: Vector3, currentTime: number, fixedDt: number): boolean
+	local token = RuntimeProfiler.Begin("Server/BombProjectile/AbilityHook/OnProjectileStep")
 	local stepResult = AbilityService:RunHook("OnProjectileStep", {
 		projectileId = state.id,
 		owner = state.owner,
@@ -1211,6 +1258,7 @@ local function handleStepHook(state: ProjectileState, nextPosition: Vector3, cur
 		attached = state.attached ~= nil,
 		deltaTime = fixedDt,
 	})
+	RuntimeProfiler.End("Server/BombProjectile/AbilityHook/OnProjectileStep", token)
 
 	if stepResult.kind == RESULT_KIND.DestroyProjectile or stepResult.kind == RESULT_KIND.Absorb then
 		BombProjectileService:DestroyProjectile(state.id, "Step")
@@ -1285,21 +1333,27 @@ local function enforceRangeLimit(state: ProjectileState): boolean
 end
 
 local function stepProjectile(state: ProjectileState, fixedDt: number, currentTime: number)
+	local token = RuntimeProfiler.Begin("Server/BombProjectile/StepProjectile")
 	if state.destroyed then
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 	if not isOwnerActive(state.owner) then
 		BombProjectileService:DestroyProjectile(state.id, "OwnerRemoved")
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 	if stepFrozenProjectile(state, fixedDt, currentTime) then
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 	if currentTime >= state.explodeAt then
 		explodeProjectile(state)
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 	if stepBurrowProjectile(state, fixedDt, currentTime) then
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 
@@ -1307,11 +1361,13 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		state.position = getAttachedPosition(state)
 		state.velocity = Vector3.zero
 		if not handleStepHook(state, state.position, currentTime, fixedDt) then
+			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
 		if not state.destroyed then
 			fireSnapshot(state, currentTime, false)
 		end
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 
@@ -1320,15 +1376,19 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		state.position = getPhysicalPosition(state)
 		state.velocity = getPhysicalVelocity(state)
 		if enforceRangeLimit(state) then
+			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
 		if not handleStepHook(state, state.position + state.velocity * fixedDt, currentTime, fixedDt) then
+			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
 		if state.destroyed or not state.physicalProjectile then
+			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
 		fireSnapshot(state, currentTime, false)
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 
@@ -1345,9 +1405,11 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	end
 
 	if not handleStepHook(state, predictedPosition, currentTime, fixedDt) then
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 	if state.destroyed then
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 
@@ -1355,30 +1417,37 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	if playerContact then
 		if state.collision.playerContactImpacts == true then
 			if not fireContactImpact(state, playerContact) then
+				RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 				return
 			end
 			if state.destroyed or state.attached then
+				RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 				return
 			end
 		elseif typeof(playerContact.position) == "Vector3" then
 			state.position = playerContact.position
 			explodeProjectile(state)
+			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
 	end
 
 	if state.destroyed then
+		RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 		return
 	end
 
 	state.lastPosition = state.position
 	if not state.settled then
+		local physicsToken = RuntimeProfiler.Begin("Server/BombProjectile/ProjectilePhysicsStep")
 		local result = ProjectilePhysics.Step(state, fixedDt, state.physics, createRaycastParams(state))
+		RuntimeProfiler.End("Server/BombProjectile/ProjectilePhysicsStep", physicsToken)
 		state.position = result.position
 		state.velocity = result.velocity
 		state.hasImpacted = result.hasImpacted == true
 		state.grounded = result.grounded == true
 		if enforceRangeLimit(state) then
+			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
 		if result.hit and result.hitPosition and result.hitNormal and result.incomingVelocity then
@@ -1387,9 +1456,11 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 			end
 			local continueAfterImpact = fireImpact(state, result.hit, result.hitPosition, result.hitNormal, result.incomingVelocity)
 			if state.destroyed then
+				RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 				return
 			end
 			if not continueAfterImpact then
+				RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 				return
 			end
 		end
@@ -1410,13 +1481,19 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	if currentTime >= state.explodeAt then
 		explodeProjectile(state)
 	end
+	RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 end
 
 local function stepAll(fixedDt: number)
+	local token = RuntimeProfiler.Begin("Server/BombProjectile/StepAll")
 	local currentTime = now()
+	local activeCount = 0
 	for _, state in pairs(activeProjectiles) do
+		activeCount += 1
 		stepProjectile(state, fixedDt, currentTime)
 	end
+	RuntimeProfiler.Gauge("Server/BombProjectile/ActiveProjectiles", activeCount)
+	RuntimeProfiler.End("Server/BombProjectile/StepAll", token)
 end
 
 function BombProjectileService:IsEnabled(): boolean
@@ -1505,6 +1582,7 @@ function BombProjectileService:ApplyExternalVelocity(projectileId: string, veloc
 end
 
 function BombProjectileService:Launch(request): boolean
+	RuntimeProfiler.Count("Server/BombProjectile/LaunchRequests")
 	if not self:IsEnabled() or typeof(request) ~= "table" then
 		return false
 	end
@@ -1612,6 +1690,7 @@ function BombProjectileService:Launch(request): boolean
 	}
 
 	activeProjectiles[projectileId] = state
+	RuntimeProfiler.Count("Server/BombProjectile/LaunchAccepted")
 	fireEffect("Throw", {
 		player = owner,
 		projectileId = projectileId,
@@ -1632,9 +1711,14 @@ function BombProjectileService:Launch(request): boolean
 		visualScale = visuals.visualScale,
 		snapshotHz = BombProjectileConfig.SnapshotHz,
 	})
+	local ownerIdentity = StudioAICombatants.GetOwnerIdentity(owner)
 	recordReplayEvent("BombThrown", {
 		bombId = projectileId,
 		ownerUserId = getOwnerUserId(owner),
+		ownerName = if ownerIdentity then ownerIdentity.name else nil,
+		ownerDisplayName = if ownerIdentity then ownerIdentity.displayName else nil,
+		ownerTeam = if ownerIdentity then ownerIdentity.teamName else nil,
+		ownerIsNPC = if ownerIdentity then ownerIdentity.isNPC == true else nil,
 		bombType = bombType,
 		bombSkinId = skinId,
 		position = origin,
@@ -1689,6 +1773,7 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 
 		local owner = state.owner
 		local ownerUserId = if isOwnerActive(owner) then getOwnerUserId(owner) else nil
+		local ownerIdentity = if ownerUserId then StudioAICombatants.GetOwnerIdentity(owner) else nil
 		local radius = if typeof(state.physics.radius) == "number" then state.physics.radius else nil
 		local sizeScale = if radius and typeof(defaultRadius) == "number" and defaultRadius > 0 then radius / defaultRadius else nil
 
@@ -1698,6 +1783,9 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 		table.insert(snapshots, {
 			bombId = state.id,
 			ownerUserId = ownerUserId,
+			ownerName = if ownerIdentity then ownerIdentity.name else nil,
+			ownerDisplayName = if ownerIdentity then ownerIdentity.displayName else nil,
+			ownerIsNPC = if ownerIdentity then ownerIdentity.isNPC == true else nil,
 			bombType = state.bombType,
 			bombSkinId = state.skinId,
 			cframe = CFrame.new(position),
@@ -1720,7 +1808,9 @@ function BombProjectileService:OnStart()
 	end
 
 	heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		local heartbeatToken = RuntimeProfiler.Begin("Server/BombProjectile/Heartbeat")
 		if not self:IsEnabled() then
+			RuntimeProfiler.End("Server/BombProjectile/Heartbeat", heartbeatToken)
 			return
 		end
 
@@ -1730,13 +1820,18 @@ function BombProjectileService:OnStart()
 
 		local steps = 0
 		while accumulator >= fixedDt and steps < maxSteps do
+			local stepToken = RuntimeProfiler.Begin("Server/BombProjectile/FixedStep")
 			accumulator -= fixedDt
 			steps += 1
 			stepAll(fixedDt)
+			RuntimeProfiler.End("Server/BombProjectile/FixedStep", stepToken)
 		end
 		if steps >= maxSteps then
+			RuntimeProfiler.Count("Server/BombProjectile/MaxStepClamp")
 			accumulator = 0
 		end
+		RuntimeProfiler.Gauge("Server/BombProjectile/FixedStepsLastHeartbeat", steps)
+		RuntimeProfiler.End("Server/BombProjectile/Heartbeat", heartbeatToken)
 	end)
 end
 

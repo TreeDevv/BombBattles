@@ -6,6 +6,7 @@ local TweenService = game:GetService("TweenService")
 local DestructionMeterConfig = require(ReplicatedStorage.Shared.Config.DestructionMeterConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local UIParticleEmitter = require(ReplicatedStorage.Shared.UI.UIParticleEmitter)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
@@ -1432,10 +1433,12 @@ function DestructionMeterController:OnStart()
 		end
 	end))
 	track(self._connections, RunService.RenderStepped:Connect(function()
+		local token = RuntimeProfiler.Begin("Client/DestructionMeterController/Render")
 		local now = os.clock()
 		local deltaTime = math.min(now - self._lastFrameTime, 0.1)
 		self._lastFrameTime = now
 		self:_updateDecay(deltaTime)
+		RuntimeProfiler.End("Client/DestructionMeterController/Render", token)
 	end))
 
 	self:_bindRoundResets()

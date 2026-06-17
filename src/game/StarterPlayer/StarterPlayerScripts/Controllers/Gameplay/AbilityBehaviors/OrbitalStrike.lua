@@ -9,9 +9,12 @@ local UserInputService = game:GetService("UserInputService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 local CameraController = require(script.Parent.Parent:WaitForChild("CameraController"))
+local RoundController = require(script.Parent.Parent:WaitForChild("RoundController"))
 
 type AbilityControllerLike = AbilityTypes.AbilityControllerLike
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -522,6 +525,16 @@ local function getActiveMap(): Model?
 	return if map and map:IsA("Model") then map else nil
 end
 
+local function getTargetRoot(): Model?
+	local targetRoot = PracticeRangeTargeting.GetClientTargetRoot(
+		LocalPlayer,
+		RoundController:Get("state"),
+		RoundStates.Active,
+		getActiveMap()
+	)
+	return if targetRoot and targetRoot:IsA("Model") then targetRoot else nil
+end
+
 local function getInstancePosition(instance: Instance): Vector3?
 	if instance:IsA("BasePart") then
 		return instance.Position
@@ -577,7 +590,7 @@ local function getClosestTaggedTeamPosition(tagName: string, teamName: string, m
 end
 
 local function resolvePlacementForward(rootPart: BasePart): Vector3
-	local map = getActiveMap()
+	local map = getTargetRoot()
 	local enemyTeamName = getEnemyTeamName()
 	local origin = rootPart.Position
 	local targetPosition: Vector3? = nil
@@ -656,8 +669,8 @@ local function makeRaycastParams(): RaycastParams
 	if state.markerFolder then
 		table.insert(excluded, state.markerFolder)
 	end
-	local map = getActiveMap()
-	local strikeObjects = map and map:FindFirstChild("OrbitalStrikeObjects")
+	local targetRoot = getTargetRoot()
+	local strikeObjects = targetRoot and targetRoot:FindFirstChild("OrbitalStrikeObjects")
 	if strikeObjects then
 		table.insert(excluded, strikeObjects)
 	end
@@ -782,8 +795,8 @@ local function updatePlacementFromMove(definition: AbilityDefinition, dt: number
 		state.placementOffset += panDirection * speed * dt
 	end
 
-	local activeMap = getActiveMap()
-	local desiredPosition = clampToMapFootprint(center + state.placementOffset, activeMap)
+	local targetRoot = getTargetRoot()
+	local desiredPosition = clampToMapFootprint(center + state.placementOffset, targetRoot)
 	state.placementOffset = desiredPosition - center
 	local targetPosition, hitInstance, normal = raycastPlacement(desiredPosition, definition)
 	if not targetPosition then
@@ -791,10 +804,10 @@ local function updatePlacementFromMove(definition: AbilityDefinition, dt: number
 	end
 
 	local valid = true
-	if activeMap and hitInstance and not hitInstance:IsDescendantOf(activeMap) then
+	if hitInstance and not PracticeRangeTargeting.IsInTargetRoot(hitInstance, targetRoot) then
 		valid = false
 	end
-	if not isInsideMapBounds(targetPosition, activeMap) then
+	if not isInsideMapBounds(targetPosition, targetRoot) then
 		valid = false
 	end
 	if normal and normal.Y < getDefinitionNumber(definition, "minFloorNormalY", 0.45) then

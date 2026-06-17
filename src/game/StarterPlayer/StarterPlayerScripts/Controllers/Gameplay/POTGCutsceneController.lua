@@ -5,6 +5,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -409,11 +410,14 @@ function POTGCutsceneController:_beginPlayback(active: ActiveCutscene)
 
 	self:_unbindCamera()
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function()
+		local token = RuntimeProfiler.Begin("Client/POTGCutsceneController/Render")
 		if self._active ~= active then
+			RuntimeProfiler.End("Client/POTGCutsceneController/Render", token)
 			return
 		end
 		if not active.finishing and os.clock() >= active.endAt then
 			self:_finish(active, true)
+			RuntimeProfiler.End("Client/POTGCutsceneController/Render", token)
 			return
 		end
 		local currentCamera = workspace.CurrentCamera
@@ -424,6 +428,7 @@ function POTGCutsceneController:_beginPlayback(active: ActiveCutscene)
 		else
 			self:_finish(active, false)
 		end
+		RuntimeProfiler.End("Client/POTGCutsceneController/Render", token)
 	end)
 
 	for _, track in ipairs(active.tracks) do

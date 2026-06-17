@@ -8,16 +8,19 @@ local UserInputService = game:GetService("UserInputService")
 local AnimationConfig = require(ReplicatedStorage.Shared.Config.AnimationConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local HipBombVisual = require(ReplicatedStorage.Shared.Effects.HipBombVisual)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debris)
 
 local LocalPlayer = Players.LocalPlayer
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local CameraController = require(script.Parent:WaitForChild("CameraController"))
+local BombTrajectoryClient = require(script.Parent:WaitForChild("BombTrajectoryClient"))
 local REMOTES_FOLDER_NAME = "Remotes"
 local BEGIN_REMOTE_NAME = "BeginBombCook"
 local RELEASE_REMOTE_NAME = "ReleaseBombCook"
@@ -53,10 +56,11 @@ local HIT_FLASH_FILL_TRANSPARENCY = 0.28
 local HIT_FLASH_OUTLINE_TRANSPARENCY = 0.05
 local HIT_FLASH_FADE_SECONDS = 0.26
 local HIT_FLASH_CLEANUP_SECONDS = 0.6
+local PROJECTILE_PHYSICAL_HANDOFF_SECONDS = 0.14
+local PROJECTILE_PHYSICAL_HANDOFF_MAX_SECONDS = 0.28
 local FROZEN_BOMB_COLOR = Color3.fromRGB(91, 226, 255)
 local FROZEN_BOMB_FILL_TRANSPARENCY = 0.18
 local FROZEN_BOMB_OUTLINE_TRANSPARENCY = 0.02
-local MIN_AIM_HORIZONTAL = 0.08
 local BEAM_CURVE_EPSILON = 1e-4
 local ATTR = BombConfig.Attributes
 
@@ -118,6 +122,7 @@ BombController._holding = false
 BombController._previewing = false
 BombController._releasePending = false
 BombController._releaseFallbackSerial = 0
+BombController._predictedProjectileSerial = 0
 BombController._started = false
 BombController._primaryBombInputSuppressed = false
 BombController._abilityThrowActive = false
@@ -167,6 +172,8 @@ BombController._projectileVisuals = {} :: {
 		skinId: string?,
 		highlight: Highlight?,
 		pulseConnection: RBXScriptConnection?,
+		handoffConnection: RBXScriptConnection?,
+		handoffPhysical: Instance?,
 		fuseStartedAt: number?,
 		fuseEndsAt: number?,
 		visuals: { [string]: any }?,
@@ -200,23 +207,8 @@ local function getRootPart(): BasePart?
 	return rootPart
 end
 
-local function getHorizontalDirection(direction: Vector3?): Vector3?
-	if typeof(direction) ~= "Vector3" then
-		return nil
-	end
-
-	local horizontal = Vector3.new(direction.X, 0, direction.Z)
-	if horizontal.Magnitude <= MIN_AIM_HORIZONTAL then
-		return nil
-	end
-
-	return horizontal.Unit
-end
-
 local function getFallbackAimDirection(): Vector3
-	local rootPart = getRootPart()
-	local horizontal = if rootPart then getHorizontalDirection(rootPart.CFrame.LookVector) else nil
-	return horizontal or Vector3.new(0, 0, -1)
+	return BombTrajectoryClient.GetFallbackAimDirection(getRootPart())
 end
 
 local function markAirControlLaunch(character: Model?, source: string, minAirTime: number)
@@ -271,40 +263,16 @@ local function applyOwnerClientExplosionLaunch(origin: Vector3)
 	markAirControlLaunch(character, "Explosive", AIR_CONTROL_EXPLOSIVE_MIN_AIR_TIME)
 end
 
-local function sanitizeAimDirection(direction: Vector3, fallback: Vector3): Vector3
-	local horizontal = getHorizontalDirection(direction)
-	if not horizontal then
-		horizontal = getHorizontalDirection(fallback) or Vector3.new(0, 0, -1)
-		direction = Vector3.new(horizontal.X, direction.Y, horizontal.Z)
-	end
-
-	direction = Vector3.new(direction.X, math.clamp(direction.Y, BombConfig.MinAimY, BombConfig.MaxAimY), direction.Z)
-	if direction.Magnitude < 0.05 then
-		return Vector3.new(horizontal.X, 0.15, horizontal.Z).Unit
-	end
-
-	return direction.Unit
-end
-
 local function getAimDirection(): Vector3
-	local camera = workspace.CurrentCamera
-	local direction = if camera then camera.CFrame.LookVector else Vector3.new(0, 0.1, -1)
-	return sanitizeAimDirection(direction, getFallbackAimDirection())
+	return BombTrajectoryClient.GetAimDirection(getRootPart())
 end
 
 local function getMouseAimDirection(): Vector3
-	local camera = workspace.CurrentCamera
-	if not camera then
-		return getAimDirection()
-	end
-
-	local mouseLocation = UserInputService:GetMouseLocation()
-	local ray = camera:ViewportPointToRay(mouseLocation.X, mouseLocation.Y)
-	return sanitizeAimDirection(ray.Direction, getFallbackAimDirection())
+	return BombTrajectoryClient.GetMouseAimDirection(getRootPart())
 end
 
 local function getThrowOrigin(rootPart: BasePart): Vector3
-	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
+	return BombTrajectoryClient.GetThrowOrigin(rootPart)
 end
 
 local function calculateTrajectoryWithConfig(
@@ -315,25 +283,18 @@ local function calculateTrajectoryWithConfig(
 	gravity: number,
 	maxFlightSeconds: number
 )
-	return BombTrajectory.CreatePath(
-		origin,
-		aimDirection,
-		launchSpeed,
-		upwardVelocity,
-		gravity,
-		maxFlightSeconds
-	)
+	return BombTrajectoryClient.CalculateTrajectoryWithConfig(origin, aimDirection, launchSpeed, upwardVelocity, gravity, maxFlightSeconds)
 end
 
 local function calculateTrajectory(origin: Vector3, aimDirection: Vector3)
-	return calculateTrajectoryWithConfig(
-		origin,
-		aimDirection,
-		BombConfig.ProjectileLaunchSpeed,
-		BombConfig.ProjectileUpwardVelocity,
-		workspace.Gravity * BombConfig.ProjectileGravityScale,
-		BombConfig.ProjectileMaxFlightSeconds
-	)
+	return BombTrajectoryClient.CalculateTrajectory(origin, aimDirection)
+end
+
+local function getProjectileLaunchVelocity(aimDirection: Vector3): Vector3
+	local direction = if typeof(aimDirection) == "Vector3" and aimDirection.Magnitude > 0.05
+		then aimDirection.Unit
+		else Vector3.zAxis
+	return direction * BombConfig.ProjectileLaunchSpeed + Vector3.yAxis * BombConfig.ProjectileUpwardVelocity
 end
 
 local function getPlayerBombSkinId(player: Player?): string
@@ -432,7 +393,7 @@ local function isCooking(): boolean
 end
 
 local function isRoundActiveForLocalPlayer(): boolean
-	return RoundController:Get("state") == RoundStates.Active and LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) == true
+	return CombatEligibility.IsClientCombatActive(LocalPlayer, RoundController:Get("state"), RoundStates.Active)
 end
 
 local function isServerAnimator(animator: Animator): boolean
@@ -619,59 +580,8 @@ local function cframeFromRightVector(position: Vector3, rightVector: Vector3): C
 	return CFrame.fromMatrix(position, right, up, back)
 end
 
-local function createPreviewSweepParams(): RaycastParams
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local character = LocalPlayer.Character
-	params.FilterDescendantsInstances = if character then { character } else {}
-	params.IgnoreWater = true
-	params.RespectCanCollide = true
-	return params
-end
-
-local function sweepPreviewSegment(fromPosition: Vector3, toPosition: Vector3, params: RaycastParams): RaycastResult?
-	local direction = toPosition - fromPosition
-	if direction.Magnitude <= 0.001 then
-		return nil
-	end
-
-	local spherecastOk, spherecastResult = pcall(function()
-		return workspace:Spherecast(fromPosition, BombConfig.SweepRadius, direction, params)
-	end)
-	if spherecastOk then
-		return spherecastResult
-	end
-
-	return workspace:Raycast(fromPosition, direction, params)
-end
-
 local function findPreviewTrajectoryHit(path: BombTrajectory.Path, maxPreviewTime: number): (RaycastResult?, number)
-	local stepSeconds = if typeof(BombConfig.PreviewStepSeconds) == "number"
-		then math.max(BombConfig.PreviewStepSeconds, 1 / 60)
-		else 0.08
-	local segmentCount = math.max(1, math.ceil(maxPreviewTime / stepSeconds))
-	local params = createPreviewSweepParams()
-
-	local previousElapsed = 0
-	local previousPosition = BombTrajectory.Evaluate(path, 0)
-
-	for index = 1, segmentCount do
-		local elapsed = maxPreviewTime * (index / segmentCount)
-		local position = BombTrajectory.Evaluate(path, elapsed / path.duration)
-		local hit = sweepPreviewSegment(previousPosition, position, params)
-		if hit then
-			local segmentLength = (position - previousPosition).Magnitude
-			local segmentAlpha = if segmentLength > 0.001
-				then math.clamp(hit.Distance / segmentLength, 0, 1)
-				else 0
-			return hit, previousElapsed + (elapsed - previousElapsed) * segmentAlpha
-		end
-
-		previousElapsed = elapsed
-		previousPosition = position
-	end
-
-	return nil, maxPreviewTime
+	return BombTrajectoryClient.FindPreviewTrajectoryHit(path, maxPreviewTime, LocalPlayer.Character)
 end
 
 function BombController:_getPreviewFolder(): Folder
@@ -1078,10 +988,7 @@ function BombController:_shouldShowHipBomb(player: Player): boolean
 	if player.Parent ~= Players then
 		return false
 	end
-	if RoundController:Get("state") ~= RoundStates.Active then
-		return false
-	end
-	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+	if not CombatEligibility.IsClientCombatActive(player, RoundController:Get("state"), RoundStates.Active) then
 		return false
 	end
 	if getPlayerBombCount(player) <= 0 then
@@ -1186,7 +1093,9 @@ function BombController:_startPreview()
 	self:_ensureTrajectoryPreview()
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function()
+		local token = RuntimeProfiler.Begin("Client/BombController/Preview")
 		self:_updatePreview()
+		RuntimeProfiler.End("Client/BombController/Preview", token)
 	end)
 end
 
@@ -1346,6 +1255,12 @@ function BombController:_bindInvalidStateSignals()
 	table.insert(self._stateConnections, LocalPlayer:GetAttributeChangedSignal(ROUND_ALIVE_ATTR):Connect(function()
 		self:_cancelHoldIfInvalid()
 	end))
+	table.insert(self._stateConnections, LocalPlayer:GetAttributeChangedSignal(CombatEligibility.PracticeRangeActiveAttribute):Connect(function()
+		self:_cancelHoldIfInvalid()
+	end))
+	table.insert(self._stateConnections, LocalPlayer:GetAttributeChangedSignal(CombatEligibility.AFKAttribute):Connect(function()
+		self:_cancelHoldIfInvalid()
+	end))
 	table.insert(self._stateConnections, RoundController.StateReceived:Connect(function()
 		self:_cancelHoldIfInvalid()
 	end))
@@ -1484,6 +1399,41 @@ function BombController:_playThrow()
 	table.insert(self._animationConnections, holdConnection)
 end
 
+function BombController:_createPredictedProjectileId(): string
+	self._predictedProjectileSerial += 1
+	return "Client_" .. tostring(LocalPlayer.UserId) .. "_" .. tostring(self._predictedProjectileSerial)
+end
+
+function BombController:_playPredictedLocalThrow(rootPart: BasePart, aimDirection: Vector3): string
+	local projectileId = self:_createPredictedProjectileId()
+	local currentTime = getServerTime()
+	local cookStartedAt = LocalPlayer:GetAttribute(ATTR.CookStartedAt)
+	local remainingFuse = BombConfig.FuseSeconds
+	local fuseStartedAt = currentTime
+	if typeof(cookStartedAt) == "number" and cookStartedAt > 0 then
+		fuseStartedAt = cookStartedAt
+		remainingFuse = math.max(BombConfig.FuseSeconds - (currentTime - cookStartedAt), 0.05)
+	end
+
+	self:_playThrowEffect({
+		player = LocalPlayer,
+		projectileId = projectileId,
+		customProjectile = true,
+		bombSkinId = getPlayerBombSkinId(LocalPlayer),
+		origin = getThrowOrigin(rootPart),
+		position = getThrowOrigin(rootPart),
+		initialVelocity = getProjectileLaunchVelocity(aimDirection),
+		velocity = getProjectileLaunchVelocity(aimDirection),
+		acceleration = Vector3.new(0, -(workspace.Gravity * BombConfig.ProjectileGravityScale), 0),
+		startedAt = currentTime,
+		fuseStartedAt = fuseStartedAt,
+		remainingFuse = remainingFuse,
+	})
+	RuntimeProfiler.Count("Client/BombController/ProjectilePredictionStarted")
+
+	return projectileId
+end
+
 function BombController:_fireReleaseFromAnimation()
 	if not self._releasePending then
 		return
@@ -1500,8 +1450,11 @@ function BombController:_fireReleaseFromAnimation()
 	elseif self._releaseRemote then
 		local rootPart = getRootPart()
 		if rootPart then
+			local aimDirection = getMouseAimDirection()
+			local clientProjectileId = self:_playPredictedLocalThrow(rootPart, aimDirection)
 			self._releaseRemote:FireServer({
-				aimDirection = getMouseAimDirection(),
+				aimDirection = aimDirection,
+				clientProjectileId = clientProjectileId,
 			})
 		else
 			self._releaseRemote:FireServer(getAimDirection())
@@ -1925,6 +1878,35 @@ function BombController:_setProjectileVisualCFrame(visual, position: Vector3, ta
 	end
 end
 
+local function smoothstep(alpha: number): number
+	alpha = math.clamp(alpha, 0, 1)
+	return alpha * alpha * (3 - 2 * alpha)
+end
+
+local function setInstanceLocalTransparency(instance: Instance?, alpha: number)
+	if not instance then
+		return
+	end
+
+	alpha = math.clamp(alpha, 0, 1)
+	if instance:IsA("BasePart") then
+		instance.LocalTransparencyModifier = alpha
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.LocalTransparencyModifier = alpha
+		end
+	end
+end
+
+local function pivotInstanceToCFrame(instance: Instance, rootPart: BasePart, cframe: CFrame)
+	if instance:IsA("Model") then
+		instance:PivotTo(cframe)
+	else
+		rootPart.CFrame = cframe
+	end
+end
+
 local function getVisualNumber(visual, key: string, fallback: number): number
 	local visuals = visual and visual.visuals
 	local value = if typeof(visuals) == "table" then visuals[key] else nil
@@ -2021,7 +2003,9 @@ function BombController:_startBombPulse(visual, adornee: Instance, fuseStartedAt
 	self:_updateBombPulse(visual)
 
 	visual.pulseConnection = RunService.RenderStepped:Connect(function()
+		local token = RuntimeProfiler.Begin("Client/BombController/BombPulse")
 		self:_updateBombPulse(visual)
+		RuntimeProfiler.End("Client/BombController/BombPulse", token)
 	end)
 end
 
@@ -2056,31 +2040,107 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 		return false
 	end
 
-	if visual.connection then
-		visual.connection:Disconnect()
-		visual.connection = nil
+	if visual.instance == projectile and visual.ownsInstance == false then
+		return true
+	end
+
+	if visual.handoffConnection then
+		return true
 	end
 
 	local airborneInstance = visual.instance
-	BombVisualUtil.SetEffectState(projectile, {
-		vfx = true,
-		fuseSpark = true,
-		trail = true,
-	})
-	self:_startBombPulse(
-		visual,
-		projectile,
-		visual.fuseStartedAt or getServerTime(),
-		visual.fuseEndsAt or (getServerTime() + BombConfig.ProjectileLifetimePadding)
-	)
-	if visual.ownsInstance and airborneInstance and airborneInstance.Parent then
-		airborneInstance:Destroy()
+	local airborneRootPart = visual.rootPart
+	if not (visual.ownsInstance and airborneInstance and airborneInstance.Parent and airborneRootPart and airborneRootPart.Parent) then
+		visual.instance = projectile
+		visual.rootPart = rootPart
+		visual.path = nil
+		visual.ownsInstance = false
+		setInstanceLocalTransparency(projectile, 0)
+		BombVisualUtil.SetEffectState(projectile, {
+			vfx = true,
+			fuseSpark = true,
+			trail = true,
+		})
+		self:_startBombPulse(
+			visual,
+			projectile,
+			visual.fuseStartedAt or getServerTime(),
+			visual.fuseEndsAt or (getServerTime() + BombConfig.ProjectileLifetimePadding)
+		)
+		return true
 	end
 
-	visual.instance = projectile
-	visual.rootPart = rootPart
-	visual.path = nil
-	visual.ownsInstance = false
+	visual.handoffPhysical = projectile
+	RuntimeProfiler.Count("Client/BombController/ProjectilePhysicalHandoffStarted")
+	setInstanceLocalTransparency(projectile, 1)
+	BombVisualUtil.SetEffectState(projectile, {
+		vfx = false,
+		fuseSpark = false,
+		trail = false,
+	})
+
+	local startCFrame = airborneRootPart.CFrame
+	local elapsed = 0
+	local duration = PROJECTILE_PHYSICAL_HANDOFF_SECONDS
+	visual.handoffConnection = RunService.RenderStepped:Connect(function(deltaTime)
+		if not (projectile.Parent and rootPart.Parent and airborneInstance.Parent and airborneRootPart.Parent) then
+			if visual.handoffConnection then
+				visual.handoffConnection:Disconnect()
+				visual.handoffConnection = nil
+			end
+			setInstanceLocalTransparency(projectile, 0)
+			visual.handoffPhysical = nil
+			RuntimeProfiler.Count("Client/BombController/ProjectilePhysicalHandoffFailed")
+			return
+		end
+
+		elapsed += math.max(deltaTime, 0)
+		local alpha = smoothstep(elapsed / duration)
+		local physicalCFrame = rootPart.CFrame
+		local blendedCFrame = startCFrame:Lerp(physicalCFrame, alpha)
+		pivotInstanceToCFrame(airborneInstance, airborneRootPart, blendedCFrame)
+		setInstanceLocalTransparency(airborneInstance, alpha)
+		setInstanceLocalTransparency(projectile, 1 - alpha)
+
+		if alpha >= 1 or elapsed >= PROJECTILE_PHYSICAL_HANDOFF_MAX_SECONDS then
+			if visual.handoffConnection then
+				visual.handoffConnection:Disconnect()
+				visual.handoffConnection = nil
+			end
+			if visual.connection then
+				visual.connection:Disconnect()
+				visual.connection = nil
+			end
+
+			setInstanceLocalTransparency(projectile, 0)
+			BombVisualUtil.SetEffectState(projectile, {
+				vfx = true,
+				fuseSpark = true,
+				trail = true,
+			})
+			self:_startBombPulse(
+				visual,
+				projectile,
+				visual.fuseStartedAt or getServerTime(),
+				visual.fuseEndsAt or (getServerTime() + BombConfig.ProjectileLifetimePadding)
+			)
+			if airborneInstance.Parent then
+				airborneInstance:Destroy()
+			end
+
+			visual.instance = projectile
+			visual.rootPart = rootPart
+			visual.path = nil
+			visual.ownsInstance = false
+			visual.handoffPhysical = nil
+			visual.position = rootPart.Position
+			visual.velocity = rootPart.AssemblyLinearVelocity
+			visual.targetPosition = visual.position
+			visual.targetVelocity = visual.velocity
+			RuntimeProfiler.Count("Client/BombController/ProjectilePhysicalHandoffCompleted")
+		end
+	end)
+
 	local skinId = BombSkinConfig.NormalizeSkinId(projectile:GetAttribute("BombSkinId"))
 	if skinId ~= "" then
 		visual.skinId = skinId
@@ -2154,6 +2214,8 @@ function BombController:_createProjectileVisual(projectileId: string, skinId: an
 		skinId = resolvedSkinId,
 		highlight = nil,
 		pulseConnection = nil,
+		handoffConnection = nil,
+		handoffPhysical = nil,
 		fuseStartedAt = nil,
 		fuseEndsAt = nil,
 		frozen = false,
@@ -2171,6 +2233,17 @@ function BombController:_destroyProjectileVisual(projectileId: string)
 
 	if visual.connection then
 		visual.connection:Disconnect()
+	end
+	if visual.handoffConnection then
+		visual.handoffConnection:Disconnect()
+	end
+	if visual.handoffPhysical then
+		setInstanceLocalTransparency(visual.handoffPhysical, 0)
+		BombVisualUtil.SetEffectState(visual.handoffPhysical, {
+			vfx = true,
+			fuseSpark = true,
+			trail = true,
+		})
 	end
 	self:_stopBombPulse(visual)
 	if visual.ownsInstance and visual.instance.Parent then
@@ -2199,25 +2272,42 @@ function BombController:_playThrowEffect(payload)
 		return
 	end
 
-	self:_destroyProjectileVisual(projectileId)
-	local visual = self:_createProjectileVisual(projectileId, payload.bombSkinId)
-	if not visual then
-		return
+	local visual = self._projectileVisuals[projectileId]
+	local reusePredictedVisual = customProjectile
+		and visual ~= nil
+		and visual.ownsInstance == true
+		and visual.customProjectile == true
+		and visual.handoffConnection == nil
+	if not reusePredictedVisual then
+		self:_destroyProjectileVisual(projectileId)
+		visual = self:_createProjectileVisual(projectileId, payload.bombSkinId)
+		if not visual then
+			return
+		end
+		self._projectileVisuals[projectileId] = visual
+	else
+		RuntimeProfiler.Count("Client/BombController/ProjectilePredictionReconciled")
 	end
+
 	visual.path = path
 	visual.customProjectile = customProjectile
 	visual.visuals = if typeof(payload.visuals) == "table" then payload.visuals else nil
 	if customProjectile then
 		local velocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else payload.initialVelocity
 		local acceleration = if typeof(payload.acceleration) == "Vector3" then payload.acceleration else Vector3.new(0, -workspace.Gravity, 0)
-		visual.position = startPosition
-		visual.velocity = if typeof(velocity) == "Vector3" then velocity else Vector3.zero
-		visual.targetPosition = visual.position
-		visual.targetVelocity = visual.velocity
+		local resolvedVelocity = if typeof(velocity) == "Vector3" then velocity else Vector3.zero
+		if reusePredictedVisual then
+			visual.targetPosition = startPosition
+			visual.targetVelocity = resolvedVelocity
+		else
+			visual.position = startPosition
+			visual.velocity = resolvedVelocity
+			visual.targetPosition = visual.position
+			visual.targetVelocity = visual.velocity
+		end
 		visual.acceleration = acceleration
 		visual.settled = false
 	end
-	self._projectileVisuals[projectileId] = visual
 
 	local startedAt = if typeof(payload.startedAt) == "number" then payload.startedAt else getServerTime()
 	local lifetime = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds
@@ -2226,7 +2316,12 @@ function BombController:_playThrowEffect(payload)
 	self:_startBombPulse(visual, visual.instance, fuseStartedAt, fuseEndsAt)
 	local rootPart = visual.rootPart
 
+	if visual.connection then
+		return
+	end
+
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
+		local token = RuntimeProfiler.Begin("Client/BombController/ProjectileVisual")
 		if not visual.spinLocked then
 			visual.spin += deltaTime * getProjectileSpinSpeed(visual)
 		end
@@ -2253,14 +2348,17 @@ function BombController:_playThrowEffect(payload)
 
 			visual.position = position
 			visual.velocity = velocity
-			local tangent = if velocity.Magnitude > 0.05 then velocity else visual.targetVelocity or Vector3.zAxis
-			self:_setProjectileVisualCFrame(visual, position, tangent, visual.spin)
+			if not visual.handoffConnection then
+				local tangent = if velocity.Magnitude > 0.05 then velocity else visual.targetVelocity or Vector3.zAxis
+				self:_setProjectileVisualCFrame(visual, position, tangent, visual.spin)
+			end
 		elseif path then
 			local alpha = math.clamp((getServerTime() - startedAt) / path.duration, 0, 1)
 			local position = BombTrajectory.Evaluate(path, alpha)
 			local tangent = BombTrajectory.GetTangent(path, alpha)
 			self:_setProjectileVisualCFrame(visual, position, tangent, visual.spin)
 		end
+		RuntimeProfiler.End("Client/BombController/ProjectileVisual", token)
 	end)
 
 	local cleanupDelay = lifetime + BombConfig.ProjectileLifetimePadding + (if customProjectile then 10 else 0)
@@ -2680,6 +2778,12 @@ function BombController:_bindEffects()
 	end
 
 	self._effectConnection = self._effectRemote.OnClientEvent:Connect(function(effectName: string, payload)
+		local token = RuntimeProfiler.Begin("Client/BombController/EffectRemote")
+		RuntimeProfiler.Count("Client/BombController/Effects")
+		if typeof(effectName) == "string" and effectName ~= "" then
+			RuntimeProfiler.Count("Client/BombController/Effect/" .. effectName)
+		end
+		RuntimeProfiler.Count("Client/BombController/EffectPayloadWeight", RuntimeProfiler.EstimatePayloadWeight(payload, 128))
 		local payloadPlayer = getPayloadPlayer(payload)
 		if effectName == "Hold" and payloadPlayer then
 			self:_showHeldBomb(payloadPlayer, if typeof(payload) == "table" then payload.bombSkinId else nil)
@@ -2734,6 +2838,7 @@ function BombController:_bindEffects()
 				self:_startPreview()
 			end
 		end
+		RuntimeProfiler.End("Client/BombController/EffectRemote", token)
 	end)
 end
 
@@ -2820,7 +2925,9 @@ function BombController:OnStart()
 		self:_destroyHipBomb(player)
 	end)
 	self._hipBombConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		local token = RuntimeProfiler.Begin("Client/BombController/HipBombHeartbeat")
 		self:_stepHipBombs(deltaTime)
+		RuntimeProfiler.End("Client/BombController/HipBombHeartbeat", token)
 	end)
 	self:_bindCharacter(LocalPlayer.Character)
 end

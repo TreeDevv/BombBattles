@@ -6,18 +6,24 @@ local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombDamage = require(ReplicatedStorage.Shared.Bombs.BombDamage)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local BombService = require(ServerScriptService.Services.BombService)
 local RoundService = require(ServerScriptService.Services.RoundService)
+local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatants)
 
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ID_ATTR = "RoundId"
 local SERVICE_FOLDER_NAME = "StudioAIBots"
+local TEMPLATE_FOLDER_PATH = { "GameAssets", "NPCTemplates" }
+local TEMPLATE_NAME = "StudioAITargetR6"
 local BOT_USER_ID_BASE = -900000
 local MONITOR_INTERVAL_SECONDS = 1
 local PATH_TIMEOUT_SECONDS = 3
+local AIM_SOLVER_STEPS = 36
+local MIN_AIM_SOLVER_SECONDS = 0.12
 local GROUND_PROBE_UP = 32
 local GROUND_PROBE_DOWN = 140
 local TEAM_COLORS = {
@@ -37,6 +43,13 @@ type BotRecord = {
 	movementToken: number,
 	throwToken: number,
 	deathConnection: RBXScriptConnection?,
+}
+
+type TargetDecision = {
+	position: Vector3,
+	damageKind: string,
+	predictedDamage: number,
+	score: number,
 }
 
 local StudioAIBotService = {}
@@ -145,6 +158,98 @@ local function countBots(teamName: string): number
 	return count
 end
 
+local function findTemplateRoot(): Instance?
+	local current: Instance? = ReplicatedStorage
+	for _, name in ipairs(TEMPLATE_FOLDER_PATH) do
+		current = current and current:FindFirstChild(name)
+		if not current then
+			return nil
+		end
+	end
+	return current
+end
+
+local function getBotTemplate(): Model?
+	local root = findTemplateRoot()
+	local template = root and root:FindFirstChild(TEMPLATE_NAME)
+	return if template and template:IsA("Model") then template else nil
+end
+
+local function getRequiredPart(model: Model, name: string): BasePart?
+	local part = model:FindFirstChild(name)
+	return if part and part:IsA("BasePart") then part else nil
+end
+
+local function validateR6TemplateClone(model: Model): (Humanoid?, BasePart?)
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local rootPart = getRequiredPart(model, "HumanoidRootPart")
+	if not (humanoid and rootPart) then
+		return nil, nil
+	end
+	if humanoid.RigType ~= Enum.HumanoidRigType.R6 then
+		return nil, nil
+	end
+	for _, partName in ipairs({ "Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }) do
+		if not getRequiredPart(model, partName) then
+			return nil, nil
+		end
+	end
+	return humanoid, rootPart
+end
+
+local function applyTeamBodyColor(model: Model, teamColor: Color3)
+	local bodyColors = model:FindFirstChildOfClass("BodyColors")
+	if not bodyColors then
+		return
+	end
+
+	local brickColor = BrickColor.new(teamColor)
+	bodyColors.TorsoColor = brickColor
+	bodyColors.LeftArmColor = brickColor
+	bodyColors.RightArmColor = brickColor
+end
+
+local function configureTemplateBotModel(
+	model: Model,
+	humanoid: Humanoid,
+	rootPart: BasePart,
+	teamName: string,
+	spawnCFrame: CFrame,
+	botId: number
+)
+	local teamColor = TEAM_COLORS[teamName] or Color3.fromRGB(180, 180, 180)
+	model.Name = ("StudioAI_%s_%02d"):format(teamName, botId)
+	model:SetAttribute("StudioAIBot", true)
+	model:SetAttribute("Team", teamName)
+	model:SetAttribute("StudioAIUserId", BOT_USER_ID_BASE - botId)
+	model.PrimaryPart = rootPart
+
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = false
+			descendant.CanQuery = true
+			descendant.CanTouch = true
+			if descendant == rootPart then
+				descendant.Transparency = 1
+				descendant.CanCollide = false
+			end
+		end
+	end
+
+	applyTeamBodyColor(model, teamColor)
+	humanoid.DisplayName = ("AI %s"):format(teamName)
+	humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer
+	humanoid.HealthDisplayType = Enum.HumanoidHealthDisplayType.DisplayWhenDamaged
+	humanoid.NameDisplayDistance = 100
+	humanoid.MaxHealth = readNumber(getConfig().Health, 100, 1, 1000)
+	humanoid.Health = humanoid.MaxHealth
+	humanoid.WalkSpeed = readNumber(getConfig().WalkSpeed, 18, 1, 80)
+	humanoid.UseJumpPower = true
+	humanoid.JumpPower = readNumber(getConfig().JumpPower, 45, 0, 140)
+
+	model:PivotTo(spawnCFrame + Vector3.new(0, 4, 0))
+end
+
 local function makePart(name: string, size: Vector3, color: Color3, parent: Instance): Part
 	local part = Instance.new("Part")
 	part.Name = name
@@ -169,12 +274,13 @@ local function makeJoint(name: string, parent: Instance, part0: BasePart, part1:
 	joint.Parent = parent
 end
 
-local function createBotModel(teamName: string, spawnCFrame: CFrame, botId: number): (Model, Humanoid, BasePart)
+local function createFallbackBotModel(teamName: string, spawnCFrame: CFrame, botId: number): (Model, Humanoid, BasePart)
 	local teamColor = TEAM_COLORS[teamName] or Color3.fromRGB(180, 180, 180)
 	local model = Instance.new("Model")
 	model.Name = ("StudioAI_%s_%02d"):format(teamName, botId)
 	model:SetAttribute("StudioAIBot", true)
 	model:SetAttribute("Team", teamName)
+	model:SetAttribute("StudioAIUserId", BOT_USER_ID_BASE - botId)
 
 	local root = makePart("HumanoidRootPart", Vector3.new(2, 2, 1), teamColor, model)
 	root.Transparency = 1
@@ -217,6 +323,23 @@ local function createBotModel(teamName: string, spawnCFrame: CFrame, botId: numb
 	model.PrimaryPart = root
 	model:PivotTo(spawnCFrame + Vector3.new(0, 4, 0))
 	return model, humanoid, root
+end
+
+local function createBotModel(teamName: string, spawnCFrame: CFrame, botId: number): (Model, Humanoid, BasePart)
+	local template = getBotTemplate()
+	if template then
+		local clone = template:Clone()
+		local humanoid, rootPart = validateR6TemplateClone(clone)
+		if humanoid and rootPart then
+			configureTemplateBotModel(clone, humanoid, rootPart, teamName, spawnCFrame, botId)
+			return clone, humanoid, rootPart
+		end
+
+		clone:Destroy()
+		warn(("[StudioAIBotService] Ignoring invalid %s template; expected an R6 Humanoid model"):format(TEMPLATE_NAME))
+	end
+
+	return createFallbackBotModel(teamName, spawnCFrame, botId)
 end
 
 local function raycastGround(position: Vector3, map: Instance?): Vector3
@@ -309,37 +432,199 @@ local function getEnemyTeam(teamName: string): string
 	return if teamName == RoundConfig.Teams.Red.name then RoundConfig.Teams.Blue.name else RoundConfig.Teams.Red.name
 end
 
-local function getTargetPosition(teamName: string): Vector3?
+local function getMinimumExpectedDamage(damageKind: string, config): number
+	if damageKind == "Anchor" then
+		return 1
+	end
+	return readNumber(config.MinExpectedPlayerDamage, BombConfig.PlayerOuterDamageMin, 0, BombConfig.PlayerDirectDamage)
+end
+
+local function getDamageForMissDistance(damageKind: string, missDistance: number): number
+	if damageKind == "Anchor" then
+		return BombDamage.GetAnchorDamageForDistance(missDistance, nil)
+	end
+	return BombDamage.GetPlayerDamageForDistance(missDistance, nil)
+end
+
+local function getExpectedSpreadMiss(config): number
+	local spread = readNumber(config.AimSpreadStuds, 3, 0, BombConfig.OuterRadius)
+	return math.min(spread * 0.6, BombConfig.OuterRadius)
+end
+
+local function solveArcAimDirection(origin: Vector3, target: Vector3): (Vector3?, number)
+	local launchSpeed = math.max(BombConfig.ProjectileLaunchSpeed, 0)
+	if launchSpeed <= 0 then
+		return nil, math.huge
+	end
+
+	local upwardVelocity = BombConfig.ProjectileUpwardVelocity
+	local gravity = math.max(workspace.Gravity * BombConfig.ProjectileGravityScale, 0.001)
+	local maxSeconds = math.max(math.min(BombConfig.ProjectileMaxFlightSeconds, BombConfig.FuseSeconds), MIN_AIM_SOLVER_SECONDS)
+	local fallback = target - origin
+	local fallbackDirection = if fallback.Magnitude > 0.001 then fallback.Unit else Vector3.zAxis
+	local bestDirection: Vector3? = nil
+	local bestMiss = math.huge
+
+	for step = 0, AIM_SOLVER_STEPS do
+		local alpha = step / AIM_SOLVER_STEPS
+		local seconds = MIN_AIM_SOLVER_SECONDS + (maxSeconds - MIN_AIM_SOLVER_SECONDS) * alpha
+		local neededVelocity =
+			(target - origin - Vector3.yAxis * upwardVelocity * seconds + Vector3.yAxis * (0.5 * gravity * seconds * seconds))
+			/ seconds
+		local direction = if neededVelocity.Magnitude > 0.001 then neededVelocity.Unit else fallbackDirection
+		direction = Vector3.new(direction.X, math.clamp(direction.Y, BombConfig.MinAimY, BombConfig.MaxAimY), direction.Z)
+		if direction.Magnitude <= 0.001 then
+			continue
+		end
+		direction = direction.Unit
+
+		local velocity = direction * launchSpeed + Vector3.yAxis * upwardVelocity
+		local predicted = origin + velocity * seconds + Vector3.new(0, -gravity, 0) * (0.5 * seconds * seconds)
+		local miss = (predicted - target).Magnitude
+		if miss < bestMiss then
+			bestMiss = miss
+			bestDirection = direction
+		end
+	end
+
+	return bestDirection, bestMiss
+end
+
+local function scoreTargetPosition(origin: Vector3, position: Vector3, damageKind: string, config): TargetDecision?
+	local _, arcMiss = solveArcAimDirection(origin, position)
+	local expectedMiss = arcMiss + getExpectedSpreadMiss(config)
+	local predictedDamage = getDamageForMissDistance(damageKind, expectedMiss)
+	if predictedDamage < getMinimumExpectedDamage(damageKind, config) then
+		return nil
+	end
+
+	local distance = (position - origin).Magnitude
+	return {
+		position = position,
+		damageKind = damageKind,
+		predictedDamage = predictedDamage,
+		score = predictedDamage * 1000 - arcMiss * 8 - distance * 0.1,
+	}
+end
+
+local function chooseBetterTarget(current: TargetDecision?, candidate: TargetDecision?): TargetDecision?
+	if not candidate then
+		return current
+	end
+	if not current or candidate.score > current.score then
+		return candidate
+	end
+	return current
+end
+
+local function getLiveEnemyTarget(bot: BotRecord, origin: Vector3, config): TargetDecision?
+	local enemyTeam = getEnemyTeam(bot.teamName)
+	local bestTarget: TargetDecision? = nil
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player:GetAttribute(ROUND_TEAM_ATTR) ~= enemyTeam then
+			continue
+		end
+
+		local character = player.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		if humanoid and humanoid.Health > 0 and rootPart and rootPart:IsA("BasePart") then
+			bestTarget = chooseBetterTarget(bestTarget, scoreTargetPosition(origin, rootPart.Position, "Player", config))
+		end
+	end
+
+	for _, enemyBot in ipairs(StudioAICombatants.GetAliveBots({
+		enemyOfTeam = bot.teamName,
+		excludeUserId = bot.owner.UserId,
+	})) do
+		local rootPart = enemyBot.rootPart
+		if rootPart and rootPart:IsA("BasePart") then
+			bestTarget = chooseBetterTarget(bestTarget, scoreTargetPosition(origin, rootPart.Position, "Player", config))
+		end
+	end
+
+	return bestTarget
+end
+
+local function getObjectiveTarget(teamName: string, origin: Vector3, config): TargetDecision?
 	local map = getActiveMap()
 	if not map then
 		return nil
 	end
 
 	local enemyTeam = getEnemyTeam(teamName)
+	local bestCoreTarget: TargetDecision? = nil
 	local cores = getTaggedInstances(RoundConfig.Tags.TeamCore, map, enemyTeam)
-	if #cores > 0 then
-		return getInstancePosition(cores[rng:NextInteger(1, #cores)])
+	for _, core in ipairs(cores) do
+		local position = getInstancePosition(core)
+		if position then
+			bestCoreTarget = chooseBetterTarget(bestCoreTarget, scoreTargetPosition(origin, position, "Anchor", config))
+		end
+	end
+	if bestCoreTarget then
+		return bestCoreTarget
 	end
 
 	local spawns = getTaggedParts(RoundConfig.Tags.TeamSpawn, map, enemyTeam)
 	if #spawns > 0 then
-		return spawns[rng:NextInteger(1, #spawns)].Position
+		local position = spawns[rng:NextInteger(1, #spawns)].Position
+		return {
+			position = position,
+			damageKind = "Player",
+			predictedDamage = BombConfig.PlayerOuterDamageMin,
+			score = 0,
+		}
 	end
 	return nil
 end
 
+local function getTarget(bot: BotRecord, origin: Vector3, config): TargetDecision?
+	return getLiveEnemyTarget(bot, origin, config) or getObjectiveTarget(bot.teamName, origin, config)
+end
+
+local function getRandomAimOffset(spread: number): Vector3
+	return Vector3.new(rng:NextNumber(-spread, spread), rng:NextNumber(0, spread * 0.35), rng:NextNumber(-spread, spread))
+end
+
+local function chooseAimTarget(target: TargetDecision, config): Vector3
+	local spread = readNumber(config.AimSpreadStuds, 3, 0, 80)
+	if spread <= 0 then
+		return target.position
+	end
+
+	local attempts = math.max(math.floor(readNumber(config.AimResampleAttempts, 6, 1, 24)), 1)
+	local minimumDamage = getMinimumExpectedDamage(target.damageKind, config)
+	local bestPosition = target.position
+	local bestDamage = getDamageForMissDistance(target.damageKind, 0)
+	for _ = 1, attempts do
+		local aimTarget = target.position + getRandomAimOffset(spread)
+		local damage = getDamageForMissDistance(target.damageKind, (aimTarget - target.position).Magnitude)
+		if damage >= minimumDamage then
+			return aimTarget
+		end
+		if damage > bestDamage then
+			bestDamage = damage
+			bestPosition = aimTarget
+		end
+	end
+
+	return bestPosition
+end
+
 local function throwBomb(bot: BotRecord)
-	local target = getTargetPosition(bot.teamName)
+	local config = getConfig()
+	local origin = bot.rootPart.Position + Vector3.new(0, readNumber(config.ThrowOriginHeight, 3.2, 0, 10), 0)
+	local target = getTarget(bot, origin, config)
 	if not target then
 		return
 	end
 
-	local config = getConfig()
-	local spread = readNumber(config.AimSpreadStuds, 10, 0, 80)
-	local aimTarget = target
-		+ Vector3.new(rng:NextNumber(-spread, spread), rng:NextNumber(0, spread * 0.35), rng:NextNumber(-spread, spread))
-	local origin = bot.rootPart.Position + Vector3.new(0, readNumber(config.ThrowOriginHeight, 3.2, 0, 10), 0)
-	local direction = aimTarget - origin
+	local aimTarget = chooseAimTarget(target, config)
+	local direction = solveArcAimDirection(origin, aimTarget)
+	if not direction then
+		direction = aimTarget - origin
+	end
 	if direction.Magnitude <= 0.05 then
 		return
 	end
@@ -374,6 +659,7 @@ local function removeBot(bot: BotRecord)
 	bot.alive = false
 	bot.movementToken += 1
 	bot.throwToken += 1
+	StudioAICombatants.Unregister(bot.owner.UserId)
 	if bot.deathConnection then
 		bot.deathConnection:Disconnect()
 		bot.deathConnection = nil
@@ -433,6 +719,18 @@ local function spawnBot(teamName: string, spawnPart: BasePart, roundId: number)
 		throwToken = 0,
 		deathConnection = nil,
 	}
+
+	StudioAICombatants.Register({
+		userId = owner.UserId,
+		name = owner.Name,
+		displayName = owner.DisplayName,
+		teamName = teamName,
+		roundId = roundId,
+		model = model,
+		humanoid = humanoid,
+		rootPart = rootPart,
+		owner = owner,
+	})
 
 	bot.deathConnection = humanoid.Died:Connect(function()
 		if not bot.alive then

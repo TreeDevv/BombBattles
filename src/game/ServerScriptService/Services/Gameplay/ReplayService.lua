@@ -8,9 +8,13 @@ local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local ReplayConstants = require(ReplicatedStorage.Shared.Replay.ReplayConstants)
 local ReplayUtil = require(ReplicatedStorage.Shared.Replay.ReplayUtil)
 local ReplayClipPolicy = require(ReplicatedStorage.Shared.Replay.ReplayClipPolicy)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local POTGService = require(ServerScriptService.Services.POTGService)
+local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatants)
 local ReplayBuffer = require(script.Parent.Replay.ReplayBuffer)
+local ReplayClipUtil = require(script.Parent.Replay.ReplayClipUtil)
 
 local ReplayService = {}
 ReplayService.Buffer = nil
@@ -167,15 +171,15 @@ local function getRecentKillReplayEventForPlayer(player: Player)
 end
 
 local function getKillClipCaps()
-	return ReplayClipPolicy.GetKillClipCaps()
+	return ReplayClipUtil.GetKillClipCaps()
 end
 
 local function getPOTGClipCaps()
-	return ReplayClipPolicy.GetPOTGClipCaps()
+	return ReplayClipUtil.GetPOTGClipCaps()
 end
 
 local function estimateClipPayloadSize(clip)
-	return ReplayClipPolicy.EstimateClipPayloadSize(clip)
+	return ReplayClipUtil.EstimateClipPayloadSize(clip)
 end
 
 local function recordClipOptimization(mode: string, before, after, stats, caps)
@@ -185,86 +189,42 @@ local function recordClipOptimization(mode: string, before, after, stats, caps)
 end
 
 local function optimizeClipPayloadForSend(payload, caps, mode: string)
+	local token = RuntimeProfiler.Begin("Server/Replay/OptimizePayload")
 	local optimized, debug = ReplayClipPolicy.OptimizeClipPayloadForSend(payload, caps, mode)
 	if not optimized then
+		RuntimeProfiler.End("Server/Replay/OptimizePayload", token)
 		return nil
 	end
 	recordClipOptimization(mode, debug.before, debug.after, debug.stats, debug.caps)
 	optimizedReplayPayloads[optimized] = true
+	if debug and debug.before and debug.after then
+		RuntimeProfiler.Count("Server/Replay/OptimizedPayloadWeightBefore", debug.before.total or 0)
+		RuntimeProfiler.Count("Server/Replay/OptimizedPayloadWeightAfter", debug.after.total or 0)
+	end
+	RuntimeProfiler.End("Server/Replay/OptimizePayload", token)
 	return optimized
 end
 
 local function isClipWithinCaps(clip, minFrames: number, caps): boolean
-	return ReplayClipPolicy.IsClipWithinCaps(clip, minFrames, caps)
+	return ReplayClipUtil.IsClipWithinCaps(clip, minFrames, caps)
 end
 
 local function ensureRemotesFolder(): Folder
-	local selected = nil
-	for _, child in ipairs(ReplicatedStorage:GetChildren()) do
-		if child.Name ~= ReplayConstants.REMOTES_FOLDER_NAME then
-			continue
-		end
-		if child:IsA("Folder") and not selected then
-			selected = child
-		else
-			child:Destroy()
-		end
-	end
-	if selected then
-		return selected
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = ReplayConstants.REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, ReplayConstants.REMOTES_FOLDER_NAME, {
+		dedupe = true,
+	})
 end
 
 local function ensureReplayAssetsFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(REPLAY_ASSETS_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = REPLAY_ASSETS_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REPLAY_ASSETS_FOLDER_NAME)
 end
 
 local function ensureRemote(folder: Folder, name: string): RemoteEvent
-	local selected = nil
-	for _, child in ipairs(folder:GetChildren()) do
-		if child.Name ~= name then
-			continue
-		end
-		if child:IsA("RemoteEvent") and not selected then
-			selected = child
-		else
-			child:Destroy()
-		end
-	end
-	if selected then
-		return selected
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = name
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteEvent(folder, name, true)
 end
 
 local function getReplayRemote(name: string): RemoteEvent?
-	local folder = ReplicatedStorage:FindFirstChild(ReplayConstants.REMOTES_FOLDER_NAME)
-	if not (folder and folder:IsA("Folder")) then
-		return nil
-	end
-
-	local remote = folder:FindFirstChild(name)
-	return if remote and remote:IsA("RemoteEvent") then remote else nil
+	return RemoteUtil.GetRemoteEvent(ReplicatedStorage, ReplayConstants.REMOTES_FOLDER_NAME, name)
 end
 
 local function getTeamName(player: Player): string?
@@ -528,7 +488,9 @@ local function pruneClientReplaySamples(userId: number, cutoffTime: number)
 end
 
 local function storeClientReplaySample(player: Player, state, receivedAt: number)
+	local token = RuntimeProfiler.Begin("Server/Replay/StoreClientSample")
 	if typeof(state) ~= "table" or not isFiniteNumber(state.sampleTime) then
+		RuntimeProfiler.End("Server/Replay/StoreClientSample", token)
 		return
 	end
 
@@ -545,6 +507,9 @@ local function storeClientReplaySample(player: Player, state, receivedAt: number
 		state = state,
 	})
 	pruneClientReplaySamples(userId, receivedAt - CLIENT_REPLAY_SAMPLE_HISTORY_SECONDS)
+	RuntimeProfiler.Count("Server/Replay/ClientSamplesStored")
+	RuntimeProfiler.Gauge("Server/Replay/ClientSampleRecords", countClientReplaySampleRecords())
+	RuntimeProfiler.End("Server/Replay/StoreClientSample", token)
 end
 
 local function getClientReplaySample(player: Player, timestamp: number)
@@ -614,16 +579,17 @@ local function handleKillReplayRequest(player: Player, payload)
 	local currentTime = workspace:GetServerTimeNow()
 	local lastRequestAt = lastKillReplayRequestAtByUserId[player.UserId]
 	if isFiniteNumber(lastRequestAt) and currentTime - lastRequestAt < KILL_REPLAY_REQUEST_COOLDOWN_SECONDS then
+		RuntimeProfiler.Count("Server/Replay/Death/RequestThrottled")
 		if DEBUG_KILL_REPLAY_SEND then
 			warn("[ReplayService] KillReplay request throttled", player.Name)
 		end
 		return
 	end
-	lastKillReplayRequestAtByUserId[player.UserId] = currentTime
 
 	local reason = if typeof(payload) == "table" and typeof(payload.reason) == "string" then payload.reason else "ClientRequest"
 	local killEvent = getRecentKillReplayEventForPlayer(player)
 	if not killEvent then
+		RuntimeProfiler.Count("Server/Replay/Death/RequestNoRecentKillEvent")
 		debugKillReplaySend("request-no-recent-kill-event", {
 			victimUserId = player.UserId,
 		})
@@ -633,6 +599,8 @@ local function handleKillReplayRequest(player: Player, payload)
 		return
 	end
 
+	lastKillReplayRequestAtByUserId[player.UserId] = currentTime
+	RuntimeProfiler.Count("Server/Replay/Death/RequestResend")
 	if DEBUG_KILL_REPLAY_SEND then
 		warn(
 			("[ReplayService] KillReplay request resend player=%s reason=%s timestamp=%s"):format(
@@ -660,14 +628,17 @@ local function bindKillReplayRequestRemote(remote: RemoteEvent)
 end
 
 local function getPlayerSnapshot(player: Player, timestamp: number)
+	local token = RuntimeProfiler.Begin("Server/Replay/GetPlayerSnapshot")
 	local character = player.Character
 	if not character then
+		RuntimeProfiler.End("Server/Replay/GetPlayerSnapshot", token)
 		return nil
 	end
 
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
 	if not (humanoid and rootPart and rootPart:IsA("BasePart")) then
+		RuntimeProfiler.End("Server/Replay/GetPlayerSnapshot", token)
 		return nil
 	end
 
@@ -682,8 +653,11 @@ local function getPlayerSnapshot(player: Player, timestamp: number)
 		else nil
 	local replayCFrame = clientRootCFrame or serverCFrame
 
-	return {
+	local snapshot = {
 		userId = player.UserId,
+		name = player.Name,
+		displayName = if player.DisplayName ~= "" then player.DisplayName else player.Name,
+		isNPC = false,
 		cframe = replayCFrame,
 		serverCFrame = serverCFrame,
 		rootSource = if clientRootCFrame then "client" else "server",
@@ -696,6 +670,8 @@ local function getPlayerSnapshot(player: Player, timestamp: number)
 		pose = poseState,
 		bombSkinId = animationState.bombSkinId,
 	}
+	RuntimeProfiler.End("Server/Replay/GetPlayerSnapshot", token)
+	return snapshot
 end
 
 local function getFirstBasePart(instance: Instance): BasePart?
@@ -779,6 +755,7 @@ local function appendBombSnapshots(target, snapshots)
 end
 
 local function getBombSnapshots()
+	local token = RuntimeProfiler.Begin("Server/Replay/GetBombSnapshots")
 	local bombs = {}
 	lastBombSource = "None"
 	lastBombServiceSnapshotAvailable = type(BombProjectileService.GetReplaySnapshots) == "function"
@@ -798,12 +775,16 @@ local function getBombSnapshots()
 
 	if #bombs >= ReplayConstants.MAX_REPLAY_BOMBS then
 		lastBombContainerFound = workspace:FindFirstChild(BombConfig.ProjectileFolderName) ~= nil
+		RuntimeProfiler.Gauge("Server/Replay/BombSnapshots", #bombs)
+		RuntimeProfiler.End("Server/Replay/GetBombSnapshots", token)
 		return bombs
 	end
 
 	local bombFolder = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
 	if not bombFolder then
 		lastBombContainerFound = false
+		RuntimeProfiler.Gauge("Server/Replay/BombSnapshots", #bombs)
+		RuntimeProfiler.End("Server/Replay/GetBombSnapshots", token)
 		return bombs
 	end
 
@@ -824,10 +805,13 @@ local function getBombSnapshots()
 		end
 	end
 
+	RuntimeProfiler.Gauge("Server/Replay/BombSnapshots", #bombs)
+	RuntimeProfiler.End("Server/Replay/GetBombSnapshots", token)
 	return bombs
 end
 
 local function buildFrame(timestamp: number)
+	local token = RuntimeProfiler.Begin("Server/Replay/CaptureFrame")
 	local players = {}
 	for _, player in ipairs(Players:GetPlayers()) do
 		if #players >= ReplayConstants.MAX_REPLAY_PLAYERS then
@@ -839,16 +823,26 @@ local function buildFrame(timestamp: number)
 			table.insert(players, snapshot)
 		end
 	end
+	if #players < ReplayConstants.MAX_REPLAY_PLAYERS then
+		for _, snapshot in ipairs(StudioAICombatants.GetReplaySnapshots(ReplayConstants.MAX_REPLAY_PLAYERS - #players, timestamp)) do
+			table.insert(players, snapshot)
+		end
+	end
 
 	local bombs = getBombSnapshots()
 	lastFramePlayerCount = #players
 	lastFrameBombCount = #bombs
+	RuntimeProfiler.Gauge("Server/Replay/FramePlayers", #players)
+	RuntimeProfiler.Gauge("Server/Replay/FrameBombs", #bombs)
+	RuntimeProfiler.Count("Server/Replay/FramesCaptured")
 
-	return {
+	local frame = {
 		timestamp = timestamp,
 		players = players,
 		bombs = bombs,
 	}
+	RuntimeProfiler.End("Server/Replay/CaptureFrame", token)
+	return frame
 end
 
 local function ensureBuffer()
@@ -906,6 +900,16 @@ local function getUserIdPlayer(userId: any): Player?
 	return nil
 end
 
+local function getKillReplayRecipients(payload): { Player }
+	local recipients = {}
+	local victimPlayer = getUserIdPlayer(payload.victimUserId)
+	if victimPlayer then
+		table.insert(recipients, victimPlayer)
+	end
+
+	return recipients
+end
+
 local function isClipReasonable(clip): boolean
 	return isClipWithinCaps(clip, MIN_KILL_REPLAY_FRAMES, getKillClipCaps())
 end
@@ -919,6 +923,7 @@ local function isPOTGClipReasonable(clip): boolean
 end
 
 debugKillReplaySend = function(status: string, payload)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/DebugKillReplaySummary")
 	local estimate = estimateClipPayloadSize(payload)
 	local summary = {
 		status = status,
@@ -937,6 +942,10 @@ debugKillReplaySend = function(status: string, payload)
 		optimization = lastClipOptimizationDebug,
 	}
 	lastKillReplayDebug = summary
+	RuntimeProfiler.Count("Server/Replay/Death/DebugSummaryFrames", estimate.frames)
+	RuntimeProfiler.Count("Server/Replay/Death/DebugSummaryEvents", estimate.events)
+	RuntimeProfiler.Count("Server/Replay/Death/DebugSummaryDestructionEvents", estimate.destructionEvents)
+	RuntimeProfiler.End("Server/Replay/Death/DebugKillReplaySummary", token)
 
 	if not DEBUG_KILL_REPLAY_SEND then
 		return
@@ -997,10 +1006,19 @@ local function debugPOTGReplaySend(status: string, payload, extra)
 end
 
 local function copyDebrisPayloadBlock(block)
-	if typeof(block) ~= "table" or not isFiniteVector3(block.center) or not isFiniteVector3(block.size) then
+	if typeof(block) ~= "table" or not isFiniteVector3(block.size) then
 		return nil
 	end
 	if block.size.X <= 0 or block.size.Y <= 0 or block.size.Z <= 0 then
+		return nil
+	end
+	if isFiniteCFrame(block.cframe) then
+		return {
+			cframe = block.cframe,
+			size = block.size,
+		}
+	end
+	if not isFiniteVector3(block.center) then
 		return nil
 	end
 
@@ -1079,7 +1097,9 @@ local function copyDebrisPayload(payload, remainingBlocks: number)
 end
 
 local function copyDebrisPayloads(payloads)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/CopyDebrisPayloads")
 	if typeof(payloads) ~= "table" then
+		RuntimeProfiler.End("Server/Replay/Death/CopyDebrisPayloads", token)
 		return nil
 	end
 
@@ -1097,6 +1117,8 @@ local function copyDebrisPayloads(payloads)
 		end
 	end
 
+	RuntimeProfiler.Count("Server/Replay/Death/DebrisPayloadsCopied", #results)
+	RuntimeProfiler.End("Server/Replay/Death/CopyDebrisPayloads", token)
 	return if #results > 0 then results else nil
 end
 
@@ -1128,8 +1150,10 @@ local function copyDestructionEvent(event, includeDebrisPayloads: boolean?)
 end
 
 local function getDestructionEventsForClip(endTime: number, debrisStartTime: number?)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/GetDestructionEventsForClip")
 	local events = {}
 	if not isFiniteNumber(endTime) then
+		RuntimeProfiler.End("Server/Replay/Death/GetDestructionEventsForClip", token)
 		return events
 	end
 
@@ -1147,6 +1171,9 @@ local function getDestructionEventsForClip(endTime: number, debrisStartTime: num
 			table.insert(events, copy)
 		end
 	end
+	RuntimeProfiler.Count("Server/Replay/Death/DestructionEventsScanned", #roundDestructionEvents)
+	RuntimeProfiler.Count("Server/Replay/Death/DestructionEventsCopied", #events)
+	RuntimeProfiler.End("Server/Replay/Death/GetDestructionEventsForClip", token)
 	return events
 end
 
@@ -1201,7 +1228,9 @@ local function getDebugRecentKillReplayWindow(currentTime: number, windowSeconds
 end
 
 local function addMapFieldsToPayload(payload, endTime: number)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/AddMapFields")
 	if typeof(payload) ~= "table" then
+		RuntimeProfiler.End("Server/Replay/Death/AddMapFields", token)
 		return payload
 	end
 
@@ -1211,26 +1240,41 @@ local function addMapFieldsToPayload(payload, endTime: number)
 	end
 	local debrisStartTime = if isFiniteNumber(payload.startTime) then payload.startTime else nil
 	payload.destructionEvents = getDestructionEventsForClip(endTime, debrisStartTime)
+	RuntimeProfiler.End("Server/Replay/Death/AddMapFields", token)
 	return payload
 end
 
 local function buildKillReplayPayload(killEvent)
+	local token = RuntimeProfiler.Begin("Server/Replay/BuildKillPayload")
 	if typeof(killEvent) ~= "table" or not isFiniteNumber(killEvent.timestamp) then
+		RuntimeProfiler.End("Server/Replay/BuildKillPayload", token)
 		return nil
 	end
 	if not isFiniteNumber(killEvent.victimUserId) then
+		RuntimeProfiler.End("Server/Replay/BuildKillPayload", token)
 		return nil
 	end
 
 	local deathTime = killEvent.timestamp
 	local startTime = deathTime - ReplayConstants.KILL_REPLAY_PRE_SECONDS
 	local endTime = deathTime + ReplayConstants.KILL_REPLAY_POST_SECONDS
+	local clipToken = RuntimeProfiler.Begin("Server/Replay/Death/BuildKill/GetClip")
 	local clip = ensureBuffer():GetClip(startTime, endTime)
+	RuntimeProfiler.End("Server/Replay/Death/BuildKill/GetClip", clipToken)
 
-	return optimizeClipPayloadForSend(addMapFieldsToPayload({
+	local mapToken = RuntimeProfiler.Begin("Server/Replay/Death/BuildKill/AddMapFields")
+	local payloadWithMap = addMapFieldsToPayload({
 		type = "KillReplay",
 		killerUserId = killEvent.killerUserId,
+		killerName = killEvent.killerName,
+		killerDisplayName = killEvent.killerDisplayName,
+		killerTeam = killEvent.killerTeam,
+		killerIsNPC = killEvent.killerIsNPC,
 		victimUserId = killEvent.victimUserId,
+		victimName = killEvent.victimName,
+		victimDisplayName = killEvent.victimDisplayName,
+		victimTeam = killEvent.victimTeam,
+		victimIsNPC = killEvent.victimIsNPC,
 		sourceType = killEvent.sourceType,
 		sourceId = killEvent.sourceId,
 		primaryEventTime = deathTime,
@@ -1238,10 +1282,18 @@ local function buildKillReplayPayload(killEvent)
 		endTime = clip.endTime,
 		frames = clip.frames,
 		events = clip.events,
-	}, clip.endTime), getKillClipCaps(), "KillReplay")
+	}, clip.endTime)
+	RuntimeProfiler.End("Server/Replay/Death/BuildKill/AddMapFields", mapToken)
+
+	local optimizeToken = RuntimeProfiler.Begin("Server/Replay/Death/BuildKill/Optimize")
+	local payload = optimizeClipPayloadForSend(payloadWithMap, getKillClipCaps(), "KillReplay")
+	RuntimeProfiler.End("Server/Replay/Death/BuildKill/Optimize", optimizeToken)
+	RuntimeProfiler.End("Server/Replay/BuildKillPayload", token)
+	return payload
 end
 
 sendKillReplayForEvent = function(killEvent)
+	local totalToken = RuntimeProfiler.Begin("Server/Replay/Death/SendKillReplay")
 	if DEBUG_KILL_REPLAY_SEND then
 		warn(
 			("[ReplayService] KillReplay send requested victim=%s killer=%s timestamp=%s pre=%.2f post=%.2f delay=%.3f"):format(
@@ -1255,47 +1307,72 @@ sendKillReplayForEvent = function(killEvent)
 		)
 	end
 
-	local payload = buildKillReplayPayload(killEvent)
-	if not payload then
-		debugKillReplaySend("skipped-invalid-payload", killEvent)
+	local recipientsToken = RuntimeProfiler.Begin("Server/Replay/Death/Send/GetRecipients")
+	local recipients = getKillReplayRecipients(killEvent)
+	RuntimeProfiler.End("Server/Replay/Death/Send/GetRecipients", recipientsToken)
+	if #recipients <= 0 then
+		RuntimeProfiler.Count("Server/Replay/Death/SkippedBuildMissingRecipient")
+		debugKillReplaySend("skipped-missing-recipient", killEvent)
+		RuntimeProfiler.End("Server/Replay/Death/SendKillReplay", totalToken)
 		return false
 	end
 
-	local victimPlayer = getUserIdPlayer(payload.victimUserId)
-	if not victimPlayer then
-		debugKillReplaySend("skipped-missing-victim", payload)
+	local buildToken = RuntimeProfiler.Begin("Server/Replay/Death/Send/BuildPayload")
+	local payload = buildKillReplayPayload(killEvent)
+	RuntimeProfiler.End("Server/Replay/Death/Send/BuildPayload", buildToken)
+	if not payload then
+		debugKillReplaySend("skipped-invalid-payload", killEvent)
+		RuntimeProfiler.End("Server/Replay/Death/SendKillReplay", totalToken)
 		return false
 	end
+
+	local guardsToken = RuntimeProfiler.Begin("Server/Replay/Death/Send/Guards")
 	if estimateClipPayloadSize(payload).frames <= 0 then
 		debugKillReplaySend("skipped-empty-clip", payload)
+		RuntimeProfiler.End("Server/Replay/Death/Send/Guards", guardsToken)
+		RuntimeProfiler.End("Server/Replay/Death/SendKillReplay", totalToken)
 		return false
 	end
 	if not isKillReplayClipSendable(payload) then
 		debugKillReplaySend("skipped-clip-guard", payload)
+		RuntimeProfiler.End("Server/Replay/Death/Send/Guards", guardsToken)
+		RuntimeProfiler.End("Server/Replay/Death/SendKillReplay", totalToken)
 		return false
 	end
 	if not getReplayRemote(ReplayConstants.REMOTES.KillReplay) then
 		debugKillReplaySend("skipped-missing-remote", payload)
+		RuntimeProfiler.End("Server/Replay/Death/Send/Guards", guardsToken)
+		RuntimeProfiler.End("Server/Replay/Death/SendKillReplay", totalToken)
 		return false
 	end
+	RuntimeProfiler.End("Server/Replay/Death/Send/Guards", guardsToken)
 
 	if DEBUG_KILL_REPLAY_SEND then
 		warn(
-			("[ReplayService] KillReplay FireClient attempt victim=%s frames=%d events=%d"):format(
-				victimPlayer.Name,
+			("[ReplayService] KillReplay FireClient attempt recipients=%d frames=%d events=%d"):format(
+				#recipients,
 				estimateClipPayloadSize(payload).frames,
 				estimateClipPayloadSize(payload).events
 			)
 		)
 	end
-	local sent = ReplayService.PlayKillReplay(victimPlayer, payload)
-	debugKillReplaySend(if sent then "sent" else "skipped-remote", payload)
-	return sent
+	local sentAny = false
+	local dispatchToken = RuntimeProfiler.Begin("Server/Replay/Death/Send/Dispatch")
+	for _, player in ipairs(recipients) do
+		sentAny = ReplayService.PlayKillReplay(player, payload) or sentAny
+	end
+	RuntimeProfiler.End("Server/Replay/Death/Send/Dispatch", dispatchToken)
+	RuntimeProfiler.Count("Server/Replay/Death/SendRecipients", #recipients)
+	debugKillReplaySend(if sentAny then "sent" else "skipped-remote", payload)
+	RuntimeProfiler.End("Server/Replay/Death/SendKillReplay", totalToken)
+	return sentAny
 end
 
 local function scheduleKillReplay(killEvent)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/ScheduleKillReplay")
 	if typeof(killEvent) ~= "table" then
 		debugKillReplaySend("skipped-invalid-event", killEvent)
+		RuntimeProfiler.End("Server/Replay/Death/ScheduleKillReplay", token)
 		return
 	end
 
@@ -1312,6 +1389,7 @@ local function scheduleKillReplay(killEvent)
 	local victimUserId = killEvent.victimUserId
 	local killTimestamp = killEvent.timestamp
 	task.delay(KILL_REPLAY_SEND_DELAY_SECONDS, function()
+		local delayedToken = RuntimeProfiler.Begin("Server/Replay/Death/DelayedSendCallback")
 		local eventToSend = getRecentKillReplayEventForUserId(victimUserId) or killEvent
 		if
 			typeof(eventToSend) == "table"
@@ -1320,11 +1398,14 @@ local function scheduleKillReplay(killEvent)
 			and math.abs(eventToSend.timestamp - killTimestamp) > 0.001
 		then
 			debugKillReplaySend("skipped-stale-stored-event", killEvent)
+			RuntimeProfiler.End("Server/Replay/Death/DelayedSendCallback", delayedToken)
 			return
 		end
 
 		sendKillReplayForEvent(eventToSend)
+		RuntimeProfiler.End("Server/Replay/Death/DelayedSendCallback", delayedToken)
 	end)
+	RuntimeProfiler.End("Server/Replay/Death/ScheduleKillReplay", token)
 end
 
 local function waitForPOTGPostWindow(candidate, maxWaitSeconds: number?)
@@ -1346,20 +1427,28 @@ local function waitForPOTGPostWindow(candidate, maxWaitSeconds: number?)
 end
 
 local function buildPOTGReplayPayload(candidate)
+	local token = RuntimeProfiler.Begin("Server/Replay/BuildPOTGPayload")
 	if typeof(candidate) ~= "table" then
+		RuntimeProfiler.End("Server/Replay/BuildPOTGPayload", token)
 		return nil
 	end
 	if not (isFiniteNumber(candidate.startTime) and isFiniteNumber(candidate.endTime)) then
+		RuntimeProfiler.End("Server/Replay/BuildPOTGPayload", token)
 		return nil
 	end
 	if not isFiniteNumber(candidate.playerUserId) then
+		RuntimeProfiler.End("Server/Replay/BuildPOTGPayload", token)
 		return nil
 	end
 
 	local clip = ensureBuffer():GetClip(candidate.startTime, candidate.endTime)
-	return optimizeClipPayloadForSend(addMapFieldsToPayload({
+	local payload = optimizeClipPayloadForSend(addMapFieldsToPayload({
 		type = "POTGReplay",
 		playerUserId = math.floor(candidate.playerUserId),
+		playerName = candidate.playerName,
+		playerDisplayName = candidate.playerDisplayName,
+		playerTeam = candidate.playerTeam,
+		playerIsNPC = candidate.playerIsNPC,
 		sourceType = candidate.sourceType,
 		sourceId = candidate.sourceId,
 		reason = candidate.reason,
@@ -1370,6 +1459,8 @@ local function buildPOTGReplayPayload(candidate)
 		frames = clip.frames,
 		events = clip.events,
 	}, clip.endTime), getPOTGClipCaps(), "POTGReplay")
+	RuntimeProfiler.End("Server/Replay/BuildPOTGPayload", token)
+	return payload
 end
 
 local function getPOTGRecipients(recipients)
@@ -1455,16 +1546,21 @@ function ReplayService.Start(_self)
 	running = true
 	accumulator = 0
 	heartbeatConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		local heartbeatToken = RuntimeProfiler.Begin("Server/Replay/Heartbeat")
 		if not running then
+			RuntimeProfiler.End("Server/Replay/Heartbeat", heartbeatToken)
 			return
 		end
 		if not isFiniteNumber(deltaTime) or deltaTime <= 0 then
+			RuntimeProfiler.End("Server/Replay/Heartbeat", heartbeatToken)
 			return
 		end
 
 		accumulator = math.min(accumulator + deltaTime, ReplayConstants.SAMPLE_INTERVAL * 4)
+		local framesThisHeartbeat = 0
 		while accumulator >= ReplayConstants.SAMPLE_INTERVAL do
 			accumulator -= ReplayConstants.SAMPLE_INTERVAL
+			framesThisHeartbeat += 1
 
 			local timestamp = workspace:GetServerTimeNow()
 			local frame = buildFrame(timestamp)
@@ -1472,6 +1568,8 @@ function ReplayService.Start(_self)
 			lastSampleTime = timestamp
 			sampleCount += 1
 		end
+		RuntimeProfiler.Gauge("Server/Replay/FramesLastHeartbeat", framesThisHeartbeat)
+		RuntimeProfiler.End("Server/Replay/Heartbeat", heartbeatToken)
 	end)
 
 	return true
@@ -1512,9 +1610,15 @@ function ReplayService.RecordFrame(first, second)
 end
 
 function ReplayService.RecordEvent(first, second, third)
+	local totalToken = RuntimeProfiler.Begin("Server/Replay/RecordEvent")
 	local eventType, payload = unwrapOptionalSelf(first, second, third)
 	if typeof(eventType) ~= "string" or eventType == "" then
+		RuntimeProfiler.End("Server/Replay/RecordEvent", totalToken)
 		return false
+	end
+	local deathToken = nil
+	if eventType == "PlayerKilled" then
+		deathToken = RuntimeProfiler.Begin("Server/Replay/Death/RecordPlayerKilled")
 	end
 
 	local event = {
@@ -1531,7 +1635,9 @@ function ReplayService.RecordEvent(first, second, third)
 	end
 
 	local buffer = ensureBuffer()
+	local addEventToken = RuntimeProfiler.Begin("Server/Replay/RecordEvent/AddEvent")
 	local recorded = buffer:AddEvent(event)
+	RuntimeProfiler.End("Server/Replay/RecordEvent/AddEvent", addEventToken)
 	if eventType == "PlayerKilled" and DEBUG_KILL_REPLAY_SEND then
 		local counts = buffer:GetDebugCounts()
 		warn(
@@ -1547,6 +1653,7 @@ function ReplayService.RecordEvent(first, second, third)
 		)
 	end
 	if recorded then
+		local potgToken = RuntimeProfiler.Begin("Server/Replay/RecordEvent/POTG")
 		local potgEvent = copyReplayEvent(event)
 		if potgEvent then
 			local ok, err = pcall(function()
@@ -1556,9 +1663,12 @@ function ReplayService.RecordEvent(first, second, third)
 				warn("[ReplayService] POTG event failed:", eventType, err)
 			end
 		end
+		RuntimeProfiler.End("Server/Replay/RecordEvent/POTG", potgToken)
 
 		if eventType == "PlayerKilled" then
+			local storeToken = RuntimeProfiler.Begin("Server/Replay/Death/StoreRecentKill")
 			local storedKillEvent = storeRecentKillReplayEvent(event)
+			RuntimeProfiler.End("Server/Replay/Death/StoreRecentKill", storeToken)
 			if not storedKillEvent then
 				debugKillReplaySend("skipped-store-recent-kill", event)
 			end
@@ -1566,6 +1676,14 @@ function ReplayService.RecordEvent(first, second, third)
 		end
 	end
 
+	if deathToken then
+		RuntimeProfiler.End("Server/Replay/Death/RecordPlayerKilled", deathToken)
+	end
+	RuntimeProfiler.Count("Server/Replay/EventsRecorded")
+	if eventType == "PlayerKilled" then
+		RuntimeProfiler.Count("Server/Replay/Death/PlayerKilledEvents")
+	end
+	RuntimeProfiler.End("Server/Replay/RecordEvent", totalToken)
 	return recorded
 end
 
@@ -1805,42 +1923,59 @@ function ReplayService.DebugPlayBestPOTG(first, second)
 end
 
 function ReplayService.PlayKillReplay(first, second, third)
+	local totalToken = RuntimeProfiler.Begin("Server/Replay/Death/PlayKillReplay")
 	local player, clip = unwrapOptionalSelf(first, second, third)
 	if not (typeof(player) == "Instance" and player:IsA("Player") and player.Parent == Players) then
 		debugKillReplaySend("skipped-invalid-player", clip)
+		RuntimeProfiler.End("Server/Replay/Death/PlayKillReplay", totalToken)
 		return false
 	end
 	if typeof(clip) ~= "table" then
 		debugKillReplaySend("skipped-invalid-clip", clip)
+		RuntimeProfiler.End("Server/Replay/Death/PlayKillReplay", totalToken)
 		return false
 	end
 
 	if not optimizedReplayPayloads[clip] then
+		local optimizeToken = RuntimeProfiler.Begin("Server/Replay/Death/Play/OptimizeDirect")
 		clip = optimizeClipPayloadForSend(clip, getKillClipCaps(), "KillReplayDirect")
+		RuntimeProfiler.End("Server/Replay/Death/Play/OptimizeDirect", optimizeToken)
 	end
+	local guardToken = RuntimeProfiler.Begin("Server/Replay/Death/Play/Guards")
 	if estimateClipPayloadSize(clip).frames <= 0 then
 		debugKillReplaySend("skipped-empty-clip", clip)
+		RuntimeProfiler.End("Server/Replay/Death/Play/Guards", guardToken)
+		RuntimeProfiler.End("Server/Replay/Death/PlayKillReplay", totalToken)
 		return false
 	end
 	if not isKillReplayClipSendable(clip) then
 		debugKillReplaySend("skipped-clip-guard", clip)
+		RuntimeProfiler.End("Server/Replay/Death/Play/Guards", guardToken)
+		RuntimeProfiler.End("Server/Replay/Death/PlayKillReplay", totalToken)
 		return false
 	end
 
 	local remote = getReplayRemote(ReplayConstants.REMOTES.KillReplay)
 	if not remote then
 		debugKillReplaySend("skipped-missing-remote", clip)
+		RuntimeProfiler.End("Server/Replay/Death/Play/Guards", guardToken)
+		RuntimeProfiler.End("Server/Replay/Death/PlayKillReplay", totalToken)
 		return false
 	end
+	RuntimeProfiler.End("Server/Replay/Death/Play/Guards", guardToken)
 
 	debugKillReplaySend("fireclient", clip)
+	local fireToken = RuntimeProfiler.Begin("Server/Replay/Death/Play/FireClient")
 	local ok, err = pcall(function()
 		remote:FireClient(player, clip)
 	end)
+	RuntimeProfiler.End("Server/Replay/Death/Play/FireClient", fireToken)
 	if DEBUG_KILL_REPLAY_SEND and not ok then
 		warn("[ReplayService] ReplayKillReplay FireClient failed:", err)
 	end
 
+	RuntimeProfiler.Count("Server/Replay/Death/PlayKillReplayCalls")
+	RuntimeProfiler.End("Server/Replay/Death/PlayKillReplay", totalToken)
 	return ok
 end
 

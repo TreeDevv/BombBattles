@@ -102,7 +102,7 @@ Expected shape for replay map reconstruction:
 		{
 			sourceCFrame: CFrame,
 			explosionPosition: Vector3,
-			blocks: { { center: Vector3, size: Vector3 } },
+			blocks: { { center: Vector3?, cframe: CFrame?, size: Vector3 } },
 			materialName: string?,
 			color: Color3?,
 			transparency: number?,

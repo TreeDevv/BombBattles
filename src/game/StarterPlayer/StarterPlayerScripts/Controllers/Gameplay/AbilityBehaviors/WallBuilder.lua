@@ -7,7 +7,10 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local RoundController = require(script.Parent.Parent:WaitForChild("RoundController"))
 
 type AbilityControllerLike = AbilityTypes.AbilityControllerLike
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -133,6 +136,15 @@ local function getActiveMap(): Instance?
 	return if map and map:IsA("Model") then map else nil
 end
 
+local function getTargetRoot(): Instance?
+	return PracticeRangeTargeting.GetClientTargetRoot(
+		Players.LocalPlayer,
+		RoundController:Get("state"),
+		RoundStates.Active,
+		getActiveMap()
+	)
+end
+
 local function hasUnsafeTaggedAncestor(instance: Instance): boolean
 	local current: Instance? = instance
 	while current and current ~= workspace do
@@ -187,8 +199,7 @@ local function findFloor(rootPart: BasePart, definition: AbilityDefinition): Flo
 		return nil
 	end
 
-	local activeMap = getActiveMap()
-	if activeMap and not hit.Instance:IsDescendantOf(activeMap) then
+	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, getTargetRoot()) then
 		return nil
 	end
 

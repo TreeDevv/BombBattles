@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local CharacterPoseConfig = require(ReplicatedStorage.Shared.Config.CharacterPoseConfig)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesCharacterPoseController"
@@ -350,7 +351,9 @@ function CharacterPoseController:_bindCharacter(character: Model)
 	self:_restoreC0()
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function(dt)
+		local token = RuntimeProfiler.Begin("Client/CharacterPoseController/Render")
 		self:_step(dt)
+		RuntimeProfiler.End("Client/CharacterPoseController/Render", token)
 	end)
 end
 

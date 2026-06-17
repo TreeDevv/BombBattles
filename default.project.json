@@ -86,8 +86,14 @@
         "BombSkinService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombSkinService.lua"
         },
+        "CrateRollService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/CrateRollService.lua"
+        },
         "StudioAIBotService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/StudioAIBotService.lua"
+        },
+        "StudioAICombatants": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/StudioAICombatants.lua"
         },
         "CharacterAbilityService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/CharacterAbilityService.lua"
@@ -116,6 +122,9 @@
         "DiagnosticsService": {
           "$path": "src/game/ServerScriptService/Services/Core/DiagnosticsService.lua"
         },
+        "RuntimeProfilerService": {
+          "$path": "src/game/ServerScriptService/Services/Core/RuntimeProfilerService.lua"
+        },
         "PurchaseReceiptService": {
           "$path": "src/game/ServerScriptService/Services/Economy/PurchaseReceiptService.lua"
         },
@@ -124,6 +133,9 @@
         },
         "POTGService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/POTGService.lua"
+        },
+        "PracticeRangeService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/PracticeRangeService.lua"
         },
         "Replay": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/Replay"
@@ -157,6 +169,9 @@
           },
           "BombController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombController.lua"
+          },
+          "BombTrajectoryClient": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombTrajectoryClient.lua"
           },
           "EmoteController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/EmoteController.lua"
@@ -200,6 +215,15 @@
           "BottomButtonsController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/BottomButtonsController.lua"
           },
+          "ScrollGradientController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ScrollGradientController.lua"
+          },
+          "CrateRollController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/CrateRollController.lua"
+          },
+          "CrateHeaderController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/CrateHeaderController.lua"
+          },
           "SpectateController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/SpectateController.lua"
           },
@@ -214,6 +238,9 @@
           },
           "NotificationController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/NotificationController.lua"
+          },
+          "ExpressivePromptsController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ExpressivePromptsController.lua"
           },
           "DestructionMeterController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/DestructionMeterController.lua"
@@ -242,6 +269,9 @@
           "MovementController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/MovementController.lua"
           },
+          "MovementMath": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/MovementMath.lua"
+          },
           "MovementEffectsController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/MovementEffectsController.lua"
           },
@@ -259,6 +289,9 @@
           },
           "TestController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/TestController.lua"
+          },
+          "RuntimeProfilerController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/RuntimeProfilerController.lua"
           },
           "UIController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/UIController.lua"

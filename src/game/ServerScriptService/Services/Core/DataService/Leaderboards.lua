@@ -1,13 +1,13 @@
 local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 
 local Globals = require(ReplicatedStorage.Shared.Config.Lists.Globals)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 
 local REFRESH_TIME = 60 * 60
 local MAX_ENTRIES = 100
+local MAX_ADMIN_STAT_INCREMENT = 1000000
 local REMOTES_FOLDER_NAME = "Remotes"
 local GET_LEADERBOARD_REMOTE_NAME = "GetGlobalLeaderboard"
 local SCOPE = Globals.SCOPE
@@ -186,17 +186,21 @@ local function getStoreName(boardId: string, periodId: string, periodKey: string
 end
 
 local function getOrderedStore(boardId: string, periodId: string, periodKey: string)
-	if RunService:IsStudio() then
-		return nil
-	end
-
 	local storeName = getStoreName(boardId, periodId, periodKey)
 	local store = orderedStores[storeName]
 	if store then
 		return store
 	end
 
-	store = DataStoreService:GetOrderedDataStore(storeName)
+	local success, result = pcall(function()
+		return DataStoreService:GetOrderedDataStore(storeName)
+	end)
+	if not success or not result then
+		warn("[Leaderboards] Failed to get ordered store:", storeName, result)
+		return nil
+	end
+
+	store = result
 	orderedStores[storeName] = store
 	return store
 end
@@ -262,7 +266,7 @@ local function publishPlayerStatsForPeriod(dataService, player: Player, periodId
 end
 
 local function publishPlayerStats(dataService, player: Player)
-	if RunService:IsStudio() or not (player and player.Parent == Players) then
+	if not (player and player.Parent == Players) then
 		return
 	end
 
@@ -273,43 +277,9 @@ local function publishPlayerStats(dataService, player: Player)
 end
 
 local function publishCurrentPlayerStats(dataService)
-	if RunService:IsStudio() then
-		return
-	end
-
 	for _, player in ipairs(Players:GetPlayers()) do
 		publishPlayerStats(dataService, player)
 	end
-end
-
-local function getCurrentPlayerEntries(dataService, boardId: string, periodId: string, unixTime: number)
-	local entries = {}
-	for _, player in ipairs(Players:GetPlayers()) do
-		local value = getProfileValueForBoard(dataService, player, boardId, periodId, unixTime)
-		if value > 0 then
-			table.insert(entries, {
-				userId = player.UserId,
-				username = player.Name,
-				value = value,
-			})
-		end
-	end
-
-	table.sort(entries, function(left, right)
-		if left.value ~= right.value then
-			return left.value > right.value
-		end
-		return left.userId < right.userId
-	end)
-
-	while #entries > MAX_ENTRIES do
-		table.remove(entries)
-	end
-
-	for rank, entry in ipairs(entries) do
-		entry.rank = rank
-	end
-	return entries
 end
 
 local function getOrderedStoreEntries(boardId: string, periodId: string, periodKey: string)
@@ -355,6 +325,96 @@ local function setCache(boardId: string, periodId: string, payload)
 	cachedLeaderboards[boardId][periodId] = payload
 end
 
+local function applyLeaderboardIncrements(dataService, player: Player, increments, unixTime: number)
+	local dailyPeriodKey = getDailyPeriodKey(unixTime)
+	local monthlyPeriodKey = getMonthlyPeriodKey(unixTime)
+
+	for _, boardId in ipairs(BOARD_ORDER) do
+		local amount = roundNonNegative(increments[boardId])
+		if amount > 0 then
+			local key = BOARD_CONFIGS[boardId].lifetimeKey
+			dataService:Set(player, key, function(currentValue)
+				return roundNonNegative(currentValue) + amount
+			end)
+		end
+	end
+
+	dataService:Set(player, DAILY_STATS_KEY, function(currentValue)
+		local bucket = normalizePeriodStats(currentValue, dailyPeriodKey)
+		for _, boardId in ipairs(BOARD_ORDER) do
+			bucket[boardId] += roundNonNegative(increments[boardId])
+		end
+		return bucket
+	end)
+
+	dataService:Set(player, MONTHLY_STATS_KEY, function(currentValue)
+		local bucket = normalizePeriodStats(currentValue, monthlyPeriodKey)
+		for _, boardId in ipairs(BOARD_ORDER) do
+			bucket[boardId] += roundNonNegative(increments[boardId])
+		end
+		return bucket
+	end)
+end
+
+local function parseAdminStatIncrement(statName: string, value: any): (number?, string?)
+	if value == nil then
+		return 0, nil
+	end
+	if typeof(value) ~= "number" then
+		return nil, statName .. " increment must be a number"
+	end
+	if value ~= value or value == math.huge or value == -math.huge then
+		return nil, statName .. " increment must be finite"
+	end
+	if value < 0 then
+		return nil, statName .. " increment cannot be negative"
+	end
+	if value ~= math.floor(value) then
+		return nil, statName .. " increment must be a whole number"
+	end
+	if value > MAX_ADMIN_STAT_INCREMENT then
+		return nil, statName .. " increment is too large"
+	end
+
+	return value, nil
+end
+
+local function normalizeAdminStatIncrements(rawIncrements: any): (any?, string?)
+	if typeof(rawIncrements) ~= "table" then
+		return nil, "Leaderboard stat increments are required"
+	end
+
+	local increments = {}
+	local total = 0
+	for _, boardId in ipairs(BOARD_ORDER) do
+		local amount, message = parseAdminStatIncrement(boardId, rawIncrements[boardId])
+		if not amount then
+			return nil, message
+		end
+
+		increments[boardId] = amount
+		total += amount
+	end
+
+	if total <= 0 then
+		return nil, "Leaderboard stat amount must be greater than 0"
+	end
+
+	return increments, nil
+end
+
+local function formatAdminIncrementMessage(player: Player, increments): string
+	local parts = {}
+	for _, boardId in ipairs(BOARD_ORDER) do
+		local amount = roundNonNegative(increments[boardId])
+		if amount > 0 then
+			table.insert(parts, ("+%d %s"):format(amount, boardId))
+		end
+	end
+
+	return ("Added %s to %s's leaderboard data"):format(table.concat(parts, ", "), player.Name)
+end
+
 local Leaderboards = {}
 
 function Leaderboards.RecordRoundResults(dataService, results)
@@ -363,8 +423,6 @@ function Leaderboards.RecordRoundResults(dataService, results)
 	end
 
 	local unixTime = getUnixTime()
-	local dailyPeriodKey = getDailyPeriodKey(unixTime)
-	local monthlyPeriodKey = getMonthlyPeriodKey(unixTime)
 
 	for _, playerResult in ipairs(results.players) do
 		if typeof(playerResult) ~= "table" or typeof(playerResult.userId) ~= "number" then
@@ -392,51 +450,46 @@ function Leaderboards.RecordRoundResults(dataService, results)
 			continue
 		end
 
-		for _, boardId in ipairs(BOARD_ORDER) do
-			local amount = increments[boardId]
-			if amount > 0 then
-				local key = BOARD_CONFIGS[boardId].lifetimeKey
-				dataService:Set(player, key, function(currentValue)
-					return roundNonNegative(currentValue) + amount
-				end)
-			end
-		end
-
-		dataService:Set(player, DAILY_STATS_KEY, function(currentValue)
-			local bucket = normalizePeriodStats(currentValue, dailyPeriodKey)
-			for _, boardId in ipairs(BOARD_ORDER) do
-				bucket[boardId] += increments[boardId]
-			end
-			return bucket
-		end)
-
-		dataService:Set(player, MONTHLY_STATS_KEY, function(currentValue)
-			local bucket = normalizePeriodStats(currentValue, monthlyPeriodKey)
-			for _, boardId in ipairs(BOARD_ORDER) do
-				bucket[boardId] += increments[boardId]
-			end
-			return bucket
-		end)
-
+		applyLeaderboardIncrements(dataService, player, increments, unixTime)
 	end
+end
+
+function Leaderboards.AdminAddStats(dataService, player: Player, rawIncrements): (boolean, string?)
+	if not (player and player.Parent == Players) then
+		return false, "Target player is unavailable"
+	end
+	if typeof(dataService:Get(player)) ~= "table" then
+		return false, "Target player data is not loaded"
+	end
+
+	local increments, message = normalizeAdminStatIncrements(rawIncrements)
+	if not increments then
+		return false, message
+	end
+
+	applyLeaderboardIncrements(dataService, player, increments, getUnixTime())
+	publishPlayerStats(dataService, player)
+	Leaderboards.refresh(dataService, false)
+
+	return true, formatAdminIncrementMessage(player, increments)
 end
 
 function Leaderboards.PublishPlayer(dataService, player: Player)
 	publishPlayerStats(dataService, player)
 end
 
-function Leaderboards.refresh(dataService)
+function Leaderboards.refresh(dataService, publishPlayers: boolean?)
 	local unixTime = getUnixTime()
 	local nextRefreshAt = unixTime + REFRESH_TIME
 
-	publishCurrentPlayerStats(dataService)
+	if publishPlayers ~= false then
+		publishCurrentPlayerStats(dataService)
+	end
 
 	for _, boardId in ipairs(BOARD_ORDER) do
 		for _, periodId in ipairs(PERIOD_ORDER) do
 			local periodKey = getPeriodKey(periodId, unixTime)
-			local entries = if RunService:IsStudio()
-				then getCurrentPlayerEntries(dataService, boardId, periodId, unixTime)
-				else getOrderedStoreEntries(boardId, periodId, periodKey)
+			local entries = getOrderedStoreEntries(boardId, periodId, periodKey)
 
 			setCache(boardId, periodId, {
 				board = boardId,

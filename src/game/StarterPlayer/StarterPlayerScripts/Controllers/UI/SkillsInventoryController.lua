@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 
 local DataController = require(script.Parent:WaitForChild("DataController"))
@@ -18,9 +19,12 @@ local HUD_GUI_NAME = "HUD"
 local SIDE_BUTTONS_NAME = "SideButtons"
 local SKILLS_BUTTON_NAME = "Skills"
 local SKILLS_LABEL_TEXT = "SKILLS"
+local SKINS_TAB_NAME = "Skins"
 local HUD_TOGGLE_DEBOUNCE_SECONDS = 0.08
 local TILE_SLOT_NAME = "SkillsInventoryTileSlot"
 local TILE_SCALE_NAME = "SkillsInventoryVisualScale"
+local SKIN_TEMPLATE_SUFFIX = "Template"
+local SKIN_RUNTIME_TILE_ATTRIBUTE = "RuntimeSkinTile"
 local TILE_HOVER_SIZE_FACTOR = 1.01
 local TILE_PRESSED_SIZE_FACTOR = 0.9
 local TILE_TWEEN_INFO = TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -28,14 +32,23 @@ local CLICK_SOUND_NAME = "UIButtonClickSound"
 local CLICK_SOUND_ID = "rbxassetid://5852470908"
 local CLICK_SOUND_VOLUME = 0.6
 
-local OWNED_KEY = Schema.OwnedAbilities and Schema.OwnedAbilities.key or "ownedAbilities"
+local OWNED_ABILITIES_KEY = Schema.OwnedAbilities and Schema.OwnedAbilities.key or "ownedAbilities"
 local LOADOUT_KEY = Schema.AbilityLoadout and Schema.AbilityLoadout.key or "abilityLoadout"
+local OWNED_SKINS_KEY = Schema.OwnedBombSkins and Schema.OwnedBombSkins.key or "ownedBombSkins"
+local SKIN_COPIES_KEY = Schema.BombSkinCopies and Schema.BombSkinCopies.key or "bombSkinCopies"
+local EQUIPPED_SKIN_KEY = Schema.EquippedBombSkin and Schema.EquippedBombSkin.key or "equippedBombSkin"
 
 type TileRecord = {
 	button: ImageButton,
 	layoutObject: GuiObject,
 	abilityId: string,
 	slot: string,
+	normalSize: UDim2,
+}
+
+type SkinTileRecord = {
+	button: ImageButton,
+	skinId: string,
 	normalSize: UDim2,
 }
 
@@ -61,16 +74,22 @@ SkillsInventoryController._connections = {} :: { RBXScriptConnection }
 SkillsInventoryController._frameConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._hudConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._tileConnections = {} :: { RBXScriptConnection }
+SkillsInventoryController._skinTileConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._frame = nil :: GuiObject?
 SkillsInventoryController._right = nil :: Instance?
 SkillsInventoryController._topbar = nil :: Instance?
 SkillsInventoryController._containers = {} :: { [string]: GuiObject }
 SkillsInventoryController._tilesByAbilityId = {} :: { [string]: TileRecord }
+SkillsInventoryController._skinTilesBySkinId = {} :: { [string]: SkinTileRecord }
 SkillsInventoryController._tileTweens = {} :: { [ImageButton]: Tween }
+SkillsInventoryController._selectedTab = AbilityConfig.Slots.Offensive
 SkillsInventoryController._selectedSlot = AbilityConfig.Slots.Offensive
 SkillsInventoryController._selectedAbilityId = ""
+SkillsInventoryController._selectedSkinId = BombSkinConfig.DefaultSkinId
 SkillsInventoryController._remote = nil :: RemoteEvent?
+SkillsInventoryController._skinRemote = nil :: RemoteEvent?
 SkillsInventoryController._statusByAbilityId = {} :: { [string]: string }
+SkillsInventoryController._statusBySkinId = {} :: { [string]: string }
 SkillsInventoryController._lastHudToggleAt = 0
 
 local warnedMissingTextStyles = {}
@@ -165,7 +184,15 @@ local function playClick()
 	clickSound:Play()
 end
 
-local function getRemote(): RemoteEvent?
+local function getInventoryTabs(): { string }
+	return {
+		AbilityConfig.Slots.Offensive,
+		AbilityConfig.Slots.Defensive,
+		SKINS_TAB_NAME,
+	}
+end
+
+local function getAbilityRemote(): RemoteEvent?
 	local remotes = ReplicatedStorage:WaitForChild(AbilityConfig.RemotesFolderName, 10)
 	if not remotes then
 		return nil
@@ -175,8 +202,18 @@ local function getRemote(): RemoteEvent?
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
 end
 
+local function getSkinRemote(): RemoteEvent?
+	local remotes = ReplicatedStorage:WaitForChild(BombSkinConfig.RemotesFolderName, 10)
+	if not remotes then
+		return nil
+	end
+
+	local remote = remotes:WaitForChild(BombSkinConfig.InventoryRequestRemoteName, 10)
+	return if remote and remote:IsA("RemoteEvent") then remote else nil
+end
+
 local function getOwnedAbilities(): { [string]: boolean }
-	local rawOwned = DataController:Get(OWNED_KEY)
+	local rawOwned = DataController:Get(OWNED_ABILITIES_KEY)
 	local owned = {}
 	if typeof(rawOwned) ~= "table" then
 		return owned
@@ -201,6 +238,63 @@ local function getOwnedAbilities(): { [string]: boolean }
 	return owned
 end
 
+local function getOwnedSkins(): { [string]: boolean }
+	local rawOwned = DataController:Get(OWNED_SKINS_KEY)
+	local owned = {}
+	if typeof(rawOwned) ~= "table" then
+		owned[BombSkinConfig.DefaultSkinId] = true
+		return owned
+	end
+
+	for key, child in pairs(rawOwned) do
+		local skinId = nil
+		if typeof(key) == "string" and child == true then
+			skinId = key
+		elseif typeof(child) == "string" then
+			skinId = child
+		end
+
+		if skinId then
+			local normalizedSkinId = BombSkinConfig.NormalizeSkinId(skinId)
+			if BombSkinConfig.IsCatalogSkin(normalizedSkinId) then
+				owned[normalizedSkinId] = true
+			end
+		end
+	end
+
+	owned[BombSkinConfig.DefaultSkinId] = true
+	return owned
+end
+
+local function getSkinCopies(): { [string]: number }
+	local rawCopies = DataController:Get(SKIN_COPIES_KEY)
+	local owned = getOwnedSkins()
+	local copies = {}
+
+	if typeof(rawCopies) == "table" then
+		for rawSkinId, rawCount in pairs(rawCopies) do
+			local skinId = BombSkinConfig.NormalizeSkinId(rawSkinId)
+			local count = math.floor(tonumber(rawCount) or 0)
+			if skinId ~= "" and owned[skinId] == true and count > 0 then
+				copies[skinId] = count
+			end
+		end
+	end
+
+	for skinId in pairs(owned) do
+		if (copies[skinId] or 0) < 1 then
+			copies[skinId] = 1
+		end
+	end
+
+	return copies
+end
+
+local function getEquippedSkinId(): string
+	local skinId = BombSkinConfig.NormalizeSkinId(DataController:Get(EQUIPPED_SKIN_KEY))
+	return if skinId ~= "" then skinId else BombSkinConfig.DefaultSkinId
+end
+
 local function getLoadout(): { [string]: string }
 	local rawLoadout = DataController:Get(LOADOUT_KEY)
 	local loadout = {}
@@ -212,6 +306,39 @@ local function getLoadout(): { [string]: string }
 	return loadout
 end
 
+local rarityRank = {}
+for index, rarity in ipairs(BombSkinConfig.RarityOrder) do
+	rarityRank[rarity] = index
+end
+
+local function getSortedOwnedSkinIds(): { string }
+	local owned = getOwnedSkins()
+	local skinIds = {}
+
+	for skinId in pairs(owned) do
+		if BombSkinConfig.IsCatalogSkin(skinId) then
+			table.insert(skinIds, skinId)
+		end
+	end
+
+	table.sort(skinIds, function(leftId, rightId)
+		local left = BombSkinConfig.GetDefinition(leftId)
+		local right = BombSkinConfig.GetDefinition(rightId)
+		local leftRank = if left then rarityRank[left.rarity] or math.huge else math.huge
+		local rightRank = if right then rarityRank[right.rarity] or math.huge else math.huge
+
+		if leftRank == rightRank then
+			local leftOrder = if left then tonumber(left.catalogOrder) or 0 else 0
+			local rightOrder = if right then tonumber(right.catalogOrder) or 0 else 0
+			return leftOrder < rightOrder
+		end
+
+		return leftRank < rightRank
+	end)
+
+	return skinIds
+end
+
 local function findAbilityContainer(frame: Instance, name: string): GuiObject?
 	for _, child in ipairs(frame:GetChildren()) do
 		if child.Name == name and child:IsA("GuiObject") and child:FindFirstChildWhichIsA("ScrollingFrame") then
@@ -220,6 +347,25 @@ local function findAbilityContainer(frame: Instance, name: string): GuiObject?
 	end
 
 	return nil
+end
+
+local function findSkinTemplate(scroller: ScrollingFrame, rarity: string?): ImageButton?
+	local templateName = tostring(rarity or BombSkinConfig.Rarities.Common) .. SKIN_TEMPLATE_SUFFIX
+	local template = scroller:FindFirstChild(templateName)
+	if not (template and template:IsA("ImageButton")) then
+		template = scroller:FindFirstChild(BombSkinConfig.Rarities.Common .. SKIN_TEMPLATE_SUFFIX)
+	end
+
+	return if template and template:IsA("ImageButton") then template else nil
+end
+
+local function formatSkinTileName(definition, copyCount: number): string
+	local displayName = definition.displayName or definition.id
+	if copyCount > 1 then
+		return ("%s [X%d]"):format(displayName, copyCount)
+	end
+
+	return displayName
 end
 
 local function getTileButtonRecords(scroller: ScrollingFrame): { TileButtonRecord }
@@ -429,6 +575,18 @@ function SkillsInventoryController:_disconnectHud()
 	disconnectAll(self._hudConnections)
 end
 
+function SkillsInventoryController:_disconnectSkinTiles()
+	for _, record in pairs(self._skinTilesBySkinId) do
+		self:_cancelTileTween(record.button)
+		if record.button.Parent then
+			record.button.Size = record.normalSize
+		end
+	end
+
+	disconnectAll(self._skinTileConnections)
+	table.clear(self._skinTilesBySkinId)
+end
+
 function SkillsInventoryController:_disconnectTiles()
 	for button, tween in pairs(self._tileTweens) do
 		tween:Cancel()
@@ -441,6 +599,7 @@ function SkillsInventoryController:_disconnectTiles()
 
 	disconnectAll(self._tileConnections)
 	table.clear(self._tilesByAbilityId)
+	self:_disconnectSkinTiles()
 end
 
 function SkillsInventoryController:_disconnectFrame()
@@ -464,7 +623,9 @@ function SkillsInventoryController:_setTopbarState(slot: string)
 			continue
 		end
 
-		local isEnabledTab = child.Name == AbilityConfig.Slots.Offensive or child.Name == AbilityConfig.Slots.Defensive
+		local isEnabledTab = child.Name == AbilityConfig.Slots.Offensive
+			or child.Name == AbilityConfig.Slots.Defensive
+			or child.Name == SKINS_TAB_NAME
 		local isSelected = child.Name == slot
 		child:SetAttribute("Selected", isSelected)
 		child:SetAttribute("Disabled", not isEnabledTab)
@@ -480,9 +641,10 @@ end
 function SkillsInventoryController:_updateTileStates()
 	local loadout = getLoadout()
 	local owned = getOwnedAbilities()
+	local equippedSkinId = getEquippedSkinId()
 
 	for abilityId, record in pairs(self._tilesByAbilityId) do
-		local isSelected = abilityId == self._selectedAbilityId
+		local isSelected = self._selectedTab ~= SKINS_TAB_NAME and abilityId == self._selectedAbilityId
 		local isOwned = owned[abilityId] == true
 		local isEquipped = loadout[record.slot] == abilityId
 
@@ -490,9 +652,94 @@ function SkillsInventoryController:_updateTileStates()
 		record.button:SetAttribute("Owned", isOwned)
 		record.button:SetAttribute("Equipped", isEquipped)
 	end
+
+	for skinId, record in pairs(self._skinTilesBySkinId) do
+		local isSelected = self._selectedTab == SKINS_TAB_NAME and skinId == self._selectedSkinId
+		local isEquipped = equippedSkinId == skinId
+
+		record.button:SetAttribute("Selected", isSelected)
+		record.button:SetAttribute("Owned", true)
+		record.button:SetAttribute("Equipped", isEquipped)
+	end
+end
+
+function SkillsInventoryController:_updateSkinRightPanel()
+	local right = self._right
+	if not right then
+		return
+	end
+
+	local skinId = self._selectedSkinId
+	local definition = BombSkinConfig.GetDefinition(skinId)
+	local owned = getOwnedSkins()
+	local icon = findImage(right, "Icon")
+	local nameLabel = findTextLabel(right, "AbilityName")
+	local descriptionLabel = findTextLabel(right, "Description")
+	local buyButton = findButton(right, "BuyButton")
+	local equipButton = findButton(right, "EquipButton")
+	local unequipButton = findButton(right, "UnequipButton")
+	local favoriteButton = findButton(right, "FavoriteButton")
+	local warning = findTextLabel(right, "Warning")
+
+	if not (definition and owned[definition.id] == true) then
+		if icon then
+			icon.Image = ""
+		end
+		if nameLabel then
+			nameLabel.Text = ""
+		end
+		if descriptionLabel then
+			descriptionLabel.Text = ""
+		end
+		setButtonVisible(buyButton, false)
+		setButtonVisible(equipButton, false)
+		setButtonVisible(unequipButton, false)
+		setButtonVisible(favoriteButton, false)
+		if warning then
+			warning.Visible = false
+		end
+		return
+	end
+
+	local isEquipped = getEquippedSkinId() == definition.id
+
+	if icon then
+		icon.Image = definition.iconImage or ""
+	end
+	if nameLabel then
+		nameLabel.Text = definition.displayName or definition.id
+	end
+	if descriptionLabel then
+		descriptionLabel.Text = definition.description or ""
+	end
+
+	setButtonLabel(equipButton, "EQUIP")
+	setButtonLabel(unequipButton, "EQUIPPED")
+	setButtonVisible(buyButton, false)
+	setButtonVisible(equipButton, not isEquipped)
+	setButtonVisible(unequipButton, isEquipped)
+	if isEquipped then
+		setButtonEnabled(unequipButton, false)
+	end
+	setButtonVisible(favoriteButton, false)
+
+	if warning then
+		local statusText = self._statusBySkinId[definition.id]
+		if statusText and statusText ~= "" then
+			warning.Text = statusText
+			warning.Visible = true
+		else
+			warning.Visible = false
+		end
+	end
 end
 
 function SkillsInventoryController:_updateRightPanel()
+	if self._selectedTab == SKINS_TAB_NAME then
+		self:_updateSkinRightPanel()
+		return
+	end
+
 	local right = self._right
 	if not right then
 		return
@@ -577,6 +824,7 @@ function SkillsInventoryController:_selectAbility(abilityId: string)
 		return
 	end
 
+	self._selectedTab = definition.slot
 	self._selectedAbilityId = definition.id
 	self._selectedSlot = definition.slot
 	self:_setContainerVisible(definition.slot)
@@ -584,11 +832,53 @@ function SkillsInventoryController:_selectAbility(abilityId: string)
 	self:_refresh()
 end
 
+function SkillsInventoryController:_selectSkin(skinId: string)
+	local definition = BombSkinConfig.GetDefinition(skinId)
+	if not definition then
+		return
+	end
+
+	local owned = getOwnedSkins()
+	if owned[definition.id] ~= true then
+		return
+	end
+
+	self._selectedTab = SKINS_TAB_NAME
+	self._selectedSkinId = definition.id
+	self:_setContainerVisible(SKINS_TAB_NAME)
+	self:_setTopbarState(SKINS_TAB_NAME)
+	self:_refresh()
+end
+
 function SkillsInventoryController:_selectSlot(slot: string)
+	if slot == SKINS_TAB_NAME then
+		self._selectedTab = SKINS_TAB_NAME
+		self:_setContainerVisible(SKINS_TAB_NAME)
+		self:_setTopbarState(SKINS_TAB_NAME)
+
+		local owned = getOwnedSkins()
+		local selectedSkin = BombSkinConfig.GetDefinition(self._selectedSkinId)
+		if selectedSkin and owned[selectedSkin.id] == true then
+			self:_refresh()
+			return
+		end
+
+		local equippedSkinId = getEquippedSkinId()
+		if owned[equippedSkinId] == true then
+			self:_selectSkin(equippedSkinId)
+			return
+		end
+
+		local skinIds = getSortedOwnedSkinIds()
+		self:_selectSkin(skinIds[1] or BombSkinConfig.DefaultSkinId)
+		return
+	end
+
 	if not AbilityConfig.IsKnownSlot(slot) then
 		return
 	end
 
+	self._selectedTab = slot
 	self._selectedSlot = slot
 	self:_setContainerVisible(slot)
 	self:_setTopbarState(slot)
@@ -603,7 +893,30 @@ function SkillsInventoryController:_selectSlot(slot: string)
 	self:_selectAbility(ids[1] or "")
 end
 
+function SkillsInventoryController:_sendSkinAction(action: string)
+	if action ~= BombSkinConfig.InventoryActions.Equip then
+		return
+	end
+
+	local remote = self._skinRemote
+	local definition = BombSkinConfig.GetDefinition(self._selectedSkinId)
+	if not (remote and definition) then
+		return
+	end
+
+	self._statusBySkinId[definition.id] = nil
+	remote:FireServer({
+		action = action,
+		skinId = definition.id,
+	})
+end
+
 function SkillsInventoryController:_sendAction(action: string)
+	if self._selectedTab == SKINS_TAB_NAME then
+		self:_sendSkinAction(action)
+		return
+	end
+
 	local remote = self._remote
 	local definition = AbilityConfig.GetDefinition(self._selectedAbilityId)
 	if not (remote and definition) then
@@ -681,6 +994,64 @@ function SkillsInventoryController:_bindTileButton(button: ImageButton, abilityI
 	end))
 end
 
+function SkillsInventoryController:_bindSkinTileButton(button: ImageButton, skinId: string)
+	local normalSize = button.Size
+	local bigSize = scaleUDim2(normalSize, TILE_HOVER_SIZE_FACTOR)
+	local smallSize = scaleUDim2(normalSize, TILE_PRESSED_SIZE_FACTOR)
+
+	button.Active = true
+	button.Selectable = true
+	button.AutoButtonColor = true
+	button:SetAttribute("defaultSize", normalSize)
+	button:SetAttribute("Hovered", false)
+	button:SetAttribute("Pressed", false)
+
+	track(self._skinTileConnections, button.MouseEnter:Connect(function()
+		button:SetAttribute("Hovered", true)
+		self:_tweenTileButton(button, bigSize)
+	end))
+
+	track(self._skinTileConnections, button.MouseLeave:Connect(function()
+		button:SetAttribute("Hovered", false)
+		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, normalSize)
+	end))
+
+	track(self._skinTileConnections, button.MouseButton1Down:Connect(function()
+		button:SetAttribute("Pressed", true)
+		self:_tweenTileButton(button, smallSize)
+	end))
+	track(self._skinTileConnections, button.MouseButton1Up:Connect(function()
+		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, bigSize)
+	end))
+	track(self._skinTileConnections, button.Activated:Connect(function()
+		button:SetAttribute("Pressed", false)
+		playClick()
+		self:_selectSkin(skinId)
+	end))
+	track(self._skinTileConnections, button.MouseButton1Click:Connect(function()
+		button:SetAttribute("Pressed", false)
+		self:_selectSkin(skinId)
+	end))
+end
+
+local function clearSkinTiles(scroller: ScrollingFrame)
+	for _, child in ipairs(scroller:GetChildren()) do
+		if not child:IsA("ImageButton") then
+			continue
+		end
+
+		if child:GetAttribute(SKIN_RUNTIME_TILE_ATTRIBUTE) == true then
+			child:Destroy()
+		elseif string.sub(child.Name, -#SKIN_TEMPLATE_SUFFIX) == SKIN_TEMPLATE_SUFFIX then
+			child.Visible = false
+			child.Active = false
+			child.Selectable = false
+		end
+	end
+end
+
 function SkillsInventoryController:_populateSlot(slot: string, container: GuiObject)
 	local scroller = container:FindFirstChildWhichIsA("ScrollingFrame")
 	if not scroller then
@@ -743,6 +1114,68 @@ function SkillsInventoryController:_populateSlot(slot: string, container: GuiObj
 	end
 end
 
+function SkillsInventoryController:_populateSkins(container: GuiObject?)
+	if not container then
+		return
+	end
+
+	local scroller = container:FindFirstChildWhichIsA("ScrollingFrame")
+	if not scroller then
+		return
+	end
+
+	self:_disconnectSkinTiles()
+	disableAuthoredTileTweenScripts(scroller)
+	removeRuntimeTileScales(scroller)
+	clearSkinTiles(scroller)
+
+	local skinIds = getSortedOwnedSkinIds()
+	local skinCopies = getSkinCopies()
+
+	for index, skinId in ipairs(skinIds) do
+		local definition = BombSkinConfig.GetDefinition(skinId)
+		if not definition then
+			continue
+		end
+
+		local template = findSkinTemplate(scroller, definition.rarity)
+		if not template then
+			warn(("[SkillsInventoryController] Missing skin inventory template for rarity '%s'."):format(tostring(definition.rarity)))
+			continue
+		end
+
+		local button = template:Clone()
+		button.Name = "Skin_" .. definition.id
+		button.LayoutOrder = index
+		button.Visible = true
+		button.Active = true
+		button.Selectable = true
+		button:SetAttribute(SKIN_RUNTIME_TILE_ATTRIBUTE, true)
+		button:SetAttribute("SkinId", definition.id)
+		button:SetAttribute("Rarity", definition.rarity)
+
+		local label = findTextLabel(button, "Label")
+		if label then
+			label.Text = formatSkinTileName(definition, skinCopies[definition.id] or 1)
+		end
+
+		local icon = findImage(button, "Icon")
+		if icon then
+			icon.Image = definition.iconImage or ""
+		end
+
+		button.Parent = scroller
+
+		self._skinTilesBySkinId[definition.id] = {
+			button = button,
+			skinId = definition.id,
+			normalSize = button.Size,
+		}
+
+		self:_bindSkinTileButton(button, definition.id)
+	end
+end
+
 function SkillsInventoryController:_bindFrame(frame: GuiObject?)
 	self:_disconnectFrame()
 	self._frame = frame
@@ -760,13 +1193,18 @@ function SkillsInventoryController:_bindFrame(frame: GuiObject?)
 	self._topbar = frame:FindFirstChild("Topbar")
 	self._containers[AbilityConfig.Slots.Offensive] = findAbilityContainer(frame, "OffensiveAbilities")
 	self._containers[AbilityConfig.Slots.Defensive] = findAbilityContainer(frame, "DefensiveAbilities")
+	self._containers[SKINS_TAB_NAME] = findAbilityContainer(frame, SKINS_TAB_NAME)
 
 	for slot, container in pairs(self._containers) do
-		self:_populateSlot(slot, container)
+		if slot == SKINS_TAB_NAME then
+			self:_populateSkins(container)
+		else
+			self:_populateSlot(slot, container)
+		end
 	end
 
 	if self._topbar then
-		for _, slot in ipairs(AbilityConfig.SlotOrder) do
+		for _, slot in ipairs(getInventoryTabs()) do
 			local button = findButton(self._topbar, slot)
 			track(self._frameConnections, button and button.Activated:Connect(function()
 				self:_selectSlot(slot)
@@ -845,23 +1283,39 @@ function SkillsInventoryController:_bindCurrentHud()
 end
 
 function SkillsInventoryController:_bindRemote()
-	self._remote = getRemote()
-	if not self._remote then
-		return
+	self._remote = getAbilityRemote()
+	if self._remote then
+		track(self._connections, self._remote.OnClientEvent:Connect(function(response)
+			if typeof(response) ~= "table" then
+				return
+			end
+
+			local abilityId = AbilityConfig.NormalizeAbilityId(response.abilityId)
+			if abilityId ~= "" then
+				self._statusByAbilityId[abilityId] =
+					if response.ok == true then nil else tostring(response.message or "Skill action failed.")
+			end
+
+			self:_refresh()
+		end))
 	end
 
-	track(self._connections, self._remote.OnClientEvent:Connect(function(response)
-		if typeof(response) ~= "table" then
-			return
-		end
+	self._skinRemote = getSkinRemote()
+	if self._skinRemote then
+		track(self._connections, self._skinRemote.OnClientEvent:Connect(function(response)
+			if typeof(response) ~= "table" then
+				return
+			end
 
-		local abilityId = AbilityConfig.NormalizeAbilityId(response.abilityId)
-		if abilityId ~= "" then
-			self._statusByAbilityId[abilityId] = if response.ok == true then nil else tostring(response.message or "Skill action failed.")
-		end
+			local skinId = BombSkinConfig.NormalizeSkinId(response.skinId)
+			if skinId ~= "" then
+				self._statusBySkinId[skinId] =
+					if response.ok == true then nil else tostring(response.message or "Skin action failed.")
+			end
 
-		self:_refresh()
-	end))
+			self:_refresh()
+		end))
+	end
 end
 
 function SkillsInventoryController:OnStart()
@@ -888,10 +1342,28 @@ function SkillsInventoryController:OnStart()
 	end))
 
 	track(self._connections, DataController.DataReceived:Connect(function()
-		self:_refresh()
+		if self._containers[SKINS_TAB_NAME] then
+			self:_populateSkins(self._containers[SKINS_TAB_NAME])
+		end
+		if self._selectedTab == SKINS_TAB_NAME then
+			self:_selectSlot(SKINS_TAB_NAME)
+		else
+			self:_refresh()
+		end
 	end))
 	track(self._connections, DataController.DataUpdated:Connect(function(key)
-		if key == OWNED_KEY or key == LOADOUT_KEY then
+		if key == OWNED_ABILITIES_KEY or key == LOADOUT_KEY then
+			self:_refresh()
+		elseif key == OWNED_SKINS_KEY or key == SKIN_COPIES_KEY then
+			if self._containers[SKINS_TAB_NAME] then
+				self:_populateSkins(self._containers[SKINS_TAB_NAME])
+			end
+			if self._selectedTab == SKINS_TAB_NAME then
+				self:_selectSlot(SKINS_TAB_NAME)
+			else
+				self:_refresh()
+			end
+		elseif key == EQUIPPED_SKIN_KEY then
 			self:_refresh()
 		end
 	end))

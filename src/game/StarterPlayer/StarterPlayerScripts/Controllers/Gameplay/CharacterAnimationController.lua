@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local AnimationConfig = require(ReplicatedStorage.Shared.Config.AnimationConfig)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesCharacterAnimationController"
@@ -703,7 +704,9 @@ function CharacterAnimationController:_bindCharacter(character: Model)
 	self._lastDebugLogTimes = {}
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function()
+		local token = RuntimeProfiler.Begin("Client/CharacterAnimationController/Render")
 		self:_step()
+		RuntimeProfiler.End("Client/CharacterAnimationController/Render", token)
 	end)
 end
 

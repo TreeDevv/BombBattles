@@ -568,6 +568,29 @@ function HipBombVisual:SetVisible(visible: boolean)
 	end
 end
 
+function HipBombVisual:Reset()
+	self:SetVisible(false)
+	self.translation = Vector3.zero
+	self.translationVelocity = Vector3.zero
+	self.rotation = Vector3.zero
+	self.rotationVelocity = Vector3.zero
+	self.movementImpulseTranslation = Vector3.zero
+	self.movementImpulseRotation = Vector3.zero
+	self.lastLocalVelocity = nil
+	self.lastPhysicsLocalVelocity = nil
+	self.idleTime = 0
+	self.landingImpulse = 0
+	self.debugStepCount = 0
+
+	if self.motor and self.motor.Parent then
+		self.motor.C0 = self.baseOffset or CFrame.new()
+		self.motor.C1 = self.baseC1 or CFrame.new()
+	end
+	if self.physicsRig and self.physicsRig.bobPart and self.physicsRig.bobPart.Parent then
+		setAssemblyVelocity(self.physicsRig.bobPart, Vector3.zero, Vector3.zero)
+	end
+end
+
 function HipBombVisual:Step(dt: number, state)
 	if self.physicsEnabled then
 		return self:_stepPhysics(dt, state)

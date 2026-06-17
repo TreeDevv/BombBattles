@@ -7,6 +7,8 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
@@ -85,7 +87,7 @@ local function isReady(context: ServerClientMessageContext): boolean
 	if context.slotState.abilityId ~= context.abilityId then
 		return false
 	end
-	if not RoundService:IsPlayerActive(context.player) then
+	if not CombatEligibility.IsCombatActive(context.player, RoundService) then
 		return false
 	end
 	if not getCharacterRoot(context.player) then
@@ -100,6 +102,13 @@ end
 local function getActiveMap(): Model?
 	local map = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	return if map and map:IsA("Model") then map else nil
+end
+
+local function getTargetBoundsRoot(player: Player): Model?
+	local targetRoot = if CombatEligibility.IsPracticeOnly(player, RoundService)
+		then PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
+		else getActiveMap()
+	return if targetRoot and targetRoot:IsA("Model") then targetRoot else nil
 end
 
 local function getTeamName(player: Player): string?
@@ -157,9 +166,8 @@ local function getMapVerticalBounds(map: Model?, radius: number, fallbackPositio
 	return math.max(topY, fallbackPosition.Y + radius), math.min(bottomY, fallbackPosition.Y - radius)
 end
 
-local function getObjectsFolder(): Folder
-	local activeMap = getActiveMap()
-	local parent: Instance = activeMap or workspace
+local function getObjectsFolder(player: Player): Folder
+	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
 	local existing = parent:FindFirstChild(OBJECTS_FOLDER_NAME)
 	if existing and existing:IsA("Folder") then
 		return existing
@@ -200,8 +208,8 @@ local function makeRaycastParams(player: Player): RaycastParams
 		table.insert(excluded, player.Character)
 	end
 
-	local activeMap = getActiveMap()
-	local objectsFolder = activeMap and activeMap:FindFirstChild(OBJECTS_FOLDER_NAME) or workspace:FindFirstChild(OBJECTS_FOLDER_NAME)
+	local targetRoot = getTargetBoundsRoot(player)
+	local objectsFolder = targetRoot and targetRoot:FindFirstChild(OBJECTS_FOLDER_NAME) or workspace:FindFirstChild(OBJECTS_FOLDER_NAME)
 	if objectsFolder then
 		table.insert(excluded, objectsFolder)
 	end
@@ -236,8 +244,8 @@ local function validateTarget(player: Player, definition: AbilityDefinition, pro
 		return nil, "NotAlive"
 	end
 
-	local activeMap = getActiveMap()
-	if not isInsideMapBounds(proposedPosition, activeMap) then
+	local boundsRoot = getTargetBoundsRoot(player)
+	if not isInsideMapBounds(proposedPosition, boundsRoot) then
 		return nil, "OutOfMap"
 	end
 
@@ -254,7 +262,7 @@ local function validateTarget(player: Player, definition: AbilityDefinition, pro
 	if hit.Normal.Y < getDefinitionNumber(definition, "minFloorNormalY", 0.45) then
 		return nil, "BadSurface"
 	end
-	if activeMap and not hit.Instance:IsDescendantOf(activeMap) then
+	if boundsRoot and not hit.Instance:IsDescendantOf(boundsRoot) then
 		return nil, "OutOfMap"
 	end
 	if hasTaggedAncestor(hit.Instance, UNSAFE_TAGS) then
@@ -318,7 +326,7 @@ local function spawnWarningPart(position: Vector3, radius: number, lifetime: num
 	warning.Color = Color3.fromRGB(255, 70, 70)
 	warning.Material = Enum.Material.Neon
 	warning.Transparency = 0.62
-	warning.Parent = getChildFolder(getObjectsFolder(), WARNING_FOLDER_NAME)
+	warning.Parent = getChildFolder(getObjectsFolder(player), WARNING_FOLDER_NAME)
 
 	task.delay(lifetime, function()
 		if warning.Parent then
@@ -340,7 +348,7 @@ local function createDamageZone(position: Vector3, radius: number, topY: number,
 	zone.Shape = Enum.PartType.Cylinder
 	zone.Size = Vector3.new(height, radius * 2, radius * 2)
 	zone.CFrame = CFrame.new(position.X, bottomY + height * 0.5, position.Z) * CFrame.Angles(0, 0, math.rad(90))
-	zone.Parent = getChildFolder(getObjectsFolder(), DAMAGE_ZONE_FOLDER_NAME)
+	zone.Parent = getChildFolder(getObjectsFolder(player), DAMAGE_ZONE_FOLDER_NAME)
 	return zone
 end
 
@@ -544,7 +552,7 @@ local function startDamageTicks(player: Player, definition: AbilityDefinition, s
 
 	task.spawn(function()
 		for _ = 1, tickCount do
-			if not (zone.Parent and player.Parent == Players and RoundService:IsPlayerActive(player)) then
+			if not (zone.Parent and player.Parent == Players and CombatEligibility.IsCombatActive(player, RoundService)) then
 				break
 			end
 			damagePlayers(
@@ -617,13 +625,13 @@ local function scheduleStrike(player: Player, definition: AbilityDefinition, ses
 		if currentSession and currentSession.sessionId == sessionId then
 			sessions[player] = nil
 		end
-		if player.Parent ~= Players or not RoundService:IsPlayerActive(player) then
+		if player.Parent ~= Players or not CombatEligibility.IsCombatActive(player, RoundService) then
 			return
 		end
 
 		local radius = getDefinitionNumber(definition, "strikeRadius", 22)
-		local activeMap = getActiveMap()
-		local topY, bottomY = getMapVerticalBounds(activeMap, radius, position)
+		local boundsRoot = getTargetBoundsRoot(player)
+		local topY, bottomY = getMapVerticalBounds(boundsRoot, radius, position)
 		local terrainRadius, _terrainDepth, columnBottomY, terrainStep, _terrainStepCount, terrainStepInterval =
 			getTerrainColumnData(definition, position, radius, bottomY)
 		fireAll(IMPACT_EFFECT, {

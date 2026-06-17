@@ -8,7 +8,9 @@ local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RoundService = require(ServerScriptService.Services.RoundService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -121,6 +123,11 @@ end
 
 local function getActiveMap(): Instance?
 	return workspace:FindFirstChild(RoundConfig.ActiveMapName)
+end
+
+local function getPracticeRange(): Instance?
+	local lobby = workspace:FindFirstChild("Lobby")
+	return lobby and lobby:FindFirstChild("PracticeRange") or nil
 end
 
 local function hasTaggedAncestor(instance: Instance, tagName: string): boolean
@@ -240,6 +247,9 @@ local function getEnemyPlayer(shooter: Player, instance: Instance): Player?
 	end
 
 	local player = Players:GetPlayerFromCharacter(character)
+	if CombatEligibility.IsPracticeOnly(shooter, RoundService) then
+		return nil
+	end
 	if player and player ~= shooter then
 		return player
 	end
@@ -265,7 +275,10 @@ local function isValidSurface(instance: Instance): boolean
 	end
 
 	local activeMap = getActiveMap()
-	return (activeMap ~= nil and part:IsDescendantOf(activeMap)) or hasTaggedAncestor(part, SURFACE_TAG)
+	local practiceRange = getPracticeRange()
+	return (activeMap ~= nil and part:IsDescendantOf(activeMap))
+		or (practiceRange ~= nil and part:IsDescendantOf(practiceRange))
+		or hasTaggedAncestor(part, SURFACE_TAG)
 end
 
 local function isSkippableHit(instance: Instance): boolean

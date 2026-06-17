@@ -437,6 +437,10 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 		end
 		local ok, message = DataService:WipeByUserId(targetPlayer.UserId)
 		return result(ok, if ok then "Wiped data for " .. targetPlayer.Name else message or "Data wipe failed", getStatePayload())
+	elseif command == "data.addLeaderboardStats" then
+		local increments = if typeof(payload) == "table" then payload.increments else nil
+		local ok, message = DataService:AdminAddLeaderboardStats(targetPlayer, increments)
+		return result(ok, message or "Leaderboard stat update failed", getStatePayload())
 	end
 
 	return result(false, "Unknown command", nil)

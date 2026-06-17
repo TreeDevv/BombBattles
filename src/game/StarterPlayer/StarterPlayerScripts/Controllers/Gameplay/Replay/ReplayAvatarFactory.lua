@@ -1,17 +1,23 @@
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local ReplayAvatarFactory = {}
 
 local DEFAULT_MAX_CACHE = 32
-local DEFAULT_PRELOAD_TIMEOUT_SECONDS = 1.5
+local NPC_SCAN_SECONDS = 18
+local NPC_SCAN_INTERVAL_SECONDS = 2
 
 local maxCache = DEFAULT_MAX_CACHE
 local debugEnabled = false
 local started = false
 local templateCache = {}
 local templateOrder = {}
-local loadingByKey = {}
 local playerConnections = {}
+local workspaceConnections = {}
+local watchedNPCModels = {}
 
 local function isFiniteNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
@@ -152,33 +158,31 @@ local function createLiveTemplate(userId: number): Model?
 	return validateTemplate(clone, userId, "LiveCharacter", false)
 end
 
-local function createGeneratedTemplate(userId: number): Model?
-	local positiveUserId = getPositiveUserId(userId)
-	if not positiveUserId then
-		warnDebug("Skipped generated avatar for non-positive user", tostring(userId))
+local function getNPCUserId(model: Instance?): number?
+	if not (model and model:IsA("Model")) then
 		return nil
 	end
 
-	local ok, model = pcall(function()
-		local description = Players:GetHumanoidDescriptionFromUserIdAsync(positiveUserId)
-		return Players:CreateHumanoidModelFromDescriptionAsync(description, Enum.HumanoidRigType.R6)
-	end)
-
-	if ok then
-		local generatedModel = validateTemplate(model, positiveUserId, "HumanoidDescriptionR6", true)
-		if generatedModel then
-			return generatedModel
-		end
+	local rawUserId = model:GetAttribute("StudioAIUserId")
+	if isFiniteNumber(rawUserId) then
+		return math.floor(rawUserId)
 	end
-
-	local fallbackOk, fallbackModel = pcall(function()
-		return Players:CreateHumanoidModelFromUserIdAsync(positiveUserId)
-	end)
-	if fallbackOk then
-		return validateTemplate(fallbackModel, positiveUserId, "UserIdFallback", true)
-	end
-
 	return nil
+end
+
+local function isReplayNPCModel(model: Instance?): boolean
+	if not (model and model:IsA("Model")) then
+		return false
+	end
+	if model:GetAttribute("StudioAIBot") == true then
+		return getNPCUserId(model) ~= nil
+	end
+	return getNPCUserId(model) ~= nil
+end
+
+local function createModelTemplate(userId: number, model: Model, sourceName: string): Model?
+	local clone = cloneCharacter(model)
+	return validateTemplate(clone, userId, sourceName, false)
 end
 
 local function destroyTemplate(template: Instance?)
@@ -235,6 +239,33 @@ function ReplayAvatarFactory.CacheLiveCharacter(userId: number): Model?
 	return templateCache[key]
 end
 
+function ReplayAvatarFactory.CacheLiveModel(userId: number, model: Model, sourceName: string?): Model?
+	local key = getUserIdKey(userId)
+	if not key or not (model and model:IsA("Model")) then
+		return nil
+	end
+
+	local template = createModelTemplate(math.floor(userId), model, sourceName or "LiveModel")
+	if template then
+		warnDebug("Cached live replay model", tostring(userId), sourceName or "LiveModel")
+		RuntimeProfiler.Count("Client/Replay/AvatarFactory/CachedLiveModels")
+		return rememberTemplate(math.floor(userId), template, true)
+	end
+	return templateCache[key]
+end
+
+local function cacheNPCModelIfEligible(model: Instance?)
+	if not isReplayNPCModel(model) then
+		return
+	end
+
+	local userId = getNPCUserId(model)
+	if not userId then
+		return
+	end
+	ReplayAvatarFactory.CacheLiveModel(userId, model :: Model, "StudioAIBot")
+end
+
 function ReplayAvatarFactory.GetTemplate(userId: number): Model?
 	local key = getUserIdKey(userId)
 	if not key then
@@ -248,19 +279,18 @@ function ReplayAvatarFactory.GetTemplate(userId: number): Model?
 	templateCache[key] = nil
 
 	local resolvedUserId = math.floor(userId)
+	if resolvedUserId <= 0 then
+		return nil
+	end
+
 	local liveTemplate = createLiveTemplate(resolvedUserId)
 	if liveTemplate then
 		warnDebug("Loaded live replay avatar", tostring(resolvedUserId))
 		return rememberTemplate(resolvedUserId, liveTemplate, true)
 	end
 
-	local generatedTemplate = createGeneratedTemplate(resolvedUserId)
-	if generatedTemplate then
-		warnDebug("Loaded generated replay avatar", tostring(resolvedUserId))
-		return rememberTemplate(resolvedUserId, generatedTemplate, false)
-	end
-
-	warnDebug("No replay avatar template available", tostring(resolvedUserId))
+	RuntimeProfiler.Count("Client/Replay/AvatarFactory/LiveCharacterTemplateMiss")
+	warnDebug("No live replay avatar template available", tostring(resolvedUserId))
 
 	return nil
 end
@@ -289,17 +319,29 @@ function ReplayAvatarFactory.CloneCachedTemplate(userId: number): Model?
 	return if ok and clone and clone:IsA("Model") then clone else nil
 end
 
-local function preloadOne(userId: number)
-	local key = getUserIdKey(userId)
-	if not key or loadingByKey[key] then
+function ReplayAvatarFactory.PrewarmUserIds(userIds)
+	if typeof(userIds) ~= "table" then
 		return
 	end
 
-	loadingByKey[key] = true
-	task.spawn(function()
-		ReplayAvatarFactory.GetTemplate(userId)
-		loadingByKey[key] = nil
-	end)
+	local cached = 0
+	local missing = 0
+	for _, userId in ipairs(userIds) do
+		local positiveUserId = getPositiveUserId(userId)
+		if positiveUserId and not ReplayAvatarFactory.GetCachedTemplate(positiveUserId) then
+			if ReplayAvatarFactory.CacheLiveCharacter(positiveUserId) then
+				cached += 1
+			else
+				missing += 1
+			end
+		end
+	end
+	if cached > 0 then
+		RuntimeProfiler.Count("Client/Replay/AvatarFactory/PrewarmLiveCached", cached)
+	end
+	if missing > 0 then
+		RuntimeProfiler.Count("Client/Replay/AvatarFactory/PrewarmLiveMissing", missing)
+	end
 end
 
 function ReplayAvatarFactory.PreloadUserIds(userIds, timeoutSeconds: number?)
@@ -307,39 +349,38 @@ function ReplayAvatarFactory.PreloadUserIds(userIds, timeoutSeconds: number?)
 		return
 	end
 
-	for _, userId in ipairs(userIds) do
-		if isFiniteNumber(userId) then
-			ReplayAvatarFactory.CacheLiveCharacter(userId)
-		end
-	end
+	ReplayAvatarFactory.PrewarmUserIds(userIds)
 
 	for _, userId in ipairs(userIds) do
-		if isFiniteNumber(userId) and not ReplayAvatarFactory.GetCachedTemplate(userId) then
-			preloadOne(userId)
+		local positiveUserId = getPositiveUserId(userId)
+		if positiveUserId and not ReplayAvatarFactory.GetCachedTemplate(positiveUserId) then
+			warnDebug("Preload finished without cached avatar", tostring(positiveUserId))
 		end
 	end
+end
 
-	local timeoutAt = os.clock() + math.max(timeoutSeconds or DEFAULT_PRELOAD_TIMEOUT_SECONDS, 0)
-	while os.clock() < timeoutAt do
-		local pending = false
-		for _, userId in ipairs(userIds) do
-			local key = getUserIdKey(userId)
-			if key and loadingByKey[key] and not ReplayAvatarFactory.GetCachedTemplate(userId) then
-				pending = true
-				break
-			end
+function ReplayAvatarFactory.PrewarmCurrentPlayers()
+	local count = 0
+	for _, player in ipairs(Players:GetPlayers()) do
+		if getPositiveUserId(player.UserId) then
+			ReplayAvatarFactory.CacheLiveCharacter(player.UserId)
+			count += 1
+			task.wait()
 		end
-		if not pending then
-			break
-		end
-		task.wait()
 	end
+	RuntimeProfiler.Count("Client/Replay/AvatarFactory/PrewarmCurrentPlayersCount", count)
+end
 
-	for _, userId in ipairs(userIds) do
-		if isFiniteNumber(userId) and not ReplayAvatarFactory.GetCachedTemplate(userId) then
-			warnDebug("Preload finished without cached avatar", tostring(math.floor(userId)))
+function ReplayAvatarFactory.PrewarmNPCs()
+	local count = 0
+	for _, descendant in ipairs(Workspace:GetDescendants()) do
+		if descendant:IsA("Model") and isReplayNPCModel(descendant) then
+			cacheNPCModelIfEligible(descendant)
+			count += 1
+			task.wait()
 		end
 	end
+	RuntimeProfiler.Count("Client/Replay/AvatarFactory/PrewarmNPCCount", count)
 end
 
 function ReplayAvatarFactory.GetCachedTemplate(userId: number): Model?
@@ -381,6 +422,26 @@ local function watchPlayer(player: Player)
 	end
 end
 
+local function watchNPCModel(model: Instance?)
+	if not (model and model:IsA("Model")) or watchedNPCModels[model] then
+		return
+	end
+	if not isReplayNPCModel(model) then
+		return
+	end
+
+	watchedNPCModels[model] = true
+	task.defer(cacheNPCModelIfEligible, model)
+	table.insert(workspaceConnections, model:GetAttributeChangedSignal("StudioAIUserId"):Connect(function()
+		task.defer(cacheNPCModelIfEligible, model)
+	end))
+	table.insert(workspaceConnections, model.AncestryChanged:Connect(function(_, parent)
+		if parent == nil then
+			watchedNPCModels[model] = nil
+		end
+	end))
+end
+
 function ReplayAvatarFactory.Start(options)
 	if typeof(options) == "table" then
 		if isFiniteNumber(options.maxCache) then
@@ -399,6 +460,22 @@ function ReplayAvatarFactory.Start(options)
 	end
 	Players.PlayerAdded:Connect(watchPlayer)
 	Players.PlayerRemoving:Connect(disconnectPlayer)
+	table.insert(workspaceConnections, Workspace.DescendantAdded:Connect(function(instance)
+		if instance:IsA("Model") then
+			watchNPCModel(instance)
+		end
+	end))
+
+	task.spawn(function()
+		ReplayAvatarFactory.PrewarmCurrentPlayers()
+	end)
+	task.spawn(function()
+		local stopAt = os.clock() + NPC_SCAN_SECONDS
+		while os.clock() < stopAt do
+			ReplayAvatarFactory.PrewarmNPCs()
+			task.wait(NPC_SCAN_INTERVAL_SECONDS)
+		end
+	end)
 end
 
 return table.freeze(ReplayAvatarFactory)

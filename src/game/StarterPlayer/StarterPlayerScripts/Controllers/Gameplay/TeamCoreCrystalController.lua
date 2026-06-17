@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local CRYSTAL_NAME = "Crystal"
 local ROTATION_SPEED_RADIANS = math.rad(168)
@@ -184,7 +185,11 @@ function TeamCoreCrystalController:OnStart()
 
 	tagAddedConnection = CollectionService:GetInstanceAddedSignal(RoundConfig.Tags.TeamCore):Connect(trackCore)
 	tagRemovedConnection = CollectionService:GetInstanceRemovedSignal(RoundConfig.Tags.TeamCore):Connect(untrackCore)
-	renderConnection = RunService.RenderStepped:Connect(stepCrystals)
+	renderConnection = RunService.RenderStepped:Connect(function(deltaTime)
+		local token = RuntimeProfiler.Begin("Client/TeamCoreCrystalController/Render")
+		stepCrystals(deltaTime)
+		RuntimeProfiler.End("Client/TeamCoreCrystalController/Render", token)
+	end)
 end
 
 function TeamCoreCrystalController:Destroy()

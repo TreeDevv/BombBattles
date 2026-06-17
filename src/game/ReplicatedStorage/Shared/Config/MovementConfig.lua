@@ -89,6 +89,7 @@ return table.freeze({
 		FallBrakeAcceleration = 140,
 		FallBrakeHardAcceleration = 240,
 		SoftAirSpeedCap = 68,
+		ActivationHorizontalSpeed = 30,
 		ForwardAirAcceleration = 80,
 		SideAirAcceleration = 150,
 		ReverseAirAcceleration = 220,

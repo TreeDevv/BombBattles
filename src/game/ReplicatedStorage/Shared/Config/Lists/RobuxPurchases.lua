@@ -4,6 +4,12 @@ local Purchases = {
 			price = 599,
 			id = 3364638365,
 		},
+		PremiumCrateRoll = {
+			displayName = "Premium Crate Roll",
+			price = 99,
+			id = 0,
+			crateId = "Premium",
+		},
 	},
 
 	Passes = {
@@ -18,7 +24,7 @@ local Purchases = {
 Purchases.ProductsById = {}
 for key, config in pairs(Purchases.Products) do
 	config.key = key
-	if config.id then
+	if config.id and config.id > 0 then
 		Purchases.ProductsById[config.id] = config
 	end
 end
@@ -26,7 +32,7 @@ end
 Purchases.PassesById = {}
 for key, config in pairs(Purchases.Passes) do
 	config.key = key
-	if config.id then
+	if config.id and config.id > 0 then
 		Purchases.PassesById[config.id] = config
 	end
 end

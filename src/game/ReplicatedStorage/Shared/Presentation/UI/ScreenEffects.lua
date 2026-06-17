@@ -6,6 +6,8 @@ local ScreenEffects = {}
 local activeVignette: ImageLabel? = nil
 local activeTween: Tween? = nil
 local activeFadeDelay: any? = nil
+local activeBlackOverlay: Frame? = nil
+local activeBlackTween: Tween? = nil
 
 local function getScreenGui(): ScreenGui?
 	local player = Players.LocalPlayer
@@ -59,6 +61,149 @@ local function getVignette(): ImageLabel?
 	activeVignette.ImageColor3 = Color3.fromRGB(0, 0, 0)
 	activeVignette.Parent = screenGui
 	return activeVignette
+end
+
+local function getBlackOverlay(): Frame?
+	if activeBlackOverlay and activeBlackOverlay.Parent then
+		return activeBlackOverlay
+	end
+
+	local screenGui = getScreenGui()
+	if not screenGui then
+		return nil
+	end
+
+	screenGui.DisplayOrder = math.max(screenGui.DisplayOrder, 1000)
+
+	local existing = screenGui:FindFirstChild("BlackFade")
+	if existing and existing:IsA("Frame") then
+		activeBlackOverlay = existing
+		return existing
+	end
+
+	local overlay = Instance.new("Frame")
+	overlay.Name = "BlackFade"
+	overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	overlay.BackgroundTransparency = 1
+	overlay.BorderSizePixel = 0
+	overlay.Position = UDim2.fromScale(0, 0)
+	overlay.Size = UDim2.fromScale(1, 1)
+	overlay.ZIndex = 1000
+	overlay.Visible = false
+	overlay.Parent = screenGui
+
+	activeBlackOverlay = overlay
+	return overlay
+end
+
+local function cancelBlackTween()
+	if activeBlackTween then
+		activeBlackTween:Cancel()
+		activeBlackTween = nil
+	end
+end
+
+function ScreenEffects.FadeToBlack(duration: number?): boolean
+	local overlay = getBlackOverlay()
+	if not overlay then
+		return false
+	end
+
+	cancelBlackTween()
+	overlay.Visible = true
+	overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+
+	local resolvedDuration = math.max(tonumber(duration) or 0.25, 0)
+	if resolvedDuration <= 0 then
+		overlay.BackgroundTransparency = 0
+		return true
+	end
+
+	activeBlackTween = TweenService:Create(
+		overlay,
+		TweenInfo.new(resolvedDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+		{ BackgroundTransparency = 0 }
+	)
+	activeBlackTween:Play()
+	return true
+end
+
+function ScreenEffects.FadeFromBlack(duration: number?): boolean
+	local overlay = getBlackOverlay()
+	if not overlay then
+		return false
+	end
+
+	cancelBlackTween()
+	local resolvedDuration = math.max(tonumber(duration) or 0.25, 0)
+	if resolvedDuration <= 0 then
+		overlay.BackgroundTransparency = 1
+		overlay.Visible = false
+		return true
+	end
+
+	overlay.Visible = true
+	activeBlackTween = TweenService:Create(
+		overlay,
+		TweenInfo.new(resolvedDuration, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+		{ BackgroundTransparency = 1 }
+	)
+	local tween = activeBlackTween
+	tween:Play()
+	tween.Completed:Once(function(playbackState)
+		if activeBlackTween == tween then
+			activeBlackTween = nil
+		end
+		if playbackState == Enum.PlaybackState.Completed and overlay.Parent and overlay.BackgroundTransparency >= 1 then
+			overlay.Visible = false
+		end
+	end)
+	return true
+end
+
+function ScreenEffects.HoldBlack(): boolean
+	local overlay = getBlackOverlay()
+	if not overlay then
+		return false
+	end
+
+	cancelBlackTween()
+	overlay.Visible = true
+	overlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	overlay.BackgroundTransparency = 0
+	return true
+end
+
+function ScreenEffects.ClearBlack(duration: number?): boolean
+	if typeof(duration) == "number" and duration > 0 then
+		local overlay = activeBlackOverlay
+		if not (overlay and overlay.Parent) then
+			local screenGui = getScreenGui()
+			local existing = screenGui and screenGui:FindFirstChild("BlackFade")
+			if existing and existing:IsA("Frame") then
+				activeBlackOverlay = existing
+			else
+				return false
+			end
+		end
+		return ScreenEffects.FadeFromBlack(duration)
+	end
+
+	local overlay = activeBlackOverlay
+	if not (overlay and overlay.Parent) then
+		local screenGui = getScreenGui()
+		local existing = screenGui and screenGui:FindFirstChild("BlackFade")
+		overlay = if existing and existing:IsA("Frame") then existing else nil
+		activeBlackOverlay = overlay
+	end
+	if not overlay then
+		return false
+	end
+
+	cancelBlackTween()
+	overlay.BackgroundTransparency = 1
+	overlay.Visible = false
+	return true
 end
 
 function ScreenEffects.FlashDark(duration: number, initialTransparency: number?)

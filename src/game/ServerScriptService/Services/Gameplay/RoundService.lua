@@ -8,9 +8,12 @@ local Teams = game:GetService("Teams")
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local DataService = require(ServerScriptService.Services.DataService)
 local QuestService = require(ServerScriptService.Services.QuestService)
+local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatants)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 
 local TEAM_ORDER = { RoundConfig.Teams.Red.name, RoundConfig.Teams.Blue.name }
@@ -31,6 +34,8 @@ local AFK_MARKER_NAME = "AFK"
 local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
 local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
 local ASSIST_WINDOW_SECONDS = 10
+local RESPAWN_LOAD_VERIFY_DELAY_SECONDS = 0.65
+local RESPAWN_LOAD_MAX_ATTEMPTS = 3
 local CASH_KEY = "cash"
 local DEBUG_REPLAY_EVENTS = false
 local DEBUG_DEATH_FLOW = RunService:IsStudio()
@@ -185,98 +190,31 @@ local function writeStateValue(path: { any }, value: any)
 end
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
+end
 
-	local folder = Instance.new("Folder")
-	folder.Name = REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+local function ensureRoundRemote(name: string): RemoteEvent
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), name)
 end
 
 local function ensureVoteRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(SUBMIT_MAP_VOTE_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = SUBMIT_MAP_VOTE_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return ensureRoundRemote(SUBMIT_MAP_VOTE_REMOTE_NAME)
 end
 
 local function ensureSetAFKRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(SET_AFK_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = SET_AFK_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return ensureRoundRemote(SET_AFK_REMOTE_NAME)
 end
 
 local function ensureReportPreferredInputRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(REPORT_PREFERRED_INPUT_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = REPORT_PREFERRED_INPUT_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return ensureRoundRemote(REPORT_PREFERRED_INPUT_REMOTE_NAME)
 end
 
 local function ensureKillFeedRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(KILL_FEED_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = KILL_FEED_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return ensureRoundRemote(KILL_FEED_REMOTE_NAME)
 end
 
 local function ensureDestructionScoreRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(DESTRUCTION_SCORE_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = DESTRUCTION_SCORE_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return ensureRoundRemote(DESTRUCTION_SCORE_REMOTE_NAME)
 end
 
 local function setReplicaValue(path: { any }, value: any)
@@ -687,11 +625,12 @@ end
 
 local function fireKillFeedElimination(eliminatorKey: string, victim: Player)
 	local killer = getPlayerByKey(eliminatorKey)
-	if not killer then
+	local botKiller = if not killer then StudioAICombatants.GetOwnerIdentity({ studioAIBot = true, UserId = tonumber(eliminatorKey) }) else nil
+	if not killer and not botKiller then
 		return
 	end
 
-	local killerTeam = getTrackedTeamName(killer)
+	local killerTeam = if killer then getTrackedTeamName(killer) else botKiller.teamName
 	local victimTeam = getTrackedTeamName(victim)
 	if not killerTeam or not victimTeam or killerTeam == victimTeam then
 		return
@@ -705,10 +644,11 @@ local function fireKillFeedElimination(eliminatorKey: string, victim: Player)
 
 	remote:FireAllClients({
 		roundId = roundId,
-		killerUserId = killer.UserId,
-		killerName = killer.Name,
-		killerDisplayName = killer.DisplayName,
+		killerUserId = if killer then killer.UserId else botKiller.userId,
+		killerName = if killer then killer.Name else botKiller.name,
+		killerDisplayName = if killer then killer.DisplayName else botKiller.displayName,
 		killerTeam = killerTeam,
+		killerIsNPC = killer == nil,
 		victimUserId = victim.UserId,
 		victimName = victim.Name,
 		victimDisplayName = victim.DisplayName,
@@ -737,23 +677,39 @@ local function creditScoreboardDeath(victim: Player)
 		end
 
 		if eliminatorKey then
-			getScoreboardStatsFor(eliminatorKey).eliminations += 1
 			eliminatorPlayer = getPlayerByKey(eliminatorKey)
+			if eliminatorPlayer then
+				getScoreboardStatsFor(eliminatorKey).eliminations += 1
+			end
 			fireKillFeedElimination(eliminatorKey, victim)
 		end
 
 		for attackerKey, contributor in pairs(contributors) do
-			if attackerKey ~= eliminatorKey and isRecentEnemyContributor(attackerKey, contributor, victim, currentTime) then
+			if
+				attackerKey ~= eliminatorKey
+				and getPlayerByKey(attackerKey)
+				and isRecentEnemyContributor(attackerKey, contributor, victim, currentTime)
+			then
 				getScoreboardStatsFor(attackerKey).assists += 1
 			end
 		end
 	end
 
+	local botEliminator = if not eliminatorPlayer and eliminatorKey
+		then StudioAICombatants.GetOwnerIdentity({ studioAIBot = true, UserId = tonumber(eliminatorKey) })
+		else nil
 	local playerKilledPayload = {
 		timestamp = currentTime,
 		roundId = roundId,
 		victimUserId = victim.UserId,
+		victimName = victim.Name,
+		victimDisplayName = victim.DisplayName,
+		victimTeam = getTrackedTeamName(victim),
 		killerUserId = if eliminatorKey then tonumber(eliminatorKey) else nil,
+		killerName = if eliminatorPlayer then eliminatorPlayer.Name elseif botEliminator then botEliminator.name else nil,
+		killerDisplayName = if eliminatorPlayer then eliminatorPlayer.DisplayName elseif botEliminator then botEliminator.displayName else nil,
+		killerTeam = if eliminatorPlayer then getTrackedTeamName(eliminatorPlayer) elseif botEliminator then botEliminator.teamName else nil,
+		killerIsNPC = botEliminator ~= nil,
 		sourceType = if eliminatorContributor then eliminatorContributor.sourceType else nil,
 		sourceId = if eliminatorContributor then eliminatorContributor.sourceId else nil,
 	}
@@ -765,6 +721,11 @@ local function creditScoreboardDeath(victim: Player)
 	recordReplayEvent("PlayerKilled", playerKilledPayload)
 	sendWorldText("PlayerKilled", eliminatorPlayer, victim, deathPosition, {
 		roundId = roundId,
+		killerUserId = playerKilledPayload.killerUserId,
+		killerName = playerKilledPayload.killerName,
+		killerDisplayName = playerKilledPayload.killerDisplayName,
+		killerTeam = playerKilledPayload.killerTeam,
+		killerIsNPC = playerKilledPayload.killerIsNPC,
 		sourceType = playerKilledPayload.sourceType,
 		sourceId = playerKilledPayload.sourceId,
 	})
@@ -875,6 +836,7 @@ local function clearActiveMap()
 	local active = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	if active then
 		active:Destroy()
+		DestructionService:InvalidateTargetCache("MapCleared")
 	end
 end
 
@@ -889,6 +851,7 @@ local function spawnActiveMap(mapId: string): Model?
 	local clone = template:Clone()
 	clone.Name = RoundConfig.ActiveMapName
 	clone.Parent = workspace
+	DestructionService:RebuildTargetCache("MapSpawned")
 	return clone
 end
 
@@ -1157,6 +1120,92 @@ local function teamHasRespawns(teamName: string?): boolean
 	end
 
 	return false
+end
+
+local function hasUsableCharacter(player: Player): boolean
+	local character = player.Character
+	if not character then
+		return false
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	return humanoid ~= nil and rootPart ~= nil and rootPart:IsA("BasePart")
+end
+
+local function safeLoadCharacter(player: Player, context: string): boolean
+	if player.Parent ~= Players then
+		debugDeathFlow("LoadCharacter skipped; player left", player.Name, context)
+		return false
+	end
+
+	local ok, err = pcall(function()
+		player:LoadCharacter()
+	end)
+	if not ok then
+		warn(("[RoundService] LoadCharacter failed for %s during %s: %s"):format(player.Name, context, tostring(err)))
+		return false
+	end
+
+	return true
+end
+
+local function shouldRetryRoundRespawn(player: Player, token: number): boolean
+	if respawnTokens[player] ~= token then
+		debugDeathFlow("Round respawn verify skipped; stale token", player.Name, token, respawnTokens[player])
+		return false
+	end
+	if player.Parent ~= Players then
+		debugDeathFlow("Round respawn verify skipped; player left", player.Name)
+		return false
+	end
+	if currentState ~= RoundStates.Active or not roundPlayers[player] or alivePlayers[player] ~= true then
+		debugDeathFlow(
+			"Round respawn verify skipped; state changed",
+			player.Name,
+			"state",
+			currentState,
+			"roundPlayer",
+			roundPlayers[player],
+			"alive",
+			alivePlayers[player]
+		)
+		return false
+	end
+	if not teamHasRespawns(playerTeams[player]) then
+		debugDeathFlow("Round respawn verify skipped; team respawns unavailable", player.Name, "team", tostring(playerTeams[player]))
+		return false
+	end
+	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+		debugDeathFlow("Round respawn verify skipped; RoundAlive changed", player.Name, player:GetAttribute(ROUND_ALIVE_ATTR))
+		return false
+	end
+
+	return true
+end
+
+local function verifyRoundRespawn(player: Player, token: number, attempt: number)
+	task.delay(RESPAWN_LOAD_VERIFY_DELAY_SECONDS, function()
+		if not shouldRetryRoundRespawn(player, token) then
+			return
+		end
+		if hasUsableCharacter(player) then
+			debugDeathFlow("Round respawn verified", player.Name, "attempt", attempt)
+			return
+		end
+		if attempt >= RESPAWN_LOAD_MAX_ATTEMPTS then
+			warn(("[RoundService] Round respawn did not produce a usable character for %s after %d attempts"):format(
+				player.Name,
+				attempt
+			))
+			return
+		end
+
+		local nextAttempt = attempt + 1
+		debugDeathFlow("Retrying round respawn LoadCharacter", player.Name, "attempt", nextAttempt)
+		safeLoadCharacter(player, "RoundRespawnRetry" .. tostring(nextAttempt))
+		verifyRoundRespawn(player, token, nextAttempt)
+	end)
 end
 
 local function disconnectCharacterConnections(player: Player)
@@ -1461,13 +1510,16 @@ local function respawnPlayerInRound(player: Player)
 		debugDeathFlow("Loading round respawn character", player.Name)
 		player:SetAttribute(ROUND_ALIVE_ATTR, true)
 		player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
-		player:LoadCharacter()
+		safeLoadCharacter(player, "RoundRespawn")
+		verifyRoundRespawn(player, token, 1)
 	end)
 end
 
 local function handlePlayerDeath(player: Player)
+	local token = RuntimeProfiler.Begin("Server/Round/Death/HandlePlayerDeath")
 	if not alivePlayers[player] then
 		debugDeathFlow("handlePlayerDeath ignored; player not alive", player.Name)
+		RuntimeProfiler.End("Server/Round/Death/HandlePlayerDeath", token)
 		return
 	end
 
@@ -1479,13 +1531,20 @@ local function handlePlayerDeath(player: Player)
 		"hasRespawns",
 		teamHasRespawns(playerTeams[player])
 	)
-	creditScoreboardDeath(player)
 
+	local scoreboardToken = RuntimeProfiler.Begin("Server/Round/Death/CreditScoreboard")
+	creditScoreboardDeath(player)
+	RuntimeProfiler.End("Server/Round/Death/CreditScoreboard", scoreboardToken)
+
+	local outcomeToken = RuntimeProfiler.Begin("Server/Round/Death/RespawnOrEliminate")
 	if teamHasRespawns(playerTeams[player]) then
 		respawnPlayerInRound(player)
 	else
 		eliminatePlayer(player)
 	end
+	RuntimeProfiler.End("Server/Round/Death/RespawnOrEliminate", outcomeToken)
+	RuntimeProfiler.Count("Server/Round/Death/Handled")
+	RuntimeProfiler.End("Server/Round/Death/HandlePlayerDeath", token)
 end
 
 local function bindCharacter(player: Player)
@@ -1499,10 +1558,13 @@ local function bindCharacter(player: Player)
 		end
 
 		table.insert(characterConnections[player], humanoid.Died:Connect(function()
+			local deathToken = RuntimeProfiler.Begin("Server/Round/Death/HumanoidDied")
+			RuntimeProfiler.Count("Server/Round/Death/HumanoidDiedEvents")
 			if currentState == RoundStates.Active then
 				debugDeathFlow("Humanoid.Died", player.Name, "roundId", roundId, "health", humanoid.Health)
 				handlePlayerDeath(player)
 			end
+			RuntimeProfiler.End("Server/Round/Death/HumanoidDied", deathToken)
 		end))
 	end
 
@@ -1887,7 +1949,7 @@ local function cancelToWaiting(reason: string)
 	setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
 end
 
-local function runRoundLoop()
+function RoundService:_runRoundLoop()
 	while running do
 		if pendingAdminReset and not pendingAdminForceStartMapId then
 			resetRound()
@@ -1996,65 +2058,41 @@ local function runRoundLoop()
 	end
 end
 
-local function onSubmitMapVote(player: Player, choiceId: any)
-	if currentState ~= RoundStates.Intermission then
-		return
-	end
-	if not votingOpen then
-		return
-	end
-	if isPlayerAFK(player) then
-		return
-	end
-	if typeof(choiceId) ~= "string" then
-		return
-	end
-	if playerVotes[player] == choiceId then
-		return
-	end
-	if not isCurrentChoice(choiceId) then
-		return
-	end
-
-	clearPlayerVote(player)
-	playerVotes[player] = choiceId
-	voteCounts[choiceId] = (voteCounts[choiceId] or 0) + 1
-	syncVoteChoices()
-end
-
-local function onSetAFK(player: Player, payload: any)
-	if typeof(payload) ~= "table" then
-		return
-	end
-
-	local requestedAFK = payload.afk
-	if typeof(requestedAFK) ~= "boolean" then
-		return
-	end
-
-	setPlayerAFK(player, requestedAFK, normalizeAFKSource(payload.source))
-end
-
-local function onReportPreferredInput(player: Player, preferredInput: any)
-	RoundService:ReportPreferredInput(player, preferredInput)
-end
-
-function RoundService:RecordPlayerDamage(attacker: Player, target: Player, damage: number, sourceContext)
+function RoundService:RecordPlayerDamage(attacker: any, target: Player, damage: number, sourceContext)
 	if currentState ~= RoundStates.Active then
 		return
 	end
-	if not (attacker and attacker.Parent == Players and target and target.Parent == Players) then
+	if not (target and target.Parent == Players) then
 		return
 	end
-	if attacker == target or typeof(damage) ~= "number" or damage ~= damage or damage <= 0 then
+	if typeof(damage) ~= "number" or damage ~= damage or damage <= 0 then
 		return
 	end
 
-	local attackerStats = getScoreboardStatsFor(attacker)
-	attackerStats.damage += damage
+	local attackerIdentity = nil
+	if typeof(attacker) == "Instance" and attacker:IsA("Player") and attacker.Parent == Players then
+		if attacker == target then
+			return
+		end
+		attackerIdentity = {
+			userId = attacker.UserId,
+			teamName = getTrackedTeamName(attacker),
+			isPlayer = true,
+		}
+	elseif StudioAICombatants.IsBotOwner(attacker) then
+		attackerIdentity = StudioAICombatants.GetOwnerIdentity(attacker)
+	end
+	if not attackerIdentity or typeof(attackerIdentity.userId) ~= "number" then
+		return
+	end
+
+	if attackerIdentity.isPlayer then
+		local attackerStats = getScoreboardStatsFor(attacker)
+		attackerStats.damage += damage
+	end
 
 	local targetKey = getPlayerKey(target)
-	local attackerKey = getPlayerKey(attacker)
+	local attackerKey = tostring(attackerIdentity.userId)
 	local contributors = recentDamageContributors[targetKey]
 	if not contributors then
 		contributors = {}
@@ -2063,7 +2101,7 @@ function RoundService:RecordPlayerDamage(attacker: Player, target: Player, damag
 
 	contributors[attackerKey] = {
 		damagedAt = workspace:GetServerTimeNow(),
-		teamName = getTrackedTeamName(attacker),
+		teamName = attackerIdentity.teamName,
 		sourceType = if typeof(sourceContext) == "table" and typeof(sourceContext.sourceType) == "string"
 			then sourceContext.sourceType
 			else nil,
@@ -2133,11 +2171,48 @@ function RoundService:OnStart()
 	end)
 	createGameReplica()
 	submitMapVoteRemote = ensureVoteRemote()
-	submitMapVoteRemote.OnServerEvent:Connect(onSubmitMapVote)
+	submitMapVoteRemote.OnServerEvent:Connect(function(player: Player, choiceId: any)
+		if currentState ~= RoundStates.Intermission then
+			return
+		end
+		if not votingOpen then
+			return
+		end
+		if isPlayerAFK(player) then
+			return
+		end
+		if typeof(choiceId) ~= "string" then
+			return
+		end
+		if playerVotes[player] == choiceId then
+			return
+		end
+		if not isCurrentChoice(choiceId) then
+			return
+		end
+
+		clearPlayerVote(player)
+		playerVotes[player] = choiceId
+		voteCounts[choiceId] = (voteCounts[choiceId] or 0) + 1
+		syncVoteChoices()
+	end)
 	setAFKRemote = ensureSetAFKRemote()
-	setAFKRemote.OnServerEvent:Connect(onSetAFK)
+	setAFKRemote.OnServerEvent:Connect(function(player: Player, payload: any)
+		if typeof(payload) ~= "table" then
+			return
+		end
+
+		local requestedAFK = payload.afk
+		if typeof(requestedAFK) ~= "boolean" then
+			return
+		end
+
+		setPlayerAFK(player, requestedAFK, normalizeAFKSource(payload.source))
+	end)
 	reportPreferredInputRemote = ensureReportPreferredInputRemote()
-	reportPreferredInputRemote.OnServerEvent:Connect(onReportPreferredInput)
+	reportPreferredInputRemote.OnServerEvent:Connect(function(player: Player, preferredInput: any)
+		RoundService:ReportPreferredInput(player, preferredInput)
+	end)
 	killFeedRemote = ensureKillFeedRemote()
 	destructionScoreRemote = ensureDestructionScoreRemote()
 
@@ -2158,7 +2233,9 @@ function RoundService:OnStart()
 
 	if not running then
 		running = true
-		task.spawn(runRoundLoop)
+		task.spawn(function()
+			RoundService:_runRoundLoop()
+		end)
 	end
 end
 
@@ -2408,7 +2485,7 @@ function RoundService:AdminRespawnPlayer(player: Player): (boolean, string?)
 
 	cancelScheduledRespawn(player)
 	if currentState ~= RoundStates.Active or not roundPlayers[player] then
-		player:LoadCharacter()
+		safeLoadCharacter(player, "AdminRespawnLobby")
 		task.defer(function()
 			if player.Parent == Players then
 				movePlayerToLobby(player)
@@ -2425,7 +2502,9 @@ function RoundService:AdminRespawnPlayer(player: Player): (boolean, string?)
 	syncAliveCounts()
 	task.defer(function()
 		if player.Parent == Players then
-			player:LoadCharacter()
+			local token = bumpRespawnToken(player)
+			safeLoadCharacter(player, "AdminRespawnRound")
+			verifyRoundRespawn(player, token, 1)
 		end
 	end)
 	return true, "Respawned " .. player.Name .. " in round"

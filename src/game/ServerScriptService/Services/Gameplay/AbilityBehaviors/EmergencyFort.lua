@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
@@ -92,8 +93,8 @@ local function getActiveMap(): Instance?
 	return if map and map:IsA("Model") then map else nil
 end
 
-local function getFortFolder(): Folder
-	local parent = getActiveMap() or workspace
+local function getFortFolder(player: Player): Folder
+	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
 	local abilityFolder = parent:FindFirstChild(FOLDER_NAME)
 	if not (abilityFolder and abilityFolder:IsA("Folder")) then
 		if abilityFolder then
@@ -175,8 +176,8 @@ local function findFloorBelow(player: Player, rootPart: BasePart, definition: Ab
 		return nil
 	end
 
-	local activeMap = getActiveMap()
-	if activeMap and not hit.Instance:IsDescendantOf(activeMap) then
+	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
+	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
 		return nil
 	end
 
@@ -396,7 +397,7 @@ function EmergencyFort.OnActivate(context: ServerActivateContext): AbilityActiva
 	local records = prepareGrowth(fort, definition)
 	applyFortHealth(fort, definition)
 	tagFort(fort)
-	fort.Parent = getFortFolder()
+	fort.Parent = getFortFolder(context.player)
 	trackFort(context.player, fort)
 	growFort(records, definition)
 

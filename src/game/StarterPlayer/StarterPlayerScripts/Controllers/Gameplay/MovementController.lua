@@ -7,6 +7,8 @@ local UserInputService = game:GetService("UserInputService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local MovementConfig = require(ReplicatedStorage.Shared.Config.MovementConfig)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local MovementMath = require(script.Parent:WaitForChild("MovementMath"))
 
 local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesMovementController"
@@ -176,31 +178,10 @@ local function getControls(): Controls?
 	return module:GetControls()
 end
 
-local function flattenDirection(direction: Vector3): Vector3
-	local flat = Vector3.new(direction.X, 0, direction.Z)
-	local magnitude = flat.Magnitude
-	if magnitude <= 0 then
-		return Vector3.zero
-	end
-	return flat / magnitude
-end
-
-local function flattenVelocity(velocity: Vector3): Vector3
-	return Vector3.new(velocity.X, 0, velocity.Z)
-end
-
-local function directionToYaw(direction: Vector3): number?
-	local flat = flattenDirection(direction)
-	if flat.Magnitude <= 0 then
-		return nil
-	end
-
-	return math.atan2(-flat.X, -flat.Z)
-end
-
-local function yawToDirection(yaw: number): Vector3
-	return Vector3.new(-math.sin(yaw), 0, -math.cos(yaw))
-end
+local flattenDirection = MovementMath.FlattenDirection
+local flattenVelocity = MovementMath.FlattenVelocity
+local directionToYaw = MovementMath.DirectionToYaw
+local yawToDirection = MovementMath.YawToDirection
 
 local function getTiltDegrees(cframe: CFrame): number
 	local upDot = math.clamp(cframe.UpVector:Dot(Vector3.yAxis), -1, 1)
@@ -313,23 +294,10 @@ local function getBombKnockbackUntil(character: Model?): number
 	return if typeof(knockbackUntil) == "number" then knockbackUntil else NEVER
 end
 
-local function exponentialAlpha(responsiveness: number, dt: number): number
-	return 1 - math.exp(-responsiveness * dt)
-end
-
-local function smoothstep(alpha: number): number
-	alpha = math.clamp(alpha, 0, 1)
-	return alpha * alpha * (3 - (2 * alpha))
-end
-
-local function smoothVector(current: Vector3, target: Vector3, responsiveness: number, dt: number): Vector3
-	return current:Lerp(target, exponentialAlpha(responsiveness, dt))
-end
-
-local function smoothYaw(current: number, target: number, responsiveness: number, dt: number): number
-	local delta = math.atan2(math.sin(target - current), math.cos(target - current))
-	return current + (delta * exponentialAlpha(responsiveness, dt))
-end
+local exponentialAlpha = MovementMath.ExponentialAlpha
+local smoothstep = MovementMath.Smoothstep
+local smoothVector = MovementMath.SmoothVector
+local smoothYaw = MovementMath.SmoothYaw
 
 local function getDescendantOfClass(parent: Instance, className: string): Instance?
 	for _, descendant in parent:GetDescendants() do
@@ -579,6 +547,13 @@ function MovementController:_ensureAirControlForce(): VectorForce?
 	return vectorForce
 end
 
+function MovementController:_resetGravityBootsAirControlState()
+	self._gravityBootsActive = false
+	self._gravityBootsAirSteeringScale = 1
+	self._gravityBootsAirBrakeScale = 1
+	self._gravityBootsAirGravityScaleMultiplier = 1
+end
+
 function MovementController:_setAirControlEnabled(enabled: boolean)
 	local vectorForce = self._airControlForce
 	if vectorForce then
@@ -599,6 +574,7 @@ function MovementController:_setAirControlEnabled(enabled: boolean)
 		self._airControlFallBrakeForce = Vector3.zero
 		self._airControlVerticalSpeed = 0
 		self._airControlHorizontalSpeed = 0
+		self:_resetGravityBootsAirControlState()
 	end
 end
 
@@ -657,6 +633,24 @@ function MovementController:_getGravityBootsAirControlBuff()
 		brakeScale = math.max(tonumber(definition.airBrakeScale) or 1, 0),
 		gravityScaleMultiplier = math.clamp(tonumber(definition.airGravityScaleMultiplier) or 1, 0, 1),
 	}
+end
+
+function MovementController:_shouldUseCustomAirControl(): boolean
+	if self:_getGravityBootsAirControlBuff() then
+		return true
+	end
+
+	local rootPart = self._rootPart
+	if not (rootPart and rootPart.Parent) then
+		return false
+	end
+
+	local activationHorizontalSpeed = tonumber(MovementConfig.AirControl.ActivationHorizontalSpeed) or 0
+	if activationHorizontalSpeed <= 0 then
+		return true
+	end
+
+	return flattenVelocity(rootPart.AssemblyLinearVelocity).Magnitude >= activationHorizontalSpeed
 end
 
 function MovementController:_setAirControlLaunchState(
@@ -783,10 +777,7 @@ function MovementController:_getAirControlMoveDirection(): (Vector3, number)
 end
 
 function MovementController:_calculateAirControlForce(dt: number)
-	self._gravityBootsActive = false
-	self._gravityBootsAirSteeringScale = 1
-	self._gravityBootsAirBrakeScale = 1
-	self._gravityBootsAirGravityScaleMultiplier = 1
+	self:_resetGravityBootsAirControlState()
 
 	local rootPart = self._rootPart
 	if not (rootPart and rootPart.Parent) then
@@ -948,6 +939,11 @@ end
 function MovementController:_updateAirControl(now: number, isGrounded: boolean, dt: number)
 	local humanoid = self._humanoid
 	if isGrounded or not humanoid or humanoid.Health <= 0 then
+		self:_setAirControlEnabled(false)
+		return
+	end
+
+	if not self:_shouldUseCustomAirControl() then
 		self:_setAirControlEnabled(false)
 		return
 	end
@@ -2556,7 +2552,9 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	character:SetAttribute(AIR_CONTROL_LAUNCHED_AT_ATTR, 0)
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function(dt)
+		local token = RuntimeProfiler.Begin("Client/MovementController/Render")
 		self:_step(dt)
+		RuntimeProfiler.End("Client/MovementController/Render", token)
 	end)
 end
 
@@ -2644,9 +2642,11 @@ function MovementController:OnStart()
 		self._heartbeatConnection:Disconnect()
 	end
 	self._heartbeatConnection = RunService.Heartbeat:Connect(function()
+		local token = RuntimeProfiler.Begin("Client/MovementController/Heartbeat")
 		local now = os.clock()
 		self:_updateSlideEntryBurst(now)
 		self:_updateSlideJumpBurst(now)
+		RuntimeProfiler.End("Client/MovementController/Heartbeat", token)
 	end)
 
 	if LocalPlayer.Character then

@@ -1,6 +1,8 @@
 local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local Utils = require(script.Utils)
 local Mesh = require(script.Mesh)
 local Cleanup = require(script.Cleanup)
@@ -406,6 +408,76 @@ local function getEffectiveSubtractRadius(target: BasePart, sphereRadius: number
 	return sphereRadius + transparentCollisionClearance
 end
 
+local function isTargetTerminal(targetSize: Vector3, minSize: number): boolean
+	return targetSize.X <= minSize and targetSize.Y <= minSize and targetSize.Z <= minSize
+end
+
+local function shouldExactCullTargets(options): boolean
+	return typeof(options) ~= "table" or options.exactCullTargets ~= false
+end
+
+local function shouldSkipTerminalNoop(options): boolean
+	return typeof(options) ~= "table" or options.skipTerminalNoop ~= false
+end
+
+local function shouldReuseTargetPart(options): boolean
+	return typeof(options) ~= "table" or options.reuseTargetPart ~= false
+end
+
+local function canReuseTargetPart(target: BasePart, options): boolean
+	return shouldReuseTargetPart(options) and #target:GetChildren() == 0
+end
+
+local function configureVoxelPart(
+	part: BasePart,
+	size: Vector3,
+	cframe: CFrame,
+	originalInfo,
+	sourceInfo,
+	randomColor: boolean,
+	generatedVoxelTag: string?,
+	needsTag: boolean
+)
+	part.Size = size
+	part.CFrame = cframe
+	part.Anchored = true
+	part.TopSurface = Enum.SurfaceType.Smooth
+	part.BottomSurface = Enum.SurfaceType.Smooth
+	part.Transparency = originalInfo.Transparency
+	part.Reflectance = originalInfo.Reflectance
+	part.CanCollide = originalInfo.CanCollide
+	part.CanTouch = originalInfo.CanTouch
+	part.CanQuery = originalInfo.CanQuery
+	part.CastShadow = originalInfo.CastShadow
+	part.CustomPhysicalProperties = originalInfo.CustomPhysicalProperties
+	local collisionGroup = originalInfo.CollisionGroup
+	if typeof(collisionGroup) == "string" and collisionGroup ~= "" then
+		pcall(function()
+			part.CollisionGroup = collisionGroup
+		end)
+	end
+
+	if randomColor then
+		part.BrickColor = BrickColor.Random()
+	else
+		part.Color = originalInfo.Color
+	end
+
+	part.Material = originalInfo.Material
+	part.Name = "MeshedVoxel"
+	part:SetAttribute(sourceInfo.HealthAttribute, sourceInfo.MaxHealth)
+	part:SetAttribute(sourceInfo.DamageMultiplierAttribute, sourceInfo.DamageMultiplier)
+	if needsTag and generatedVoxelTag then
+		CollectionService:AddTag(part, generatedVoxelTag)
+	end
+end
+
+local function isTargetOutsideSphere(target: BasePart, sphereCenterWorld: Vector3, sphereRadius: number, options): boolean
+	local localSphereCenter = target.CFrame:PointToObjectSpace(sphereCenterWorld)
+	local effectiveSphereRadius = getEffectiveSubtractRadius(target, sphereRadius, options)
+	return Utils.isAABBOutsideSphere(Vector3.zero, target.Size * 0.5, localSphereCenter, effectiveSphereRadius)
+end
+
 function VoxDestruct.clearTerrainDebugVisuals()
 	for _, part in pairs(VoxDestruct.TerrainDebugParts) do
 		part:Destroy()
@@ -483,6 +555,7 @@ function VoxDestruct.octreeMeshSubtraction(
 	outputFolder: Instance?,
 	options
 )
+	local totalToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/OctreeMeshSubtraction")
 	local sphereCenterWorld = sphereHitbox.Position
 	local sphereRadius = sphereHitbox.Size.X / 2
 
@@ -491,12 +564,37 @@ function VoxDestruct.octreeMeshSubtraction(
 
 	local localSphereCenter = targetCFrame:PointToObjectSpace(sphereCenterWorld)
 	local effectiveSphereRadius = getEffectiveSubtractRadius(target, sphereRadius, options)
+	local partitionToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/PartitionTarget")
 	local outsideBlocks, impactBlock = partitionTargetBlocks(targetSize, localSphereCenter, effectiveSphereRadius)
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/PartitionTarget", partitionToken)
 	local remainingBlocks = table.clone(outsideBlocks)
 	local removedBlocks = {}
 	local sourceInfo = getSourceInfo(target, generatedVoxelTag, terrainConfig)
 
-	if impactBlock then
+	if not impactBlock then
+		RuntimeProfiler.Count("Server/Destruction/Voxelizer/NoImpactSkipped")
+		RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
+		return {}, nil
+	end
+
+	if
+		isTargetTerminal(targetSize, minSize)
+		and shouldSkipTerminalNoop(options)
+		and not (typeof(options) == "table" and options.forceSubtract == true)
+	then
+		local block = {
+			center = impactBlock.center,
+			size = impactBlock.size,
+		}
+		if applyTerrainDamageToBlock(block, targetCFrame, sphereCenterWorld, effectiveSphereRadius, terrainConfig, sourceInfo) then
+			table.insert(removedBlocks, block)
+		else
+			RuntimeProfiler.Count("Server/Destruction/Voxelizer/TerminalNoopSkipped")
+			RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
+			return {}, nil
+		end
+	else
+		local subdivideToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/SubdivideImpact")
 		local impactRemaining, impactRemoved =
 			subdivideAABB(
 				impactBlock.center,
@@ -510,6 +608,7 @@ function VoxDestruct.octreeMeshSubtraction(
 				sourceInfo,
 				options
 			)
+		RuntimeProfiler.End("Server/Destruction/Voxelizer/SubdivideImpact", subdivideToken)
 		for _, block in ipairs(impactRemaining) do
 			table.insert(remainingBlocks, block)
 		end
@@ -518,7 +617,13 @@ function VoxDestruct.octreeMeshSubtraction(
 		end
 	end
 
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/OutsideBlocks", #outsideBlocks)
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/RemainingBlocksPreMerge", #remainingBlocks)
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/RemovedBlocks", #removedBlocks)
+	local mergeToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/GreedyMergeRemaining")
 	local mergedBlocks = Mesh.greedyMergeBlocks(remainingBlocks)
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/GreedyMergeRemaining", mergeToken)
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/MergedBlocks", #mergedBlocks)
 
 	local originalInfo = {
 		Size = target.Size,
@@ -546,6 +651,7 @@ function VoxDestruct.octreeMeshSubtraction(
 
 	local finalVoxels = {}
 
+	local uniformToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/BuildFinalVoxels")
 	if finalVoxelSize and finalVoxelSize > minSize then
 		for _, block in ipairs(mergedBlocks) do
 			local subVoxels = Cleanup.subdivideBlockToUniformVoxels(block, finalVoxelSize)
@@ -556,53 +662,46 @@ function VoxDestruct.octreeMeshSubtraction(
 	else
 		finalVoxels = mergedBlocks
 	end
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/BuildFinalVoxels", uniformToken)
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/FinalVoxelsBeforeCleanup", #finalVoxels)
 
+	local cleanupToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/CleanupVoxels")
 	finalVoxels = Cleanup.cleanupVoxels(finalVoxels, 0.5)
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/CleanupVoxels", cleanupToken)
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/FinalVoxelsAfterCleanup", #finalVoxels)
 
-	for _, voxel in ipairs(finalVoxels) do
+	local createToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/CreateVoxelParts")
+	local reusedTarget = false
+	for index, voxel in ipairs(finalVoxels) do
 		local worldCFrame = targetCFrame * CFrame.new(voxel.center)
 
-		local part = VoxDestruct.VoxelCache:GetPart()
-		part.Parent = nil
-		part.Size = voxel.size
-		part.CFrame = worldCFrame
-		part.Anchored = true
-		part.TopSurface = Enum.SurfaceType.Smooth
-		part.BottomSurface = Enum.SurfaceType.Smooth
-		part.Transparency = originalInfo.Transparency
-		part.Reflectance = originalInfo.Reflectance
-		part.CanCollide = originalInfo.CanCollide
-		part.CanTouch = originalInfo.CanTouch
-		part.CanQuery = originalInfo.CanQuery
-		part.CastShadow = originalInfo.CastShadow
-		part.CustomPhysicalProperties = originalInfo.CustomPhysicalProperties
-		local collisionGroup = originalInfo.CollisionGroup
-		if typeof(collisionGroup) == "string" and collisionGroup ~= "" then
-			pcall(function()
-				part.CollisionGroup = collisionGroup
-			end)
-		end
-
-		if randomColor then
-			part.BrickColor = BrickColor.Random()
+		local part = nil
+		local needsTag = true
+		if index == 1 and canReuseTargetPart(target, options) then
+			part = target
+			needsTag = generatedVoxelTag ~= nil and not CollectionService:HasTag(part, generatedVoxelTag)
+			reusedTarget = true
 		else
-			part.Color = originalInfo.Color
+			part = VoxDestruct.VoxelCache:GetPart()
+			part.Parent = nil
 		end
-
-		part.Material = originalInfo.Material
-		part.Name = "MeshedVoxel"
-		part:SetAttribute(sourceInfo.HealthAttribute, sourceInfo.MaxHealth)
-		part:SetAttribute(sourceInfo.DamageMultiplierAttribute, sourceInfo.DamageMultiplier)
-		if generatedVoxelTag then
-			CollectionService:AddTag(part, generatedVoxelTag)
-		end
+		configureVoxelPart(part, voxel.size, worldCFrame, originalInfo, sourceInfo, randomColor, generatedVoxelTag, needsTag)
 		part.Parent = meshedFolder
 	end
+	if reusedTarget then
+		RuntimeProfiler.Count("Server/Destruction/Voxelizer/ReusedTargetParts")
+	end
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/CreateVoxelParts", createToken)
 
-	target:Destroy()
+	if not reusedTarget then
+		local destroyToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/DestroyTarget")
+		target:Destroy()
+		RuntimeProfiler.End("Server/Destruction/Voxelizer/DestroyTarget", destroyToken)
+	end
 
 	local debrisPayload = nil
 	if debris then
+		local debrisToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/Debris")
 		if typeof(options) == "table" and options.forceSpawnDebris == true then
 			local maxDebrisParts = if typeof(options.maxDebrisParts) == "number" then math.max(math.floor(options.maxDebrisParts), 0) else math.huge
 			local spawnedDebrisParts = if typeof(options.spawnedDebrisParts) == "number" then math.max(math.floor(options.spawnedDebrisParts), 0) else 0
@@ -636,8 +735,10 @@ function VoxDestruct.octreeMeshSubtraction(
 		else
 			Debris.makeDebris(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
 		end
+		RuntimeProfiler.End("Server/Destruction/Voxelizer/Debris", debrisToken)
 	end
 
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
 	return finalVoxels, debrisPayload
 end
 
@@ -658,22 +759,43 @@ function VoxDestruct.subtractHitbox(
 	outputFolder: Instance?,
 	options
 )
+	local totalToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/SubtractHitbox")
 	VoxDestruct.VoxelCache = voxelCache
 
-	local overlapParams = OverlapParams.new()
-	if include and #include > 0 then
-		overlapParams.FilterDescendantsInstances = include
-		overlapParams.FilterType = Enum.RaycastFilterType.Include
+	local targets = nil
+	if typeof(options) == "table" and options.prefilteredTargets == true and include and #include > 0 then
+		targets = include
+		RuntimeProfiler.Count("Server/Destruction/Voxelizer/PrefilteredQueryBypassed")
 	else
-		overlapParams.FilterDescendantsInstances = { sphereHitbox, table.unpack(ignore) }
-		overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+		local paramsToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/BuildOverlapParams")
+		local overlapParams = OverlapParams.new()
+		if include and #include > 0 then
+			overlapParams.FilterDescendantsInstances = include
+			overlapParams.FilterType = Enum.RaycastFilterType.Include
+		else
+			overlapParams.FilterDescendantsInstances = { sphereHitbox, table.unpack(ignore) }
+			overlapParams.FilterType = Enum.RaycastFilterType.Exclude
+		end
+		RuntimeProfiler.End("Server/Destruction/Voxelizer/BuildOverlapParams", paramsToken)
+
+		local queryToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/GetPartBoundsInRadius")
+		targets = workspace:GetPartBoundsInRadius(sphereHitbox.Position, sphereHitbox.Size.X / 2, overlapParams)
+		RuntimeProfiler.End("Server/Destruction/Voxelizer/GetPartBoundsInRadius", queryToken)
 	end
 
 	local debrisPayloads = {}
 	local targetsHit = 0
-	local targets = workspace:GetPartBoundsInRadius(sphereHitbox.Position, sphereHitbox.Size.X / 2, overlapParams)
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/QueryTargets", #targets)
+
+	local targetsToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/ProcessTargets")
+	local sphereCenterWorld = sphereHitbox.Position
+	local sphereRadius = sphereHitbox.Size.X / 2
 	for _, object in ipairs(targets) do
 		if not object:IsA("BasePart") or object == sphereHitbox or object.Locked then
+			continue
+		end
+		if shouldExactCullTargets(options) and isTargetOutsideSphere(object, sphereCenterWorld, sphereRadius, options) then
+			RuntimeProfiler.Count("Server/Destruction/Voxelizer/ExactCullSkipped")
 			continue
 		end
 
@@ -697,9 +819,14 @@ function VoxDestruct.subtractHitbox(
 			table.insert(debrisPayloads, debrisPayload)
 		end
 	end
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/ProcessTargets", targetsToken)
 
+	local destroyHitboxToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/DestroyHitbox")
 	sphereHitbox:Destroy()
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/DestroyHitbox", destroyHitboxToken)
 	debrisPayloads.targetsHit = targetsHit
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/TargetsHit", targetsHit)
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/DebrisPayloads", #debrisPayloads)
 	if typeof(options) == "table" then
 		if typeof(options.spawnedDebrisParts) == "number" then
 			debrisPayloads.debrisPartsSpawned = options.spawnedDebrisParts
@@ -711,6 +838,7 @@ function VoxDestruct.subtractHitbox(
 			debrisPayloads.debrisSpawnAttempts = options.debrisSpawnAttempts
 		end
 	end
+	RuntimeProfiler.End("Server/Destruction/Voxelizer/SubtractHitbox", totalToken)
 	return debrisPayloads
 end
 

@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
@@ -84,8 +85,8 @@ local function getActiveMap(): Instance?
 	return if map and map:IsA("Model") then map else nil
 end
 
-local function getPlatformFolder(): Folder
-	local parent = getActiveMap() or workspace
+local function getPlatformFolder(player: Player): Folder
+	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
 	local abilityFolder = parent:FindFirstChild(FOLDER_NAME)
 	if not (abilityFolder and abilityFolder:IsA("Folder")) then
 		if abilityFolder then
@@ -698,7 +699,7 @@ function Platform.OnActivate(context: ServerActivateContext): AbilityActivationR
 
 	setStatus(context.player, "Activate", "", rootPart.Position)
 
-	local platformFolder = getPlatformFolder()
+	local platformFolder = getPlatformFolder(context.player)
 	local placement = findPlacement(context.player, rootPart, context.definition, platformFolder)
 	if not placement then
 		fireFailure(context.player, "NoSafePlacement", rootPart.Position)

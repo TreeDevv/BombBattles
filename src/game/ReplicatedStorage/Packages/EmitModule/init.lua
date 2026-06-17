@@ -82,11 +82,13 @@ Copyright (c) 2025 zilibobi
     or product names of the Licensor.
 ]]
 
-local RunService = game:GetService("RunService")
 local CollectionService = game:GetService("CollectionService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local logger = require(script.mod.logger)
 local utility = require(script.mod.utility)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local Beam = require(script.effects.beam)
 local Spin = require(script.effects.spin)
@@ -594,6 +596,7 @@ function api.deinit()
 end
 
 function api.emit(arg0, ...)
+  local profilerToken = RuntimeProfiler.Begin("VFX/Emit")
   if not api.setup then
     logger.error("not initialized")
   end
@@ -821,6 +824,8 @@ function api.emit(arg0, ...)
   else
     legacyScale = arg0
   end
+  RuntimeProfiler.Count("VFX/EmitCalls")
+  RuntimeProfiler.Count("VFX/EmitRootObjects", #list)
 
   local rootPromises = {}
 
@@ -896,6 +901,7 @@ function api.emit(arg0, ...)
     Finished = Promise.all(rootPromises),
   }
 
+  RuntimeProfiler.End("VFX/Emit", profilerToken)
   return env
 end
 

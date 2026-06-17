@@ -7,9 +7,11 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local ReplicaController = require(ReplicatedStorage.Packages.ReplicaController)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -21,7 +23,6 @@ local EFFECT_REMOTE_NAME = AbilityConfig.EffectRemoteName
 local ACTIVATE_MESSAGE = AbilityConfig.MessageTypes.Activate
 local RENDER_STEP_NAME = "BombBattlesAbilityButtons"
 local RENDER_PRIORITY = Enum.RenderPriority.Last.Value
-local ROUND_ALIVE_ATTR = "RoundAlive"
 local SIZE_TWEEN = TweenInfo.new(0.24, Enum.EasingStyle.Back)
 local FADE_TWEEN = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
 local HELD_GROW_TWEEN = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -171,10 +172,7 @@ local function getCharacterParts(): (Model?, Humanoid?, BasePart?)
 end
 
 local function isActivationAllowed(): boolean
-	if RoundController:Get("state") ~= RoundStates.Active then
-		return false
-	end
-	if LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+	if not CombatEligibility.IsClientCombatActive(LocalPlayer, RoundController:Get("state"), RoundStates.Active) then
 		return false
 	end
 
@@ -770,17 +768,28 @@ function AbilityController:_bindEffects()
 	end
 
 	self._effectConnection = self._effectRemote.OnClientEvent:Connect(function(effectName: string, payload: any)
+		local token = RuntimeProfiler.Begin("Client/AbilityController/EffectRemote")
+		RuntimeProfiler.Count("Client/AbilityController/Effects")
+		RuntimeProfiler.Count("Client/AbilityController/EffectPayloadWeight", RuntimeProfiler.EstimatePayloadWeight(payload, 128))
 		if typeof(payload) ~= "table" then
+			RuntimeProfiler.End("Client/AbilityController/EffectRemote", token)
 			return
 		end
 
 		local abilityId = payload.abilityId
+		if typeof(abilityId) == "string" and abilityId ~= "" then
+			RuntimeProfiler.Count("Client/AbilityController/Effect/" .. abilityId)
+		end
 		local behavior = if typeof(abilityId) == "string" then self._behaviors[abilityId] else nil
 		if not behavior and typeof(abilityId) == "string" then
 			local definition = AbilityConfig.GetDefinition(abilityId)
 			behavior = getClientBehavior(abilityId, definition)
 		end
 		if behavior and type(behavior.OnEffect) == "function" then
+			local behaviorLabel = if typeof(abilityId) == "string"
+				then "Client/AbilityController/BehaviorEffect/" .. abilityId
+				else "Client/AbilityController/BehaviorEffect/Unknown"
+			local behaviorToken = RuntimeProfiler.Begin(behaviorLabel)
 			local ok, err = pcall(function()
 				behavior.OnEffect({
 					effectName = effectName,
@@ -789,10 +798,12 @@ function AbilityController:_bindEffects()
 					controller = self,
 				})
 			end)
+			RuntimeProfiler.End(behaviorLabel, behaviorToken)
 			if not ok then
 				warn("[AbilityController] OnEffect failed for " .. abilityId .. ": " .. tostring(err))
 			end
 		end
+		RuntimeProfiler.End("Client/AbilityController/EffectRemote", token)
 	end)
 end
 
@@ -964,7 +975,9 @@ function AbilityController:OnStart()
 
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function()
+		local token = RuntimeProfiler.Begin("Client/AbilityController/Render")
 		self:_updateButtons()
+		RuntimeProfiler.End("Client/AbilityController/Render", token)
 	end)
 end
 

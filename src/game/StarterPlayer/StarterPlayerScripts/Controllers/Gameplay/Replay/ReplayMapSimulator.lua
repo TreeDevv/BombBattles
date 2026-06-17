@@ -1,8 +1,11 @@
 local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
 
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local VoxManager = require(ReplicatedStorage.Packages.VoxManager)
 local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debris)
 
@@ -11,11 +14,16 @@ local ReplayMapSimulator = {}
 local MAP_FOLDER_NAME = "ReplayMap"
 local CURRENT_VOXELS_FOLDER_NAME = "ReplayCurrentVoxels"
 local DEBRIS_FOLDER_NAME = "ReplayDebris"
+local SCENE_NAME = "_LocalReplayScene"
+local PREPARED_SCENE_NAME_PREFIX = "_LocalReplayPreparedScene"
+local LOCAL_REPLAY_ATTR = "BombBattlesLocalReplay"
 local REPLAY_ZONE_PIVOT = CFrame.new(30000, 8000, 30000)
 local MAX_DESTRUCTION_EVENTS = 260
 local MAX_DESTRUCTION_EVENTS_PER_STEP = 3
 local MAX_DEBRIS_PARTS_PER_EVENT = 36
 local MAX_DEBRIS_PARTS_PER_REPLAY = 180
+local MAX_PREPARED_MAP_TEMPLATES = 4
+local MAX_PREPARED_REUSABLE_SCENES = 1
 local DEBRIS_LIFETIME_SCALE = 0.85
 
 local UNSAFE_TAGS = {
@@ -23,6 +31,12 @@ local UNSAFE_TAGS = {
 	RoundConfig.Tags.TeamSpawn,
 	RoundConfig.Tags.LobbySpawn,
 }
+
+local preparedTemplateCache = {}
+local preparedTemplateOrder = {}
+local preparedSceneCache = {}
+local preparedSceneOrder = {}
+local preparedSceneInProgress = {}
 
 local function isFiniteNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
@@ -71,6 +85,71 @@ local function getMapTemplate(mapId: any): Instance?
 	return nil
 end
 
+local function getLocalSceneSuffix(): string
+	local localPlayer = Players.LocalPlayer
+	return tostring(if localPlayer then localPlayer.UserId else "client")
+end
+
+local function sanitizeMapIdForName(mapId: any): string
+	local raw = if typeof(mapId) == "string" and mapId ~= "" then mapId else "Unknown"
+	return string.gsub(raw, "[^%w_%-]", "_")
+end
+
+local function createPreparedScene(mapId: string): Folder
+	local scene = Instance.new("Folder")
+	scene.Name = ("%s_%s_%s"):format(PREPARED_SCENE_NAME_PREFIX, sanitizeMapIdForName(mapId), getLocalSceneSuffix())
+	scene:SetAttribute(LOCAL_REPLAY_ATTR, true)
+	scene:SetAttribute("ReplayMapId", mapId)
+	scene.Parent = Workspace
+	return scene
+end
+
+local function destroyPreparedSceneEntry(entry)
+	if not entry then
+		return
+	end
+	if entry.mapContext then
+		pcall(function()
+			ReplayMapSimulator.Destroy(entry.mapContext)
+		end)
+	end
+	if entry.scene then
+		entry.scene:Destroy()
+	end
+end
+
+local function getPreferredMapIds(limit: number?): { string }
+	local ids = {}
+	local seen = {}
+	local maxIds = math.max(math.floor(limit or MAX_PREPARED_REUSABLE_SCENES), 1)
+
+	for _, mapConfig in ipairs(RoundConfig.Maps or {}) do
+		local mapId = if typeof(mapConfig) == "table" then mapConfig.id else nil
+		if typeof(mapId) == "string" and mapId ~= "" and not seen[mapId] then
+			seen[mapId] = true
+			table.insert(ids, mapId)
+			if #ids >= maxIds then
+				return ids
+			end
+		end
+	end
+
+	local folder = getMapFolder()
+	if folder then
+		for _, child in ipairs(folder:GetChildren()) do
+			if (child:IsA("Model") or child:IsA("BasePart")) and not seen[child.Name] then
+				seen[child.Name] = true
+				table.insert(ids, child.Name)
+				if #ids >= maxIds then
+					return ids
+				end
+			end
+		end
+	end
+
+	return ids
+end
+
 local function pivotInstance(instance: Instance, cframe: CFrame)
 	if instance:IsA("Model") then
 		instance:PivotTo(cframe)
@@ -102,6 +181,100 @@ local function prepareMapClone(instance: Instance)
 		instance.CanTouch = false
 		instance.CanQuery = true
 	end
+end
+
+local function rememberPreparedTemplate(mapId: string, clone: Instance)
+	local existing = preparedTemplateCache[mapId]
+	if existing == clone then
+		return clone
+	end
+	if existing then
+		existing:Destroy()
+	end
+	if not preparedTemplateCache[mapId] then
+		table.insert(preparedTemplateOrder, mapId)
+	end
+	preparedTemplateCache[mapId] = clone
+	clone.Parent = nil
+
+	while #preparedTemplateOrder > MAX_PREPARED_MAP_TEMPLATES do
+		local oldMapId = table.remove(preparedTemplateOrder, 1)
+		local oldTemplate = oldMapId and preparedTemplateCache[oldMapId]
+		preparedTemplateCache[oldMapId] = nil
+		if oldTemplate then
+			oldTemplate:Destroy()
+		end
+	end
+	return clone
+end
+
+function ReplayMapSimulator.PrewarmTemplate(mapId: any): boolean
+	if typeof(mapId) ~= "string" or mapId == "" then
+		return false
+	end
+	local existing = preparedTemplateCache[mapId]
+	if existing and existing.Parent == nil then
+		return true
+	end
+
+	local template = getMapTemplate(mapId)
+	if not template then
+		return false
+	end
+
+	local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmTemplate")
+	local clone = template:Clone()
+	clone.Name = RoundConfig.ActiveMapName
+	prepareMapClone(clone)
+	rememberPreparedTemplate(mapId, clone)
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmedTemplates")
+	RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmTemplate", token)
+	return true
+end
+
+function ReplayMapSimulator.PrewarmTemplates()
+	local folder = getMapFolder()
+	if not folder then
+		return
+	end
+
+	task.spawn(function()
+		task.wait(1)
+		for _, child in ipairs(folder:GetChildren()) do
+			if child:IsA("Model") or child:IsA("BasePart") then
+				ReplayMapSimulator.PrewarmTemplate(child.Name)
+				task.wait()
+			end
+		end
+	end)
+end
+
+local function clonePreparedMapTemplate(mapId: any): Instance?
+	if typeof(mapId) ~= "string" or mapId == "" then
+		return nil
+	end
+
+	local preparedTemplate = preparedTemplateCache[mapId]
+	if preparedTemplate and preparedTemplate.Parent == nil then
+		local ok, clone = pcall(function()
+			return preparedTemplate:Clone()
+		end)
+		if ok and clone then
+			RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedTemplateClones")
+			return clone
+		end
+		preparedTemplateCache[mapId] = nil
+	end
+
+	local template = getMapTemplate(mapId)
+	if not template then
+		return nil
+	end
+	local clone = template:Clone()
+	clone.Name = RoundConfig.ActiveMapName
+	prepareMapClone(clone)
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/ColdTemplateClones")
+	return clone
 end
 
 local function sanitizeGeneratedVoxels(root: Instance?)
@@ -170,25 +343,22 @@ local function isReplayMapPart(part: BasePart, mapRoot: Instance): boolean
 	return true
 end
 
-local function collectDestructibleTargets(context): ({ BasePart }, boolean)
-	local mapRoot = context and context.mapRoot
-	if not mapRoot then
+local function buildStaticDestructibleTargets(context): ({ BasePart }, boolean)
+	local staticRoot = context and context.staticMapRoot
+	if not staticRoot then
 		return {}, false
 	end
 
 	local targets = {}
 	local seen = {}
-	for _, descendant in ipairs(mapRoot:GetDescendants()) do
+	for _, descendant in ipairs(staticRoot:GetDescendants()) do
 		if not descendant:IsA("BasePart") then
 			continue
 		end
-		if context.debrisFolder and descendant:IsDescendantOf(context.debrisFolder) then
+		if not isReplayMapPart(descendant, staticRoot) then
 			continue
 		end
-		if not isReplayMapPart(descendant, mapRoot) then
-			continue
-		end
-		if hasDestructibleTag(descendant, mapRoot) then
+		if hasDestructibleTag(descendant, staticRoot) then
 			addTarget(targets, seen, descendant)
 		end
 	end
@@ -197,16 +367,53 @@ local function collectDestructibleTargets(context): ({ BasePart }, boolean)
 		return targets, false
 	end
 
-	for _, descendant in ipairs(mapRoot:GetDescendants()) do
-		if context.debrisFolder and descendant:IsDescendantOf(context.debrisFolder) then
-			continue
-		end
-		if descendant:IsA("BasePart") and isReplayMapPart(descendant, mapRoot) then
+	for _, descendant in ipairs(staticRoot:GetDescendants()) do
+		if descendant:IsA("BasePart") and isReplayMapPart(descendant, staticRoot) then
 			addTarget(targets, seen, descendant)
 		end
 	end
 
 	return targets, true
+end
+
+local function addLiveCachedTargets(targets: { BasePart }, seen: { [BasePart]: boolean }, source)
+	for _, part in ipairs(source or {}) do
+		if part and part.Parent then
+			addTarget(targets, seen, part)
+		end
+	end
+end
+
+local function collectGeneratedVoxelTargets(context, targets: { BasePart }, seen: { [BasePart]: boolean })
+	local outputFolder = context and context.outputFolder
+	if not outputFolder then
+		return
+	end
+
+	for _, descendant in ipairs(outputFolder:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			addTarget(targets, seen, descendant)
+		end
+	end
+end
+
+local function collectDestructibleTargets(context): ({ BasePart }, boolean)
+	if not (context and context.mapRoot) then
+		return {}, false
+	end
+
+	if not context.staticTargets then
+		local staticTargets, usedFallbackTargets = buildStaticDestructibleTargets(context)
+		context.staticTargets = staticTargets
+		context.staticUsedFallbackTargets = usedFallbackTargets
+		context.staticTargetCount = #staticTargets
+	end
+
+	local targets = {}
+	local seen = {}
+	addLiveCachedTargets(targets, seen, context.staticTargets)
+	collectGeneratedVoxelTargets(context, targets, seen)
+	return targets, context.staticUsedFallbackTargets == true
 end
 
 function ReplayMapSimulator.TransformPoint(context, point: Vector3): Vector3
@@ -221,8 +428,17 @@ function ReplayMapSimulator.TransformCFrame(context, cframe: CFrame): CFrame
 	return context.replayPivot * context.livePivot:ToObjectSpace(cframe)
 end
 
-local function copyDebrisPayloadBlock(block)
-	if typeof(block) ~= "table" or typeof(block.center) ~= "Vector3" or typeof(block.size) ~= "Vector3" then
+local function copyDebrisPayloadBlock(context, block)
+	if typeof(block) ~= "table" or typeof(block.size) ~= "Vector3" then
+		return nil
+	end
+	if typeof(block.cframe) == "CFrame" then
+		return {
+			cframe = ReplayMapSimulator.TransformCFrame(context, block.cframe),
+			size = block.size,
+		}
+	end
+	if typeof(block.center) ~= "Vector3" then
 		return nil
 	end
 
@@ -245,7 +461,7 @@ local function transformDebrisPayload(context, payload)
 
 	local blocks = {}
 	for _, block in ipairs(payload.blocks) do
-		local copiedBlock = copyDebrisPayloadBlock(block)
+		local copiedBlock = copyDebrisPayloadBlock(context, block)
 		if copiedBlock then
 			table.insert(blocks, copiedBlock)
 		end
@@ -648,8 +864,8 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 	mapFolder.Parent = scene
 	context.mapFolder = mapFolder
 
-	local template = getMapTemplate(context.mapId)
-	if not template then
+	local clone = clonePreparedMapTemplate(context.mapId)
+	if not clone then
 		return context
 	end
 
@@ -657,11 +873,10 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 	VoxManager:setGeneratedVoxelTag(DestructionConfig.Tag)
 	VoxManager:setTerrainConfig(DestructionConfig)
 
-	local clone = template:Clone()
 	clone.Name = RoundConfig.ActiveMapName
-	prepareMapClone(clone)
 	pivotInstance(clone, context.replayPivot)
 	clone.Parent = mapFolder
+	context.staticMapRoot = clone
 
 	local outputFolder = Instance.new("Folder")
 	outputFolder.Name = CURRENT_VOXELS_FOLDER_NAME
@@ -675,6 +890,120 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 	context.outputFolder = outputFolder
 	context.debrisFolder = debrisFolder
 	return context
+end
+
+local function rememberPreparedScene(mapId: string, scene: Folder, mapContext)
+	local existing = preparedSceneCache[mapId]
+	if existing then
+		destroyPreparedSceneEntry(existing)
+	end
+	if not preparedSceneCache[mapId] then
+		table.insert(preparedSceneOrder, mapId)
+	end
+
+	preparedSceneCache[mapId] = {
+		mapId = mapId,
+		scene = scene,
+		mapContext = mapContext,
+	}
+
+	while #preparedSceneOrder > MAX_PREPARED_REUSABLE_SCENES do
+		local oldMapId = table.remove(preparedSceneOrder, 1)
+		if oldMapId ~= mapId then
+			local oldEntry = preparedSceneCache[oldMapId]
+			preparedSceneCache[oldMapId] = nil
+			destroyPreparedSceneEntry(oldEntry)
+		end
+	end
+end
+
+function ReplayMapSimulator.PrewarmReusableScene(mapId: any): boolean
+	if typeof(mapId) ~= "string" or mapId == "" then
+		return false
+	end
+	if preparedSceneCache[mapId] or preparedSceneInProgress[mapId] then
+		return true
+	end
+	if not getMapTemplate(mapId) then
+		return false
+	end
+
+	preparedSceneInProgress[mapId] = true
+	task.spawn(function()
+		task.wait()
+		local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmReusableScene")
+		local ok, err = pcall(function()
+			ReplayMapSimulator.PrewarmTemplate(mapId)
+			local scene = createPreparedScene(mapId)
+			local mapContext = ReplayMapSimulator.Create(scene, {
+				mapId = mapId,
+				mapPivot = CFrame.new(),
+			})
+			if not (mapContext and mapContext.mapRoot) then
+				scene:Destroy()
+				return
+			end
+			collectDestructibleTargets(mapContext)
+			rememberPreparedScene(mapId, scene, mapContext)
+			RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmedReusableScenes")
+		end)
+		preparedSceneInProgress[mapId] = nil
+		RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmReusableScene", token)
+		if not ok then
+			warn("[ReplayMapSimulator] Failed to prewarm reusable replay scene: " .. tostring(err))
+		end
+	end)
+	return true
+end
+
+function ReplayMapSimulator.PrewarmReusableScenes(limit: number?): number
+	local queued = 0
+	for _, mapId in ipairs(getPreferredMapIds(limit)) do
+		if ReplayMapSimulator.PrewarmReusableScene(mapId) then
+			queued += 1
+		end
+	end
+	if queued > 0 then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmQueued", queued)
+	end
+	return queued
+end
+
+function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
+	local mapId = if typeof(payload) == "table" then payload.mapId else nil
+	if typeof(mapId) ~= "string" or mapId == "" then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneMisses")
+		return nil, nil
+	end
+
+	local entry = preparedSceneCache[mapId]
+	if not (entry and entry.scene and entry.scene.Parent and entry.mapContext) then
+		preparedSceneCache[mapId] = nil
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneMisses")
+		return nil, nil
+	end
+
+	preparedSceneCache[mapId] = nil
+	for index, queuedMapId in ipairs(preparedSceneOrder) do
+		if queuedMapId == mapId then
+			table.remove(preparedSceneOrder, index)
+			break
+		end
+	end
+
+	local existing = Workspace:FindFirstChild(SCENE_NAME)
+	if existing and existing ~= entry.scene then
+		existing:Destroy()
+	end
+
+	entry.scene.Name = SCENE_NAME
+	entry.scene:SetAttribute(LOCAL_REPLAY_ATTR, true)
+	entry.mapContext.livePivot = if typeof(payload) == "table" and isFiniteCFrame(payload.mapPivot)
+		then payload.mapPivot
+		else CFrame.new()
+	entry.mapContext.scene = entry.scene
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneHits")
+	return entry.scene, entry.mapContext
 end
 
 function ReplayMapSimulator.Destroy(_context)

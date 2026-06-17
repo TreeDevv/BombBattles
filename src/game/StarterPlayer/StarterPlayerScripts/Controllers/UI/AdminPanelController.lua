@@ -4,6 +4,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local CrateRollController = require(script.Parent:WaitForChild("CrateRollController"))
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -23,6 +24,7 @@ AdminPanelController._speedInput = nil :: TextBox?
 AdminPanelController._jumpInput = nil :: TextBox?
 AdminPanelController._damageInput = nil :: TextBox?
 AdminPanelController._bombSkinInput = nil :: TextBox?
+AdminPanelController._leaderboardStatInput = nil :: TextBox?
 AdminPanelController._wipeInput = nil :: TextBox?
 AdminPanelController._players = {}
 AdminPanelController._maps = {}
@@ -90,6 +92,22 @@ local function parseNumber(textBox: TextBox?, fallback: number): number
 
 	local value = tonumber(textBox.Text)
 	return if value then value else fallback
+end
+
+local function parsePositiveInteger(textBox: TextBox?): number?
+	if not textBox then
+		return nil
+	end
+
+	local value = tonumber(textBox.Text)
+	if not value or value ~= value or value == math.huge or value == -math.huge then
+		return nil
+	end
+	if value <= 0 or value ~= math.floor(value) then
+		return nil
+	end
+
+	return value
 end
 
 function AdminPanelController:_invoke(request)
@@ -237,6 +255,25 @@ function AdminPanelController:_runCommand(command: string, payload)
 	else
 		self:_refresh()
 	end
+end
+
+function AdminPanelController:_runLeaderboardStatCommand(statName: string)
+	local amount = parsePositiveInteger(self._leaderboardStatInput)
+	if not amount then
+		self:_setStatus("Enter a positive whole-number stat amount", false)
+		return
+	end
+
+	local increments = {
+		kills = 0,
+		wins = 0,
+		destruction = 0,
+	}
+	increments[statName] = amount
+
+	self:_runCommand("data.addLeaderboardStats", {
+		increments = increments,
+	})
 end
 
 function AdminPanelController:_addLabel(parent: Instance, text: string, height: number?): TextLabel
@@ -516,6 +553,23 @@ function AdminPanelController:_buildPanel()
 			skinId = self._bombSkinInput and self._bombSkinInput.Text or BombSkinConfig.DefaultSkinId,
 		})
 	end)
+	self:_addButton(scroller, "Test Crate Roll", function()
+		local rawSkinId = self._bombSkinInput and self._bombSkinInput.Text or BombSkinConfig.DefaultSkinId
+		local skinId = BombSkinConfig.NormalizeSkinId(rawSkinId)
+		if skinId == "" then
+			skinId = BombSkinConfig.DefaultSkinId
+		end
+
+		local definition = BombSkinConfig.GetDefinition(skinId)
+		local played = CrateRollController:PlayRoll({
+			skinId = skinId,
+			displayName = definition and definition.displayName or skinId,
+			iconImage = definition and definition.iconImage or BombSkinConfig.GetIconImage(skinId),
+			rarity = "Legendary",
+		})
+
+		self:_setStatus(if played then "Testing crate roll: " .. skinId else "Crate roll UI unavailable", played)
+	end)
 	self:_addButton(scroller, "Demo All Explosions", function()
 		self:_runCommand("bomb.demoAllExplosions", {})
 	end)
@@ -539,6 +593,12 @@ function AdminPanelController:_buildPanel()
 	})
 
 	self:_addSection(scroller, "Data")
+	self._leaderboardStatInput = self:_addInputRow(scroller, "Stat amount", "1")
+	self:_addButtonRow(scroller, {
+		{ text = "+ Kills", activated = function() self:_runLeaderboardStatCommand("kills") end },
+		{ text = "+ Wins", activated = function() self:_runLeaderboardStatCommand("wins") end },
+		{ text = "+ Destruction", activated = function() self:_runLeaderboardStatCommand("destruction") end },
+	})
 	self._wipeInput = self:_addInputRow(scroller, "Confirm wipe", "")
 	self._wipeInput.PlaceholderText = AdminConfig.DataWipeConfirmation
 	self:_addButton(scroller, "Wipe Target Data", function()

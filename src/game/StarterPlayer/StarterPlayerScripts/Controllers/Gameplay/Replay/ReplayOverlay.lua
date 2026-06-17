@@ -102,9 +102,19 @@ function ReplayOverlay.Create(payload, options)
 	end
 
 	if payload.type == "POTGReplay" then
-		playerLabel.Text = "BY " .. getDisplayName(payload.playerUserId, options.getPlayerDisplayName)
+		local displayName = if typeof(payload.playerDisplayName) == "string" and payload.playerDisplayName ~= ""
+			then payload.playerDisplayName
+			elseif typeof(payload.playerName) == "string" and payload.playerName ~= ""
+			then payload.playerName
+			else getDisplayName(payload.playerUserId, options.getPlayerDisplayName)
+		playerLabel.Text = "BY " .. displayName
 	else
-		playerLabel.Text = "KILLED BY " .. getDisplayName(payload.killerUserId, options.getPlayerDisplayName)
+		local displayName = if typeof(payload.killerDisplayName) == "string" and payload.killerDisplayName ~= ""
+			then payload.killerDisplayName
+			elseif typeof(payload.killerName) == "string" and payload.killerName ~= ""
+			then payload.killerName
+			else getDisplayName(payload.killerUserId, options.getPlayerDisplayName)
+		playerLabel.Text = "KILLED BY " .. displayName
 	end
 
 	frame.Visible = true

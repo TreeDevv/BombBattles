@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
@@ -105,8 +106,8 @@ local function getActiveMap(): Instance?
 	return if map and map:IsA("Model") then map else nil
 end
 
-local function getFieldFolder(): Folder
-	local parent = getActiveMap() or workspace
+local function getFieldFolder(player: Player): Folder
+	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
 	local abilityFolder = parent:FindFirstChild(FOLDER_NAME)
 	if not (abilityFolder and abilityFolder:IsA("Folder")) then
 		if abilityFolder then
@@ -166,7 +167,7 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloor(rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
 	local distance = definition.placementDistance or 8
 	local rayUp = definition.floorRaycastUp or 8
 	local rayDown = definition.floorRaycastDown or 32
@@ -185,8 +186,8 @@ local function findFloor(rootPart: BasePart, definition: AbilityDefinition): Flo
 		return nil
 	end
 
-	local activeMap = getActiveMap()
-	if activeMap and not hit.Instance:IsDescendantOf(activeMap) then
+	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
+	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
 		return nil
 	end
 
@@ -209,13 +210,24 @@ local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing
 	return getBounds(clone)
 end
 
+local function alignCloneToRootPosition(clone: Instance, rootPart: BasePart): (CFrame, Vector3)
+	local rootCFrame = rootPart.CFrame
+	pivotTo(clone, rootCFrame)
+
+	local boundsCFrame = getBounds(clone)
+	local centeredCFrame = rootCFrame + (rootPart.Position - boundsCFrame.Position)
+	pivotTo(clone, centeredCFrame)
+
+	return getBounds(clone)
+end
+
 local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance): (FloorPlacement?, CFrame?, Vector3?)
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil, nil, nil
 	end
 
-	local floor = findFloor(rootPart, definition)
+	local floor = findFloor(player, rootPart, definition)
 	if not floor then
 		return nil, nil, nil
 	end
@@ -353,8 +365,8 @@ function GravityField.OnActivate(context: ServerActivateContext): AbilityActivat
 		return false
 	end
 
-	local placement, boundsCFrame, boundsSize = validatePlacement(context.player, definition, template)
-	if not (placement and boundsCFrame and boundsSize) then
+	local rootPart = getCharacterRoot(context.player)
+	if not rootPart then
 		return false
 	end
 
@@ -364,9 +376,13 @@ function GravityField.OnActivate(context: ServerActivateContext): AbilityActivat
 	field:SetAttribute(ID_ATTR, fieldId)
 	field:SetAttribute(OWNER_ATTR, context.player.UserId)
 	field:SetAttribute("AbilityId", context.abilityId)
-	alignCloneToFloor(field, placement.position, placement.facing)
+	local boundsCFrame, boundsSize = alignCloneToRootPosition(field, rootPart)
+	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
+		field:Destroy()
+		return false
+	end
 	prepareField(field)
-	field.Parent = getFieldFolder()
+	field.Parent = getFieldFolder(context.player)
 
 	local durationSeconds = math.max(tonumber(definition.durationSeconds) or 0, 0)
 	local activeEndsAt = context.now + durationSeconds

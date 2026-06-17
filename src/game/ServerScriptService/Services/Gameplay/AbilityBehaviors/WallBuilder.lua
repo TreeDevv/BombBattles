@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
@@ -89,8 +90,8 @@ local function getActiveMap(): Instance?
 	return if map and map:IsA("Model") then map else nil
 end
 
-local function getWallFolder(): Folder
-	local parent = getActiveMap() or workspace
+local function getWallFolder(player: Player): Folder
+	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
 	local abilityFolder = parent:FindFirstChild(FOLDER_NAME)
 	if not (abilityFolder and abilityFolder:IsA("Folder")) then
 		if abilityFolder then
@@ -169,8 +170,8 @@ local function findFloor(player: Player, rootPart: BasePart, definition: Ability
 		return nil
 	end
 
-	local activeMap = getActiveMap()
-	if activeMap and not hit.Instance:IsDescendantOf(activeMap) then
+	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
+	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
 		return nil
 	end
 
@@ -438,7 +439,7 @@ function WallBuilder.OnActivate(context: ServerActivateContext): AbilityActivati
 	local records = prepareGrowth(wall, definition)
 	local highlight = addHighlight(wall)
 	tagWall(wall)
-	wall.Parent = getWallFolder()
+	wall.Parent = getWallFolder(context.player)
 	trackWall(context.player, wall)
 	growWall(records, definition)
 

@@ -390,6 +390,27 @@ function ReplayAnimationDriver:Step(snapshot, cframe: CFrame?)
 	self:_updateBomb(state)
 end
 
+function ReplayAnimationDriver:Reset()
+	self:_disconnectBombHold()
+	self.lastGrounded = nil
+	self.lastSliding = false
+	self.lastJumpSerial = nil
+	self.bombHolding = false
+	self.bombReleasePending = false
+	self.bombHoldSerial += 1
+
+	for _, track in pairs(self.tracks) do
+		pcall(function()
+			track:Stop(0)
+		end)
+	end
+	for _, track in pairs(self.bombTracks) do
+		pcall(function()
+			track:Stop(0)
+		end)
+	end
+end
+
 function ReplayAnimationDriver:Destroy()
 	self:_disconnectBombHold()
 

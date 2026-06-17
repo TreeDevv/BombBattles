@@ -1,3 +1,7 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+
 local Loader = {}
 
 type PredicateFn = (module: ModuleScript) -> boolean
@@ -10,7 +14,10 @@ function Loader.LoadChildren(parent: Instance, predicate: PredicateFn?): { [stri
 				continue
 			end
 
+			local label = "Require/" .. child.Name
+			local token = RuntimeProfiler.Begin(label)
 			modules[child.Name] = require(child)
+			RuntimeProfiler.End(label, token)
 		end
 	end
 
@@ -25,7 +32,10 @@ function Loader.LoadDescendants(parent: Instance, predicate: PredicateFn?): { [s
 				continue
 			end
 
+			local label = "Require/" .. descendant.Name
+			local token = RuntimeProfiler.Begin(label)
 			modules[descendant.Name] = require(descendant)
+			RuntimeProfiler.End(label, token)
 		end
 	end
 
@@ -49,7 +59,10 @@ function Loader.SpawnAll(loadedModules: { [string]: any }, methodName: string, .
 		if type(method) == "function" then
 			task.spawn(function()
 				debug.setmemorycategory(name)
+				local label = "Lifecycle/" .. name .. "/" .. methodName
+				local token = RuntimeProfiler.Begin(label)
 				method(mod, table.unpack(args))
+				RuntimeProfiler.End(label, token)
 			end)
 		end
 	end

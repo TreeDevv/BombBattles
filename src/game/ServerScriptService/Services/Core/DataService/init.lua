@@ -366,6 +366,10 @@ function DataService:ReportLeaderboardRoundResults(results)
 	Leaderboards.RecordRoundResults(self, results)
 end
 
+function DataService:AdminAddLeaderboardStats(player: Player, increments): (boolean, string?)
+	return Leaderboards.AdminAddStats(self, player, increments)
+end
+
 local function findLoadedPlayerByUserId(userId: number): Player?
 	for player, profile in pairs(PROFILES) do
 		if player.UserId == userId and profile and profile:IsActive() then

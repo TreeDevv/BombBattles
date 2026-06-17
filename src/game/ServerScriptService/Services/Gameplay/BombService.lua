@@ -7,10 +7,14 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
+local BombDamage = require(ReplicatedStorage.Shared.Bombs.BombDamage)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
@@ -19,6 +23,7 @@ local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local EmoteService = require(ServerScriptService.Services.EmoteService)
 local RoundService = require(ServerScriptService.Services.RoundService)
+local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatants)
 
 local REMOTES_FOLDER_NAME = "Remotes"
 local BEGIN_REMOTE_NAME = "BeginBombCook"
@@ -156,44 +161,12 @@ local function sendWorldText(methodName: string, ...)
 	end, ...)
 end
 
-local function isStudioBombTeamProtectionBypassEnabled(): boolean
-	if not RunService:IsStudio() then
-		return false
-	end
-
-	local studioTesting = RoundConfig.StudioTesting
-	return studioTesting ~= nil and studioTesting.AllowBombTeamProtectionBypass == true
-end
-
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
 end
 
 local function ensureRemote(name: string): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(name)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = name
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), name)
 end
 
 local function fireEffect(effectName: string, payload)
@@ -262,15 +235,11 @@ local function getOwnerUserId(owner: any): number
 end
 
 local function isStudioAIBotOwner(owner: any): boolean
-	return RunService:IsStudio()
-		and typeof(owner) == "table"
-		and owner.studioAIBot == true
-		and typeof(owner.UserId) == "number"
-		and typeof(owner.Name) == "string"
+	return StudioAICombatants.IsBotOwner(owner)
 end
 
 local function isActivePlayer(player: Player): boolean
-	return player.Parent == Players and RoundService:IsPlayerActive(player)
+	return player.Parent == Players and CombatEligibility.IsCombatActive(player, RoundService)
 end
 
 local function isActiveBombOwner(owner: any): boolean
@@ -449,30 +418,25 @@ local function createProjectileId(owner: any): string
 	return string.format("%d:%d", getOwnerUserId(owner), nextProjectileId)
 end
 
-local function getDamageForDistance(
-	distance: number,
-	innerRadius: number,
-	nearRadius: number,
-	outerRadius: number,
-	directDamage: number,
-	nearMax: number,
-	nearMin: number,
-	outerMax: number,
-	outerMin: number
-): number
-	if distance <= innerRadius then
-		return directDamage
-	end
-	if distance <= nearRadius then
-		local alpha = (distance - innerRadius) / math.max(nearRadius - innerRadius, 0.001)
-		return nearMax + (nearMin - nearMax) * alpha
-	end
-	if distance <= outerRadius then
-		local alpha = (distance - nearRadius) / math.max(outerRadius - nearRadius, 0.001)
-		return outerMax + (outerMin - outerMax) * alpha
+local function getClientProjectileId(owner: any, targetPayload: any): string?
+	if typeof(targetPayload) ~= "table" then
+		return nil
 	end
 
-	return 0
+	local projectileId = targetPayload.clientProjectileId
+	if typeof(projectileId) ~= "string" or #projectileId > 64 then
+		return nil
+	end
+
+	local expectedPrefix = "Client_" .. tostring(getOwnerUserId(owner)) .. "_"
+	if string.sub(projectileId, 1, #expectedPrefix) ~= expectedPrefix then
+		return nil
+	end
+	if not string.match(projectileId, "^Client_%d+_%d+$") then
+		return nil
+	end
+
+	return projectileId
 end
 
 local function getInstancePosition(instance: Instance): Vector3?
@@ -626,12 +590,14 @@ local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConf
 end
 
 local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
+	local token = RuntimeProfiler.Begin("Server/BombService/DamageEnemyPlayers")
 	local ownerTeam = getTeamName(owner)
 	local ownerUserId = getOwnerUserId(owner)
 	local hitUserIds = {}
 	local killedUserIds = {}
 	local baseDamageMultiplier = readNonNegativeNumber(damageMultiplier, 1)
 
+	local playersToken = RuntimeProfiler.Begin("Server/BombService/DamageEnemyPlayers/Players")
 	for _, player in ipairs(Players:GetPlayers()) do
 		if isPlayerOwner(owner) and player == owner then
 			continue
@@ -646,17 +612,7 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 		end
 
 		local distance = (rootPart.Position - origin).Magnitude
-		local damage = getDamageForDistance(
-			distance,
-			explosionConfig.innerRadius,
-			explosionConfig.nearRadius,
-			explosionConfig.outerRadius,
-			explosionConfig.playerDirectDamage,
-			explosionConfig.playerNearDamageMax,
-			explosionConfig.playerNearDamageMin,
-			explosionConfig.playerOuterDamageMax,
-			explosionConfig.playerOuterDamageMin
-		)
+		local damage = BombDamage.GetPlayerDamageForDistance(distance, explosionConfig)
 		damage = damage * baseDamageMultiplier
 		if damage <= 0 then
 			continue
@@ -689,19 +645,23 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 		if hookResult.skipDamage ~= true and damage > 0 then
 			local healthBefore = humanoid.Health
 			local appliedDamage = math.min(damage, healthBefore)
-			if isPlayerOwner(owner) then
+			if isPlayerOwner(owner) or isStudioAIBotOwner(owner) then
 				RoundService:RecordPlayerDamage(owner, player, appliedDamage, {
 					sourceType = "Bomb",
 					sourceId = sourceId,
 				})
 			end
+			local takeDamageToken = RuntimeProfiler.Begin("Server/BombService/DamageEnemyPlayers/TakeDamage")
 			humanoid:TakeDamage(damage)
+			RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/TakeDamage", takeDamageToken)
 			local healthAfter = humanoid.Health
 
 			table.insert(hitUserIds, player.UserId)
 			if healthBefore > 0 and healthAfter <= 0 then
 				table.insert(killedUserIds, player.UserId)
+				RuntimeProfiler.Count("Server/BombService/DeathsFromPlayerDamage")
 			end
+			local replayToken = RuntimeProfiler.Begin("Server/BombService/DamageEnemyPlayers/RecordDamageReplay")
 			recordReplayEvent("PlayerDamaged", {
 				victimUserId = player.UserId,
 				attackerUserId = ownerUserId,
@@ -710,6 +670,7 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 				sourceId = sourceId,
 				victimHealthAfter = healthAfter,
 			})
+			RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/RecordDamageReplay", replayToken)
 			sendWorldText("PlayerDamaged", owner, player, appliedDamage, rootPart.Position, {
 				sourceType = "Bomb",
 				sourceId = sourceId,
@@ -720,14 +681,53 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 			applyKnockback(character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)
 		end
 	end
+	RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/Players", playersToken)
 
+	local botsToken = RuntimeProfiler.Begin("Server/BombService/DamageEnemyPlayers/Bots")
+	for _, bot in ipairs(StudioAICombatants.GetAliveBots({
+		enemyOfTeam = ownerTeam,
+		excludeUserId = ownerUserId,
+	})) do
+		local character = bot.model
+		local humanoid = bot.humanoid
+		local rootPart = bot.rootPart
+		if not (character and humanoid and rootPart and humanoid.Health > 0) then
+			continue
+		end
+
+		local distance = (rootPart.Position - origin).Magnitude
+		local damage = BombDamage.GetPlayerDamageForDistance(distance, explosionConfig)
+		damage = damage * baseDamageMultiplier
+		if damage <= 0 then
+			continue
+		end
+
+		local botDamageToken = RuntimeProfiler.Begin("Server/BombService/DamageEnemyPlayers/BotApplyDamage")
+		local appliedDamage, killed = StudioAICombatants.ApplyDamage(owner, bot, damage, {
+			sourceType = "Bomb",
+			sourceId = sourceId,
+		})
+		RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/BotApplyDamage", botDamageToken)
+		if appliedDamage > 0 then
+			table.insert(hitUserIds, bot.userId)
+			if killed then
+				table.insert(killedUserIds, bot.userId)
+				RuntimeProfiler.Count("Server/BombService/DeathsFromBotDamage")
+			end
+		end
+		applyKnockback(character, rootPart, origin, distance, 1, explosionConfig)
+	end
+	RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/Bots", botsToken)
+
+	RuntimeProfiler.Count("Server/BombService/DamageEnemyPlayersHits", #hitUserIds)
+	RuntimeProfiler.Count("Server/BombService/DamageEnemyPlayersKills", #killedUserIds)
+	RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers", token)
 	return hitUserIds, killedUserIds
 end
 
 local function damageEnemyAnchors(owner: any, origin: Vector3, sourceId: string?, damageMultiplier: number?, explosionConfig)
 	local ownerTeam = getTeamName(owner)
 	local ownerUserId = getOwnerUserId(owner)
-	local bypassTeamProtection = isStudioBombTeamProtectionBypassEnabled()
 	local baseDamageMultiplier = readNonNegativeNumber(damageMultiplier, 1)
 
 	for _, core in ipairs(CollectionService:GetTagged(RoundConfig.Tags.TeamCore)) do
@@ -735,7 +735,7 @@ local function damageEnemyAnchors(owner: any, origin: Vector3, sourceId: string?
 		if not trackedCore then
 			continue
 		end
-		if not bypassTeamProtection and ownerTeam and trackedCore:GetAttribute("Team") == ownerTeam then
+		if ownerTeam and trackedCore:GetAttribute("Team") == ownerTeam then
 			continue
 		end
 
@@ -744,17 +744,7 @@ local function damageEnemyAnchors(owner: any, origin: Vector3, sourceId: string?
 			continue
 		end
 
-		local damage = getDamageForDistance(
-			(position - origin).Magnitude,
-			explosionConfig.innerRadius,
-			explosionConfig.nearRadius,
-			explosionConfig.outerRadius,
-			explosionConfig.anchorDirectDamage,
-			explosionConfig.anchorNearDamageMax,
-			explosionConfig.anchorNearDamageMin,
-			explosionConfig.anchorOuterDamageMax,
-			explosionConfig.anchorOuterDamageMin
-		)
+		local damage = BombDamage.GetAnchorDamageForDistance((position - origin).Magnitude, explosionConfig)
 		damage = damage * baseDamageMultiplier
 		if damage > 0 then
 			local hookResult = AbilityService:RunHook("OnBeforeCoreBombDamage", {
@@ -818,6 +808,7 @@ local function getProjectilePhysicsVelocity(state: ProjectileState): Vector3
 end
 
 local function explode(owner: any, position: Vector3, source: string, projectileId: string?, bombSkinId: string?, explosionOverride)
+	local explodeToken = RuntimeProfiler.Begin("Server/BombService/Explode")
 	if projectileId then
 		local state = activeProjectiles[projectileId]
 		if state then
@@ -852,6 +843,7 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		explosion = explosionConfig,
 	})
 	if shouldSuppressBombEffect(explosionResult) then
+		RuntimeProfiler.End("Server/BombService/Explode", explodeToken)
 		return
 	end
 	if typeof(explosionResult.position) == "Vector3" then
@@ -877,6 +869,7 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 
 	if isActiveBombOwner(owner) then
 		local ownerUserId = getOwnerUserId(owner)
+		local destructionToken = RuntimeProfiler.Begin("Server/BombService/ExplosionDestruction")
 		debrisPayloads = DestructionService:DestroySphere(position, explosionConfig.terrainRadius, {
 			sourceType = "Bomb",
 			sourceId = projectileId,
@@ -884,11 +877,19 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 			ownerUserId = ownerUserId,
 			timestamp = impactTimestamp,
 		})
+		RuntimeProfiler.End("Server/BombService/ExplosionDestruction", destructionToken)
 		if isPlayerOwner(owner) then
 			applyOwnerKnockback(owner, position, explosionConfig)
 		end
-		hitUserIds, killedUserIds = damageEnemyPlayers(owner, position, projectileId, playerDamageMultiplier, explosionConfig)
-		damageEnemyAnchors(owner, position, projectileId, coreDamageMultiplier, explosionConfig)
+		if not (isPlayerOwner(owner) and CombatEligibility.IsPracticeOnly(owner, RoundService)) then
+			local playerDamageToken = RuntimeProfiler.Begin("Server/BombService/DamagePlayers")
+			hitUserIds, killedUserIds =
+				damageEnemyPlayers(owner, position, projectileId, playerDamageMultiplier, explosionConfig)
+			RuntimeProfiler.End("Server/BombService/DamagePlayers", playerDamageToken)
+			local anchorDamageToken = RuntimeProfiler.Begin("Server/BombService/DamageAnchors")
+			damageEnemyAnchors(owner, position, projectileId, coreDamageMultiplier, explosionConfig)
+			RuntimeProfiler.End("Server/BombService/DamageAnchors", anchorDamageToken)
+		end
 	end
 
 	fireEffect("Explode", {
@@ -919,6 +920,7 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		})
 	end
 
+	local ownerIdentity = StudioAICombatants.GetOwnerIdentity(owner)
 	recordReplayEvent("BombExploded", {
 		timestamp = impactTimestamp,
 		bombId = projectileId,
@@ -927,6 +929,10 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		source = source,
 		sourceType = "Bomb",
 		ownerUserId = getOwnerUserId(owner),
+		ownerName = if ownerIdentity then ownerIdentity.name else nil,
+		ownerDisplayName = if ownerIdentity then ownerIdentity.displayName else nil,
+		ownerTeam = if ownerIdentity then ownerIdentity.teamName else nil,
+		ownerIsNPC = if ownerIdentity then ownerIdentity.isNPC == true else nil,
 		bombType = BombProjectileConfig.BombType.Normal,
 		bombSkinId = bombSkinId,
 		position = position,
@@ -942,6 +948,11 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		hitUserIds = hitUserIds,
 		killedUserIds = killedUserIds,
 	})
+	RuntimeProfiler.Count("Server/BombService/Explosions")
+	RuntimeProfiler.Count("Server/BombService/ExplosionHits", #hitUserIds)
+	RuntimeProfiler.Count("Server/BombService/ExplosionKills", #killedUserIds)
+	RuntimeProfiler.Count("Server/BombService/TerrainDebrisPayloads", #debrisPayloads)
+	RuntimeProfiler.End("Server/BombService/Explode", explodeToken)
 end
 
 local function stopCooking(player: Player)
@@ -1239,11 +1250,12 @@ local function fireProjectileImpact(state: ProjectileState, position: Vector3, n
 end
 
 local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any, startedAt: number, remainingFuse: number, skinId: string)
+	local token = RuntimeProfiler.Begin("Server/BombService/ThrowBomb")
 	local fallbackDirection = rootPart.CFrame.LookVector
 	local origin = getThrowOrigin(rootPart)
 	local aimDirection = getAimDirectionFromPayload(targetPayload, fallbackDirection)
 	if BombProjectileService:IsEnabled() then
-		local projectileId = createProjectileId(player)
+		local projectileId = getClientProjectileId(player, targetPayload) or createProjectileId(player)
 		BombProjectileService:Launch({
 			owner = player,
 			projectileId = projectileId,
@@ -1255,6 +1267,8 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 			launchedAt = now(),
 			remainingFuse = remainingFuse,
 		})
+		RuntimeProfiler.Count("Server/BombService/ProjectileServiceLaunch")
+		RuntimeProfiler.End("Server/BombService/ThrowBomb", token)
 		return
 	end
 
@@ -1268,9 +1282,10 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		bombSkinId = skinId,
 	})
 	if shouldSuppressBombEffect(launchResult) then
+		RuntimeProfiler.End("Server/BombService/ThrowBomb", token)
 		return
 	end
-	local projectileId = createProjectileId(player)
+	local projectileId = getClientProjectileId(player, targetPayload) or createProjectileId(player)
 	local launchTime = now()
 	local explodeAt = launchTime + remainingFuse
 	local state: ProjectileState = {
@@ -1293,6 +1308,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		frozenBy = nil,
 	}
 	activeProjectiles[projectileId] = state
+	RuntimeProfiler.Count("Server/BombService/LegacyProjectileLaunch")
 
 	fireEffect("Throw", {
 		player = player,
@@ -1334,6 +1350,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		end)
 	end
 	scheduleCleanup(remainingFuse + BombConfig.ProjectileLifetimePadding)
+	RuntimeProfiler.End("Server/BombService/ThrowBomb", token)
 end
 
 local function redirectProjectile(state: ProjectileState, result, currentTime: number): boolean
@@ -1553,7 +1570,10 @@ local function stepFrozenProjectile(state: ProjectileState, deltaTime: number, c
 end
 
 local function updateProjectileStates(currentTime: number, deltaTime: number)
+	local token = RuntimeProfiler.Begin("Server/BombService/UpdateProjectileStates")
+	local activeCount = 0
 	for projectileId, state in pairs(activeProjectiles) do
+		activeCount += 1
 		if not isActiveBombOwner(state.owner) then
 			destroyPhysicalProjectile(state)
 			activeProjectiles[projectileId] = nil
@@ -1651,6 +1671,8 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 			fireProjectileSnapshot(state, currentTime, false, currentVelocity)
 		end
 	end
+	RuntimeProfiler.Gauge("Server/BombService/LegacyActiveProjectiles", activeCount)
+	RuntimeProfiler.End("Server/BombService/UpdateProjectileStates", token)
 end
 
 local function beginCook(player: Player)
@@ -1763,7 +1785,7 @@ local function syncPlayerRoundState(player: Player)
 			seenRoundIds[player] = nil
 			resetPlayerBombs(player)
 		end
-		if cookStates[player] then
+		if cookStates[player] and not CombatEligibility.IsPracticeRangeActive(player) then
 			stopCooking(player)
 		end
 		return
@@ -1810,15 +1832,24 @@ function BombService:OnStart()
 		heartbeatConnection:Disconnect()
 	end
 	heartbeatConnection = game:GetService("RunService").Heartbeat:Connect(function(deltaTime)
+		local heartbeatToken = RuntimeProfiler.Begin("Server/BombService/Heartbeat")
 		local currentTime = now()
 		updateProjectileStates(currentTime, deltaTime)
+		local playerCount = 0
 		for _, player in ipairs(Players:GetPlayers()) do
+			playerCount += 1
+			local syncToken = RuntimeProfiler.Begin("Server/BombService/SyncPlayerRoundState")
 			syncPlayerRoundState(player)
+			RuntimeProfiler.End("Server/BombService/SyncPlayerRoundState", syncToken)
 			if not isActivePlayer(player) and cookStates[player] then
 				stopCooking(player)
 			end
+			local rechargeToken = RuntimeProfiler.Begin("Server/BombService/UpdateRecharge")
 			updateRecharge(player, currentTime)
+			RuntimeProfiler.End("Server/BombService/UpdateRecharge", rechargeToken)
 		end
+		RuntimeProfiler.Gauge("Server/BombService/PlayersUpdated", playerCount)
+		RuntimeProfiler.End("Server/BombService/Heartbeat", heartbeatToken)
 	end)
 end
 
@@ -1837,6 +1868,15 @@ function BombService:OnPlayerRemoving(player: Player)
 	seenRoundIds[player] = nil
 	clearPlayerProjectiles(player)
 	disconnectCharacter(player)
+end
+
+function BombService:RefillBombsForPractice(player: Player): boolean
+	if not player or player.Parent ~= Players then
+		return false
+	end
+
+	setBombAttributes(player, BombConfig.MaxBombs, 0)
+	return true
 end
 
 function BombService:LaunchStudioAIBomb(request): boolean
@@ -1908,6 +1948,20 @@ function BombService:LaunchStudioAIBomb(request): boolean
 		startedAt = currentTime,
 		fuseStartedAt = currentTime,
 		remainingFuse = remainingFuse,
+	})
+	local ownerIdentity = StudioAICombatants.GetOwnerIdentity(owner)
+	recordReplayEvent("BombThrown", {
+		bombId = projectileId,
+		ownerUserId = getOwnerUserId(owner),
+		ownerName = if ownerIdentity then ownerIdentity.name else nil,
+		ownerDisplayName = if ownerIdentity then ownerIdentity.displayName else nil,
+		ownerTeam = if ownerIdentity then ownerIdentity.teamName else nil,
+		ownerIsNPC = if ownerIdentity then ownerIdentity.isNPC == true else nil,
+		bombType = BombProjectileConfig.BombType.Normal,
+		bombSkinId = skinId,
+		position = trajectory.origin,
+		velocity = trajectory.initialVelocity,
+		fuseDuration = remainingFuse,
 	})
 	return true
 end

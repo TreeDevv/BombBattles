@@ -5,6 +5,8 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local EmoteService = require(ServerScriptService.Services.EmoteService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
@@ -288,7 +290,7 @@ local function getBehavior(abilityId: string, definition: AbilityDefinition?): S
 end
 
 local function isAliveActivePlayer(player: Player): boolean
-	if not RoundService:IsPlayerActive(player) then
+	if not CombatEligibility.IsCombatActive(player, RoundService) then
 		return false
 	end
 
@@ -408,10 +410,14 @@ local function fireAbilityEffectToPlayer(player: Player, effectName: string, pay
 end
 
 local function activate(player: Player, resolved: ResolvedAbilityRequest, currentTime: number)
+	local activateLabel = "Server/Ability/Activate/" .. resolved.abilityId
+	local activateToken = RuntimeProfiler.Begin(activateLabel)
 	if not isAliveActivePlayer(player) then
+		RuntimeProfiler.End(activateLabel, activateToken)
 		return
 	end
 	if typeof(resolved.slotState.cooldownEndsAt) == "number" and resolved.slotState.cooldownEndsAt > currentTime then
+		RuntimeProfiler.End(activateLabel, activateToken)
 		return
 	end
 
@@ -429,30 +435,40 @@ local function activate(player: Player, resolved: ResolvedAbilityRequest, curren
 	}
 
 	if behavior and type(behavior.CanActivate) == "function" then
+		local canActivateLabel = "Server/Ability/CanActivate/" .. resolved.abilityId
+		local canActivateToken = RuntimeProfiler.Begin(canActivateLabel)
 		local ok, canActivate = pcall(function()
 			return behavior.CanActivate(context)
 		end)
+		RuntimeProfiler.End(canActivateLabel, canActivateToken)
 		if not ok then
 			warn("[AbilityService] CanActivate failed for " .. resolved.abilityId .. ": " .. tostring(canActivate))
+			RuntimeProfiler.End(activateLabel, activateToken)
 			return
 		end
 		if canActivate == false then
+			RuntimeProfiler.End(activateLabel, activateToken)
 			return
 		end
 	end
 
 	local behaviorResult = nil
 	if behavior and type(behavior.OnActivate) == "function" then
+		local onActivateLabel = "Server/Ability/OnActivate/" .. resolved.abilityId
+		local onActivateToken = RuntimeProfiler.Begin(onActivateLabel)
 		local ok, result = pcall(function()
 			return behavior.OnActivate(context)
 		end)
+		RuntimeProfiler.End(onActivateLabel, onActivateToken)
 		if not ok then
 			warn("[AbilityService] OnActivate failed for " .. resolved.abilityId .. ": " .. tostring(result))
+			RuntimeProfiler.End(activateLabel, activateToken)
 			return
 		end
 		behaviorResult = result
 	end
 	if behaviorResult == false then
+		RuntimeProfiler.End(activateLabel, activateToken)
 		return
 	end
 
@@ -502,25 +518,36 @@ local function activate(player: Player, resolved: ResolvedAbilityRequest, curren
 			payload = behaviorResult.effect.payload,
 		})
 	end
+	RuntimeProfiler.Count("Server/Ability/Activated")
+	RuntimeProfiler.End(activateLabel, activateToken)
 end
 
 local function handleClientMessage(player: Player, request: any)
+	local token = RuntimeProfiler.Begin("Server/Ability/HandleClientMessage")
+	RuntimeProfiler.Count("Server/Ability/ClientMessages")
+	RuntimeProfiler.Count("Server/Ability/ClientMessageWeight", RuntimeProfiler.EstimatePayloadWeight(request, 128))
 	local currentTime = now()
 	local resolved = resolveRequest(player, request)
 	if not resolved then
+		RuntimeProfiler.End("Server/Ability/HandleClientMessage", token)
 		return
 	end
 	if isRateLimited(player, resolved.abilityId, resolved.messageType, resolved.definition, currentTime) then
+		RuntimeProfiler.Count("Server/Ability/RateLimited")
+		RuntimeProfiler.End("Server/Ability/HandleClientMessage", token)
 		return
 	end
 
 	if resolved.messageType == MESSAGE_TYPES.Activate then
 		activate(player, resolved, currentTime)
+		RuntimeProfiler.End("Server/Ability/HandleClientMessage", token)
 		return
 	end
 
 	local behavior = getBehavior(resolved.abilityId, resolved.definition)
 	if behavior and type(behavior.OnClientMessage) == "function" then
+		local clientMessageLabel = "Server/Ability/OnClientMessage/" .. resolved.abilityId
+		local clientMessageToken = RuntimeProfiler.Begin(clientMessageLabel)
 		local ok, err = pcall(function()
 			behavior.OnClientMessage({
 				player = player,
@@ -534,10 +561,12 @@ local function handleClientMessage(player: Player, request: any)
 				now = currentTime,
 			})
 		end)
+		RuntimeProfiler.End(clientMessageLabel, clientMessageToken)
 		if not ok then
 			warn("[AbilityService] OnClientMessage failed for " .. resolved.abilityId .. ": " .. tostring(err))
 		end
 	end
+	RuntimeProfiler.End("Server/Ability/HandleClientMessage", token)
 end
 
 local function cleanupPlayer(player: Player)
@@ -553,6 +582,8 @@ local function cleanupPlayer(player: Player)
 end
 
 local function collectHookCandidates(hookName: string, currentTime: number): { HookCandidate }
+	local label = "Server/Ability/CollectHookCandidates/" .. hookName
+	local token = RuntimeProfiler.Begin(label)
 	local candidates = {}
 
 	for player, runtime in pairs(runtimes) do
@@ -603,6 +634,8 @@ local function collectHookCandidates(hookName: string, currentTime: number): { H
 		return left.priority > right.priority
 	end)
 
+	RuntimeProfiler.Count("Server/Ability/HookCandidates/" .. hookName, #candidates)
+	RuntimeProfiler.End(label, token)
 	return candidates
 end
 
@@ -655,8 +688,12 @@ function AbilityService:RunHook(hookName: string, context: any?): AbilityHookRes
 		return AbilityResult.Continue()
 	end
 
+	local hookLabel = "Server/Ability/RunHook/" .. hookName
+	local hookToken = RuntimeProfiler.Begin(hookLabel)
 	local currentTime = now()
 	for _, candidate in ipairs(collectHookCandidates(hookName, currentTime)) do
+		local behaviorLabel = "Server/Ability/Hook/" .. hookName .. "/" .. candidate.abilityId
+		local behaviorToken = RuntimeProfiler.Begin(behaviorLabel)
 		local ok, result = pcall(function()
 			return candidate.behavior[hookName]({
 				player = candidate.player,
@@ -669,16 +706,24 @@ function AbilityService:RunHook(hookName: string, context: any?): AbilityHookRes
 				now = currentTime,
 			})
 		end)
+		RuntimeProfiler.End(behaviorLabel, behaviorToken)
 		if not ok then
 			warn("[AbilityService] Hook " .. hookName .. " failed for " .. candidate.abilityId .. ": " .. tostring(result))
 			continue
 		end
 
 		if AbilityResult.IsHandled(result) then
+			if typeof(result) == "table" and typeof(result.kind) == "string" then
+				RuntimeProfiler.Count("Server/Ability/HandledResult/" .. result.kind)
+			else
+				RuntimeProfiler.Count("Server/Ability/HandledResult/Unknown")
+			end
+			RuntimeProfiler.End(hookLabel, hookToken)
 			return result
 		end
 	end
 
+	RuntimeProfiler.End(hookLabel, hookToken)
 	return AbilityResult.Continue()
 end
 

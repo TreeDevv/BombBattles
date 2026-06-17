@@ -1,3 +1,7 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+
 local ReplayBuffer = {}
 ReplayBuffer.__index = ReplayBuffer
 
@@ -59,6 +63,21 @@ local function sanitizeRecord(record)
 	return sanitizeValue(record, 0, {})
 end
 
+local function findFirstRecordAtOrAfter(source, startTime: number): number
+	local low = 1
+	local high = #source + 1
+	while low < high do
+		local mid = math.floor((low + high) / 2)
+		local timestamp = getRecordTimestamp(source[mid])
+		if timestamp and timestamp < startTime then
+			low = mid + 1
+		else
+			high = mid
+		end
+	end
+	return low
+end
+
 local function normalizeWindow(startTime: any, endTime: any): (number?, number?)
 	if not (isFiniteNumber(startTime) and isFiniteNumber(endTime)) then
 		return nil, nil
@@ -70,13 +89,24 @@ local function normalizeWindow(startTime: any, endTime: any): (number?, number?)
 end
 
 local function appendRecordsInWindow(source, startTime: number, endTime: number)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/BufferAppendRecords")
 	local results = {}
-	for _, record in ipairs(source) do
+	local scanned = 0
+	local startIndex = findFirstRecordAtOrAfter(source, startTime)
+	for index = startIndex, #source do
+		local record = source[index]
 		local timestamp = getRecordTimestamp(record)
-		if timestamp and timestamp >= startTime and timestamp <= endTime then
+		if timestamp and timestamp > endTime then
+			break
+		end
+		scanned += 1
+		if timestamp and timestamp >= startTime then
 			table.insert(results, sanitizeRecord(record))
 		end
 	end
+	RuntimeProfiler.Count("Server/Replay/Death/BufferRecordsScanned", scanned)
+	RuntimeProfiler.Count("Server/Replay/Death/BufferRecordsCopied", #results)
+	RuntimeProfiler.End("Server/Replay/Death/BufferAppendRecords", token)
 	return results
 end
 
@@ -172,26 +202,38 @@ function ReplayBuffer:AddEvent(event)
 end
 
 function ReplayBuffer:GetFramesInWindow(startTime, endTime)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/GetFramesInWindow")
 	local normalizedStart, normalizedEnd = normalizeWindow(startTime, endTime)
 	if not normalizedStart then
+		RuntimeProfiler.End("Server/Replay/Death/GetFramesInWindow", token)
 		return {}
 	end
 
-	return appendRecordsInWindow(self._frames, normalizedStart, normalizedEnd)
+	local frames = appendRecordsInWindow(self._frames, normalizedStart, normalizedEnd)
+	RuntimeProfiler.Count("Server/Replay/Death/ClipFrames", #frames)
+	RuntimeProfiler.End("Server/Replay/Death/GetFramesInWindow", token)
+	return frames
 end
 
 function ReplayBuffer:GetEventsInWindow(startTime, endTime)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/GetEventsInWindow")
 	local normalizedStart, normalizedEnd = normalizeWindow(startTime, endTime)
 	if not normalizedStart then
+		RuntimeProfiler.End("Server/Replay/Death/GetEventsInWindow", token)
 		return {}
 	end
 
-	return appendRecordsInWindow(self._events, normalizedStart, normalizedEnd)
+	local events = appendRecordsInWindow(self._events, normalizedStart, normalizedEnd)
+	RuntimeProfiler.Count("Server/Replay/Death/ClipEvents", #events)
+	RuntimeProfiler.End("Server/Replay/Death/GetEventsInWindow", token)
+	return events
 end
 
 function ReplayBuffer:GetClip(startTime, endTime)
+	local token = RuntimeProfiler.Begin("Server/Replay/Death/GetClip")
 	local normalizedStart, normalizedEnd = normalizeWindow(startTime, endTime)
 	if not normalizedStart then
+		RuntimeProfiler.End("Server/Replay/Death/GetClip", token)
 		return {
 			startTime = startTime,
 			endTime = endTime,
@@ -200,12 +242,14 @@ function ReplayBuffer:GetClip(startTime, endTime)
 		}
 	end
 
-	return {
+	local clip = {
 		startTime = normalizedStart,
 		endTime = normalizedEnd,
 		frames = self:GetFramesInWindow(normalizedStart, normalizedEnd),
 		events = self:GetEventsInWindow(normalizedStart, normalizedEnd),
 	}
+	RuntimeProfiler.End("Server/Replay/Death/GetClip", token)
+	return clip
 end
 
 function ReplayBuffer:GetDebugCounts()

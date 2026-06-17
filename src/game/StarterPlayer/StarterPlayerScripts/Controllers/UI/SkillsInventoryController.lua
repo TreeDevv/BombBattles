@@ -45,6 +45,16 @@ type TileButtonRecord = {
 	index: number,
 }
 
+type TextStyleTemplate = {
+	fontFace: Font,
+	textColor3: Color3,
+	textTransparency: number,
+	textStrokeColor3: Color3,
+	textStrokeTransparency: number,
+	richText: boolean,
+	children: { Instance },
+}
+
 local SkillsInventoryController = {}
 
 SkillsInventoryController._connections = {} :: { RBXScriptConnection }
@@ -62,6 +72,8 @@ SkillsInventoryController._selectedAbilityId = ""
 SkillsInventoryController._remote = nil :: RemoteEvent?
 SkillsInventoryController._statusByAbilityId = {} :: { [string]: string }
 SkillsInventoryController._lastHudToggleAt = 0
+
+local warnedMissingTextStyles = {}
 
 local function track(list: { RBXScriptConnection }, connection: RBXScriptConnection?)
 	if connection then
@@ -244,6 +256,81 @@ local function getTileButtonRecords(scroller: ScrollingFrame): { TileButtonRecor
 	end)
 
 	return records
+end
+
+local function normalizeInventoryTextStyleKey(value: any): string
+	if typeof(value) ~= "string" then
+		return ""
+	end
+
+	local key = string.upper(value)
+	key = string.gsub(key, "^%s+", "")
+	key = string.gsub(key, "%s+$", "")
+	key = string.gsub(key, "%s+", " ")
+	return key
+end
+
+local function captureTextStyle(label: TextLabel): TextStyleTemplate
+	local children = {}
+	for _, child in ipairs(label:GetChildren()) do
+		if child:IsA("UIGradient") or child:IsA("UIStroke") then
+			table.insert(children, child:Clone())
+		end
+	end
+
+	return {
+		fontFace = label.FontFace,
+		textColor3 = label.TextColor3,
+		textTransparency = label.TextTransparency,
+		textStrokeColor3 = label.TextStrokeColor3,
+		textStrokeTransparency = label.TextStrokeTransparency,
+		richText = label.RichText,
+		children = children,
+	}
+end
+
+local function buildTextStyleTemplates(records: { TileButtonRecord }): { [string]: TextStyleTemplate }
+	local templates = {}
+	for _, record in ipairs(records) do
+		local label = findTextLabel(record.button, "Label")
+		local key = normalizeInventoryTextStyleKey(label and label.Text)
+		if label and key ~= "" and not templates[key] then
+			templates[key] = captureTextStyle(label)
+		end
+	end
+	return templates
+end
+
+local function applyTextStyle(label: TextLabel, template: TextStyleTemplate)
+	label.FontFace = template.fontFace
+	label.TextColor3 = template.textColor3
+	label.TextTransparency = template.textTransparency
+	label.TextStrokeColor3 = template.textStrokeColor3
+	label.TextStrokeTransparency = template.textStrokeTransparency
+	label.RichText = template.richText
+
+	for _, child in ipairs(label:GetChildren()) do
+		if child:IsA("UIGradient") or child:IsA("UIStroke") then
+			child:Destroy()
+		end
+	end
+
+	for _, child in ipairs(template.children) do
+		child:Clone().Parent = label
+	end
+end
+
+local function warnMissingTextStyleOnce(abilityId: string, styleKey: string)
+	local warningKey = abilityId .. ":" .. styleKey
+	if warnedMissingTextStyles[warningKey] then
+		return
+	end
+
+	warnedMissingTextStyles[warningKey] = true
+	warn(("[SkillsInventoryController] Missing inventory text style template for ability '%s' with key '%s'."):format(
+		abilityId,
+		styleKey
+	))
 end
 
 local function findSkillsButton(hud: Instance?): ImageButton?
@@ -605,6 +692,7 @@ function SkillsInventoryController:_populateSlot(slot: string, container: GuiObj
 	removeRuntimeTileScales(scroller)
 
 	local records = getTileButtonRecords(scroller)
+	local textStyleTemplates = buildTextStyleTemplates(records)
 	local abilityIds = AbilityConfig.GetCatalogIds(slot)
 
 	for index, record in ipairs(records) do
@@ -630,6 +718,13 @@ function SkillsInventoryController:_populateSlot(slot: string, container: GuiObj
 		button:SetAttribute("AbilityId", definition.id)
 		button:SetAttribute("Slot", slot)
 		if label then
+			local styleKey = normalizeInventoryTextStyleKey(definition.inventoryTextStyleKey or definition.displayName or definition.id)
+			local textStyle = textStyleTemplates[styleKey]
+			if textStyle then
+				applyTextStyle(label, textStyle)
+			else
+				warnMissingTextStyleOnce(definition.id, styleKey)
+			end
 			label.Text = string.upper(definition.displayName or definition.id)
 		end
 		if icon then

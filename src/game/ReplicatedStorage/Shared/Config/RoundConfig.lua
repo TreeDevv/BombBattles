@@ -1,8 +1,10 @@
 return {
 	Scope = "GameState_1",
+	GameModeDisplayName = "TEAM DEATHMATCH",
 
 	MinPlayers = 2,
 	IntermissionSeconds = 30,
+	RoundStartingSeconds = 3,
 	RoundSeconds = 180,
 	RespawnSeconds = 7,
 	ResetSeconds = 5,

@@ -290,13 +290,11 @@ function DataService:OnPlayerAdded(player: Player)
 	createReplica(player, profile)
 	createLeaderstats(player, profile)
 	processGlobalUpdates(player, profile)
-	task.defer(function()
-		Leaderboards.refresh(self)
-	end)
 end
 
 function DataService:OnPlayerRemoving(player: Player)
 	flushTimePlayedForPlayer(player, true)
+	Leaderboards.PublishPlayer(self, player)
 
 	local profile = PROFILES[player]
 	if profile then
@@ -305,10 +303,6 @@ function DataService:OnPlayerRemoving(player: Player)
 
 	timePlayedSessionStartedAt[player] = nil
 	timePlayedLastFlushAt[player] = nil
-
-	task.defer(function()
-		Leaderboards.refresh(self)
-	end)
 end
 
 function DataService:Set(player: Player, key: string, mutator: any)
@@ -366,6 +360,10 @@ function DataService:SendGlobalUpdate(sender: Player, targetId: number, updateTy
 			data = payload,
 		})
 	end)
+end
+
+function DataService:ReportLeaderboardRoundResults(results)
+	Leaderboards.RecordRoundResults(self, results)
 end
 
 local function findLoadedPlayerByUserId(userId: number): Player?

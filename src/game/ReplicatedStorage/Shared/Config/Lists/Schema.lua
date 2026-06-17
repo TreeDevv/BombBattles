@@ -9,6 +9,41 @@ return {
 		value = 0,
 	},
 
+	LifetimeKills = {
+		key = "lifetimeKills",
+		value = 0,
+	},
+
+	LifetimeWins = {
+		key = "lifetimeWins",
+		value = 0,
+	},
+
+	LifetimeDestruction = {
+		key = "lifetimeDestruction",
+		value = 0,
+	},
+
+	DailyLeaderboardStats = {
+		key = "dailyLeaderboardStats",
+		value = {
+			periodKey = "",
+			kills = 0,
+			wins = 0,
+			destruction = 0,
+		},
+	},
+
+	MonthlyLeaderboardStats = {
+		key = "monthlyLeaderboardStats",
+		value = {
+			periodKey = "",
+			kills = 0,
+			wins = 0,
+			destruction = 0,
+		},
+	},
+
 	OwnedAbilities = {
 		key = "ownedAbilities",
 		value = {},

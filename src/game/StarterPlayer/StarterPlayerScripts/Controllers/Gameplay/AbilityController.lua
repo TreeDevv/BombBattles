@@ -7,11 +7,13 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local ReplicaController = require(ReplicatedStorage.Packages.ReplicaController)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local REMOTES_FOLDER_NAME = AbilityConfig.RemotesFolderName
 local REQUEST_REMOTE_NAME = AbilityConfig.RequestRemoteName
@@ -19,6 +21,7 @@ local EFFECT_REMOTE_NAME = AbilityConfig.EffectRemoteName
 local ACTIVATE_MESSAGE = AbilityConfig.MessageTypes.Activate
 local RENDER_STEP_NAME = "BombBattlesAbilityButtons"
 local RENDER_PRIORITY = Enum.RenderPriority.Last.Value
+local ROUND_ALIVE_ATTR = "RoundAlive"
 local SIZE_TWEEN = TweenInfo.new(0.24, Enum.EasingStyle.Back)
 local FADE_TWEEN = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
 local HELD_GROW_TWEEN = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -154,6 +157,33 @@ end
 
 local function getServerTime(): number
 	return workspace:GetServerTimeNow()
+end
+
+local function getCharacterParts(): (Model?, Humanoid?, BasePart?)
+	local character = LocalPlayer.Character
+	if not character then
+		return nil, nil, nil
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	return character, humanoid, if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+end
+
+local function isActivationAllowed(): boolean
+	if RoundController:Get("state") ~= RoundStates.Active then
+		return false
+	end
+	if LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+		return false
+	end
+
+	local _, humanoid, rootPart = getCharacterParts()
+	return humanoid ~= nil and humanoid.Health > 0 and rootPart ~= nil
+end
+
+local function isActivationInput(inputState: Enum.UserInputState?): boolean
+	return inputState == nil or inputState == Enum.UserInputState.Begin
 end
 
 local function getAimPayload(): any
@@ -414,7 +444,7 @@ local function stopHeldVisual(visual: ButtonVisual)
 end
 
 local function startHeldVisual(visual: ButtonVisual)
-	if visual.held or visual.onCooldown or getEquippedAbilityId(visual.slot) == "" then
+	if visual.held or visual.onCooldown or getEquippedAbilityId(visual.slot) == "" or not isActivationAllowed() then
 		return
 	end
 
@@ -603,7 +633,11 @@ function AbilityController:_setSlotHeld(slot: string, held: boolean)
 
 	visual.pressing = held
 	if held then
-		startHeldVisual(visual)
+		if isActivationAllowed() then
+			startHeldVisual(visual)
+		else
+			stopHeldVisual(visual)
+		end
 	else
 		stopHeldVisual(visual)
 	end
@@ -674,6 +708,7 @@ function AbilityController:_bindCurrentHud()
 end
 
 function AbilityController:_updateButtons()
+	local activationAllowed = isActivationAllowed()
 	for slot, button in pairs(self._buttons) do
 		local abilityId = getEquippedAbilityId(slot)
 		local definition = AbilityConfig.GetDefinition(abilityId)
@@ -686,12 +721,15 @@ function AbilityController:_updateButtons()
 			icon.Visible = image ~= ""
 		end
 
-		button.Active = abilityId ~= "" and remaining <= 0
+		button.Active = activationAllowed and abilityId ~= "" and remaining <= 0
 		button:SetAttribute("AbilityId", abilityId)
 		button:SetAttribute("CooldownRemaining", remaining)
 		button:SetAttribute("AbilityDisplayName", if definition then definition.displayName else "")
 		local visual = self._buttonVisuals[slot]
 		if visual then
+			if not activationAllowed then
+				stopHeldVisual(visual)
+			end
 			setButtonCooldownState(visual, abilityId, remaining, cooldown, authoritative)
 		end
 	end
@@ -788,6 +826,9 @@ function AbilityController:SendMessage(slot: string, messageType: string, payloa
 	if not AbilityConfig.IsKnownSlot(slot) then
 		return false
 	end
+	if messageType == ACTIVATE_MESSAGE and not isActivationAllowed() then
+		return false
+	end
 
 	local abilityId = getEquippedAbilityId(slot)
 	if abilityId == "" then
@@ -835,6 +876,9 @@ function AbilityController:ActivateSlot(slot: string, inputState: Enum.UserInput
 	local slotState = getSlotState(slot)
 	local abilityId = getEquippedAbilityId(slot)
 	if abilityId == "" then
+		return false
+	end
+	if isActivationInput(inputState) and not isActivationAllowed() then
 		return false
 	end
 

@@ -101,8 +101,14 @@
         "EmoteService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/EmoteService.lua"
         },
+        "GameScreenService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/GameScreenService.lua"
+        },
         "ChatTagService": {
           "$path": "src/game/ServerScriptService/Services/Social/ChatTagService.lua"
+        },
+        "LikeGoalService": {
+          "$path": "src/game/ServerScriptService/Services/Social/LikeGoalService.lua"
         },
         "DataService": {
           "$path": "src/game/ServerScriptService/Services/Core/DataService"
@@ -220,6 +226,9 @@
           },
           "GameStateNotificationController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GameStateNotificationController.lua"
+          },
+          "GlobalLeaderboardController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GlobalLeaderboardController.lua"
           },
           "WorldTextController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/WorldTextController.lua"

@@ -167,6 +167,23 @@ local function buildInitialState()
 	}
 end
 
+local gameStateData = buildInitialState()
+
+local function writeStateValue(path: { any }, value: any)
+	local cursor = gameStateData
+	for index = 1, #path - 1 do
+		local key = path[index]
+		local nextValue = cursor[key]
+		if typeof(nextValue) ~= "table" then
+			nextValue = {}
+			cursor[key] = nextValue
+		end
+		cursor = nextValue
+	end
+
+	cursor[path[#path]] = deepCopy(value)
+end
+
 local function ensureRemotesFolder(): Folder
 	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
 	if existing and existing:IsA("Folder") then
@@ -263,8 +280,31 @@ local function ensureDestructionScoreRemote(): RemoteEvent
 end
 
 local function setReplicaValue(path: { any }, value: any)
+	writeStateValue(path, value)
 	if gameReplica then
 		gameReplica:SetValue(path, value)
+	end
+end
+
+local function setReplicaValues(path: { any }, values: { [any]: any })
+	for key, value in pairs(values) do
+		local valuePath = table.clone(path)
+		table.insert(valuePath, key)
+		writeStateValue(valuePath, value)
+	end
+
+	if not gameReplica then
+		return
+	end
+	if type(gameReplica.SetValues) == "function" then
+		gameReplica:SetValues(path, values)
+		return
+	end
+
+	for key, value in pairs(values) do
+		local valuePath = table.clone(path)
+		table.insert(valuePath, key)
+		gameReplica:SetValue(valuePath, value)
 	end
 end
 
@@ -528,8 +568,8 @@ local function calculateReward(stats, winnerTeam: string, playerTeam: string?)
 end
 
 local function buildRoundResults(winnerTeam: string)
-	local selectedMapId = if gameReplica and typeof(gameReplica.Data.selectedMapId) == "string"
-		then gameReplica.Data.selectedMapId
+	local selectedMapId = if typeof(gameStateData.selectedMapId) == "string"
+		then gameStateData.selectedMapId
 		else ""
 	local results = {
 		roundId = roundId,
@@ -583,6 +623,7 @@ end
 local function publishRoundResults(winnerTeam: string)
 	local results = buildRoundResults(winnerTeam)
 	awardRoundResults(results)
+	DataService:ReportLeaderboardRoundResults(results)
 	QuestService:ReportRoundResults(results)
 	setReplicaValue({ "roundResults" }, deepCopy(results))
 end
@@ -734,10 +775,12 @@ end
 
 local function setState(state: string, status: string?, duration: number?)
 	currentState = state
-	setReplicaValue({ "state" }, state)
-	setReplicaValue({ "status" }, status or state)
-	setReplicaValue({ "endsAt" }, if duration and duration > 0 then workspace:GetServerTimeNow() + duration else 0)
-	setReplicaValue({ "minPlayers" }, getRequiredPlayerCount())
+	setReplicaValues({}, {
+		state = state,
+		status = status or state,
+		endsAt = if duration and duration > 0 then workspace:GetServerTimeNow() + duration else 0,
+		minPlayers = getRequiredPlayerCount(),
+	})
 	setReplayPerformanceCritical(state == RoundStates.Active)
 end
 
@@ -1086,10 +1129,15 @@ local function buildRespawnState(coreCounts: { [string]: number })
 	return respawnsEnabled
 end
 
+local reconcilePlayersWithoutRespawns: (() -> ())?
+
 local function syncCoreState()
 	local coreCounts = countAliveCores()
 	setReplicaValue({ "coreCounts" }, coreCounts)
 	setReplicaValue({ "respawnsEnabled" }, buildRespawnState(coreCounts))
+	if currentState == RoundStates.Active and reconcilePlayersWithoutRespawns then
+		reconcilePlayersWithoutRespawns()
+	end
 end
 
 local function teamHasRespawns(teamName: string?): boolean
@@ -1357,6 +1405,15 @@ local function eliminatePlayer(player: Player)
 	destroyPlayerCharacter(player)
 end
 
+reconcilePlayersWithoutRespawns = function()
+	for player in pairs(roundPlayers) do
+		if alivePlayers[player] == true and player:GetAttribute(ROUND_ALIVE_ATTR) == false and not teamHasRespawns(playerTeams[player]) then
+			debugDeathFlow("Eliminating pending respawn after core loss", player.Name, "team", tostring(playerTeams[player]))
+			eliminatePlayer(player)
+		end
+	end
+end
+
 local function respawnPlayerInRound(player: Player)
 	debugDeathFlow("Scheduling round respawn", player.Name, "delay", RoundConfig.RespawnSeconds, "roundId", roundId)
 	clearRecentDamageFor(player)
@@ -1385,6 +1442,11 @@ local function respawnPlayerInRound(player: Player)
 				"alive",
 				alivePlayers[player]
 			)
+			return
+		end
+		if not teamHasRespawns(playerTeams[player]) then
+			debugDeathFlow("Round respawn skipped; team respawns unavailable", player.Name, "team", tostring(playerTeams[player]))
+			eliminatePlayer(player)
 			return
 		end
 		if player:GetAttribute(ROUND_ALIVE_ATTR) ~= false then
@@ -1728,7 +1790,7 @@ local function createGameReplica()
 
 	gameReplica = ReplicaService.NewReplica({
 		ClassToken = GAME_STATE_TOKEN,
-		Data = buildInitialState(),
+		Data = deepCopy(gameStateData),
 		Replication = "All",
 	})
 end
@@ -1913,13 +1975,21 @@ local function runRoundLoop()
 		playerTeams = {}
 		assignTeams(roster)
 
-		setState(RoundStates.RoundStarting, "Round starting", 0)
 		local map = spawnActiveMap(selectedMapId)
 		if not map or not setupTeamCores(map) or not teleportTeamsToMap(map) then
 			cancelToWaiting("Round cancelled because map setup is incomplete")
 			continue
 		end
 		setReplayRoundMap(selectedMapId, map)
+
+		local roundStartingSeconds = if typeof(RoundConfig.RoundStartingSeconds) == "number"
+			then math.max(RoundConfig.RoundStartingSeconds, 0)
+			else 0
+		setState(RoundStates.RoundStarting, "Round starting", roundStartingSeconds)
+		if roundStartingSeconds > 0 and not waitForSecondsOrInvalid(roundStartingSeconds, not forcedMapId) then
+			cancelToWaiting("Round cancelled before battle start")
+			continue
+		end
 
 		runActiveRound()
 		resetRound()
@@ -2131,10 +2201,7 @@ function RoundService:OnPlayerRemoving(player: Player)
 end
 
 function RoundService:GetState()
-	if not gameReplica then
-		return buildInitialState()
-	end
-	return deepCopy(gameReplica.Data)
+	return deepCopy(gameStateData)
 end
 
 function RoundService:IsPlayerActive(player: Player): boolean

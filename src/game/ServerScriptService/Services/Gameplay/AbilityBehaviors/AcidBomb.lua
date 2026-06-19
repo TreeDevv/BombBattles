@@ -11,22 +11,23 @@ local RoundService = require(ServerScriptService.Services.RoundService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityHookResult = AbilityTypes.AbilityHookResult
 type AbilityServiceLike = AbilityTypes.AbilityServiceLike
 type ServerActivateContext = AbilityTypes.ServerActivateContext
 type ServerHookContext = AbilityTypes.ServerHookContext
 
-type FireRecord = {
+type AcidRecord = {
 	player: Player,
 }
 
-local FireBomb = {} :: AbilityTypes.ServerBehavior
+local AcidBomb = {} :: AbilityTypes.ServerBehavior
 
 local RESULT_KIND = AbilityResult.Kind
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
-local ZONE_FOLDER_NAME = "FireBombZones"
+local ZONE_FOLDER_NAME = "AcidBombZones"
 
-local PROJECTILES: { [string]: FireRecord } = {}
+local PROJECTILES: { [string]: AcidRecord } = {}
 local projectileSerial = 0
 local bombProjectileService = nil
 local abilityService: AbilityServiceLike? = nil
@@ -122,7 +123,7 @@ end
 
 local function createProjectileId(player: Player): string
 	projectileSerial += 1
-	return ("FireBomb_%d_%d_%04d"):format(
+	return ("AcidBomb_%d_%d_%04d"):format(
 		player.UserId,
 		math.floor(workspace:GetServerTimeNow() * 1000),
 		projectileSerial % 10000
@@ -159,18 +160,21 @@ local function getInstanceByPath(path: any): Instance?
 	return current
 end
 
-local function getFireTemplate(definition: AbilityDefinition?): BasePart?
-	local template = getInstanceByPath(if definition then definition.assetPath else nil)
+local function getAcidTemplate(definition: AbilityDefinition?): BasePart?
+	local assetPath = if definition and typeof(definition.zoneVfxAssetPath) == "table"
+		then definition.zoneVfxAssetPath
+		else if definition then definition.assetPath else nil
+	local template = getInstanceByPath(assetPath)
 	if not template then
 		if not warnedMissingTemplate then
-			warn("[FireBomb] Missing ReplicatedStorage.Assets.Abilities.FireBomb.Fire")
+			warn("[AcidBomb] Missing ReplicatedStorage.Assets.Abilities.AcidBomb.AcidFloor")
 			warnedMissingTemplate = true
 		end
 		return nil
 	end
 	if not template:IsA("BasePart") then
 		if not warnedInvalidTemplate then
-			warn("[FireBomb] Fire asset must be a BasePart for server overlap damage")
+			warn("[AcidBomb] AcidFloor asset must be a BasePart for server overlap damage")
 			warnedInvalidTemplate = true
 		end
 		return nil
@@ -231,7 +235,7 @@ local function getDamageTargets(owner: Player, zone: BasePart, overlapParams: Ov
 		return workspace:GetPartsInPart(zone, overlapParams)
 	end)
 	if not ok then
-		warn("[FireBomb] Failed to query fire zone overlaps: " .. tostring(parts))
+		warn("[AcidBomb] Failed to query acid zone overlaps: " .. tostring(parts))
 		return targets
 	end
 
@@ -287,11 +291,19 @@ local function resolvePlayerDamage(owner: Player, target: Player, humanoid: Huma
 	return damage, false
 end
 
-local function damageTargets(owner: Player, zone: BasePart, overlapParams: OverlapParams, damage: number, projectileId: string)
+local function damageTargets(
+	owner: Player,
+	zone: BasePart,
+	overlapParams: OverlapParams,
+	damage: number,
+	projectileId: string,
+	definition: AbilityDefinition?
+)
 	if damage <= 0 then
 		return
 	end
 
+	local blurDuration = math.max(getDefinitionNumber(definition, "acidBlurDurationSeconds", 0.85), 0)
 	for target, humanoid in pairs(getDamageTargets(owner, zone, overlapParams)) do
 		local healthBefore = humanoid.Health
 		if healthBefore <= 0 then
@@ -300,7 +312,7 @@ local function damageTargets(owner: Player, zone: BasePart, overlapParams: Overl
 
 		local sourceContext = {
 			sourceType = "Ability",
-			sourceId = "FireBomb",
+			sourceId = "AcidBomb",
 			projectileId = projectileId,
 		}
 		local resolvedDamage, blocked = resolvePlayerDamage(owner, target, humanoid, damage, sourceContext)
@@ -311,26 +323,35 @@ local function damageTargets(owner: Player, zone: BasePart, overlapParams: Overl
 		local appliedDamage = math.min(resolvedDamage, healthBefore)
 		RoundService:RecordPlayerDamage(owner, target, appliedDamage, sourceContext)
 		humanoid:TakeDamage(resolvedDamage)
+
+		if blurDuration > 0 and abilityService then
+			abilityService:FireEffectToPlayer(target, "AcidBombApplied", {
+				abilityId = "AcidBomb",
+				projectileId = projectileId,
+				durationSeconds = blurDuration,
+				damage = appliedDamage,
+			})
+		end
 	end
 end
 
-local function startBurnZone(owner: Player, definition: AbilityDefinition?, projectileId: string, position: Vector3)
-	local template = getFireTemplate(definition)
+local function startAcidZone(owner: Player, definition: AbilityDefinition?, projectileId: string, position: Vector3): boolean
+	local template = getAcidTemplate(definition)
 	if not template then
 		return false
 	end
 
-	local durationSeconds = math.max(getDefinitionNumber(definition, "fireDurationSeconds", 6), 0)
-	local tickSeconds = math.max(getDefinitionNumber(definition, "fireTickSeconds", 0.5), 0.05)
-	local tickDamage = math.max(getDefinitionNumber(definition, "fireTickDamage", 10), 0)
+	local durationSeconds = math.max(getDefinitionNumber(definition, "acidDurationSeconds", 7), 0)
+	local tickSeconds = math.max(getDefinitionNumber(definition, "acidTickSeconds", 0.5), 0.05)
+	local tickDamage = math.max(getDefinitionNumber(definition, "acidTickDamage", 8), 0)
 	if durationSeconds <= 0 or tickDamage <= 0 then
 		return false
 	end
 
 	local zone = template:Clone()
-	zone.Name = "FireBombZone_" .. projectileId
+	zone.Name = "AcidBombZone_" .. projectileId
 	prepareGameplayZone(zone)
-	zone.CFrame = CFrame.new(position)
+	zone.CFrame = CFrame.new(position) * template.CFrame.Rotation
 	zone.Parent = getZoneFolder()
 
 	local overlapParams = OverlapParams.new()
@@ -341,7 +362,7 @@ local function startBurnZone(owner: Player, definition: AbilityDefinition?, proj
 		local expiresAt = workspace:GetServerTimeNow() + durationSeconds
 
 		while zone.Parent and owner.Parent == Players do
-			damageTargets(owner, zone, overlapParams, tickDamage, projectileId)
+			damageTargets(owner, zone, overlapParams, tickDamage, projectileId, definition)
 
 			local remaining = expiresAt - workspace:GetServerTimeNow()
 			if remaining <= 0 then
@@ -358,7 +379,7 @@ local function startBurnZone(owner: Player, definition: AbilityDefinition?, proj
 	return true
 end
 
-local function getTrackedProjectile(player: Player, context): FireRecord?
+local function getTrackedProjectile(player: Player, context): AcidRecord?
 	if typeof(context) ~= "table" then
 		return nil
 	end
@@ -375,7 +396,7 @@ local function getTrackedProjectile(player: Player, context): FireRecord?
 	return nil
 end
 
-local function cleanupProjectileLater(projectileId: string, record: FireRecord, delaySeconds: number)
+local function cleanupProjectileLater(projectileId: string, record: AcidRecord, delaySeconds: number)
 	task.delay(delaySeconds, function()
 		if PROJECTILES[projectileId] == record then
 			PROJECTILES[projectileId] = nil
@@ -383,15 +404,15 @@ local function cleanupProjectileLater(projectileId: string, record: FireRecord, 
 	end)
 end
 
-function FireBomb.OnStart(service: AbilityServiceLike)
+function AcidBomb.OnStart(service: AbilityServiceLike)
 	abilityService = service
 end
 
-function FireBomb.CanActivate(context: ServerActivateContext): boolean
+function AcidBomb.CanActivate(context: ServerActivateContext): boolean
 	return getCharacterRoot(context.player) ~= nil and getBombProjectileService() ~= nil
 end
 
-function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationResult
+function AcidBomb.OnActivate(context: ServerActivateContext): AbilityActivationResult
 	local projectileService = getBombProjectileService()
 	local rootPart = getCharacterRoot(context.player)
 	if not (projectileService and rootPart) then
@@ -433,7 +454,7 @@ function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 			visuals = {
 				abilityVisualOverlay = true,
 				abilityVisualAssetPath = context.definition.travelVfxAssetPath,
-				abilityVisualName = "FireBombProjectileVFX",
+				abilityVisualName = "AcidBombVFX",
 				abilityVisualDisabledAttachmentName = "Impact",
 			},
 		},
@@ -446,24 +467,28 @@ function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 		player = context.player,
 	}
 	PROJECTILES[projectileId] = record
-	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 4)
+	cleanupProjectileLater(
+		projectileId,
+		record,
+		remainingFuse + BombConfig.ProjectileLifetimePadding + getDefinitionNumber(context.definition, "acidDurationSeconds", 7) + 4
+	)
 
 	local state = context.slotState.state
-	local fireBombsThrown = if typeof(state) == "table" and typeof(state.fireBombsThrown) == "number"
-		then state.fireBombsThrown
+	local acidBombsThrown = if typeof(state) == "table" and typeof(state.acidBombsThrown) == "number"
+		then state.acidBombsThrown
 		else 0
-	local fireZonesCreated = if typeof(state) == "table" and typeof(state.fireZonesCreated) == "number"
-		then state.fireZonesCreated
+	local acidZonesCreated = if typeof(state) == "table" and typeof(state.acidZonesCreated) == "number"
+		then state.acidZonesCreated
 		else 0
 
 	return {
 		state = {
-			fireBombsThrown = fireBombsThrown + 1,
-			fireZonesCreated = fireZonesCreated,
+			acidBombsThrown = acidBombsThrown + 1,
+			acidZonesCreated = acidZonesCreated,
 			lastActivatedAt = context.now,
 		},
 		effect = {
-			name = "FireBombFired",
+			name = "AcidBombFired",
 			payload = {
 				projectileId = projectileId,
 			},
@@ -471,7 +496,7 @@ function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 	}
 end
 
-function FireBomb.OnBeforeExplosion(context: ServerHookContext)
+function AcidBomb.OnBeforeExplosion(context: ServerHookContext): AbilityHookResult
 	local payload = context.context
 	local record = getTrackedProjectile(context.player, payload)
 	if not record then
@@ -479,33 +504,36 @@ function FireBomb.OnBeforeExplosion(context: ServerHookContext)
 	end
 
 	local projectileId = payload.projectileId
+	if typeof(projectileId) ~= "string" or projectileId == "" then
+		return AbilityResult.Continue()
+	end
 	PROJECTILES[projectileId] = nil
 
 	if typeof(payload.position) == "Vector3" then
-		local zoneCreated = startBurnZone(record.player, context.definition, projectileId, payload.position)
+		local zoneCreated = startAcidZone(record.player, context.definition, projectileId, payload.position)
 		if zoneCreated and abilityService then
-			abilityService:FireEffect("FireBombAreaStarted", {
+			abilityService:FireEffect("AcidBombAreaStarted", {
 				player = record.player,
 				slot = context.slot,
-				abilityId = "FireBomb",
+				abilityId = "AcidBomb",
 				projectileId = projectileId,
 				position = payload.position,
-				durationSeconds = getDefinitionNumber(context.definition, "fireDurationSeconds", 6),
-				assetPath = context.definition.assetPath,
+				durationSeconds = getDefinitionNumber(context.definition, "acidDurationSeconds", 7),
+				zoneVfxAssetPath = context.definition.zoneVfxAssetPath or context.definition.assetPath,
 				impactVfxAssetPath = context.definition.impactVfxAssetPath,
 			})
 
 			local state = context.slotState.state
-			local fireBombsThrown = if typeof(state) == "table" and typeof(state.fireBombsThrown) == "number"
-				then state.fireBombsThrown
+			local acidBombsThrown = if typeof(state) == "table" and typeof(state.acidBombsThrown) == "number"
+				then state.acidBombsThrown
 				else 0
-			local fireZonesCreated = if typeof(state) == "table" and typeof(state.fireZonesCreated) == "number"
-				then state.fireZonesCreated
+			local acidZonesCreated = if typeof(state) == "table" and typeof(state.acidZonesCreated) == "number"
+				then state.acidZonesCreated
 				else 0
 			abilityService:SetSlotValues(record.player, context.slot, {
 				state = {
-					fireBombsThrown = fireBombsThrown,
-					fireZonesCreated = fireZonesCreated + 1,
+					acidBombsThrown = acidBombsThrown,
+					acidZonesCreated = acidZonesCreated + 1,
 					lastActivatedAt = if typeof(state) == "table" and typeof(state.lastActivatedAt) == "number"
 						then state.lastActivatedAt
 						else context.now,
@@ -517,7 +545,7 @@ function FireBomb.OnBeforeExplosion(context: ServerHookContext)
 	return AbilityResult.Continue()
 end
 
-function FireBomb.OnPlayerRemoving(player: Player)
+function AcidBomb.OnPlayerRemoving(player: Player)
 	for projectileId, record in pairs(PROJECTILES) do
 		if record.player == player then
 			PROJECTILES[projectileId] = nil
@@ -525,4 +553,4 @@ function FireBomb.OnPlayerRemoving(player: Player)
 	end
 end
 
-return FireBomb
+return AcidBomb

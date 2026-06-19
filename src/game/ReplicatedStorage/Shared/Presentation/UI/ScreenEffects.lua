@@ -206,7 +206,7 @@ function ScreenEffects.ClearBlack(duration: number?): boolean
 	return true
 end
 
-function ScreenEffects.FlashDark(duration: number, initialTransparency: number?)
+function ScreenEffects.FlashColor(color: Color3?, duration: number, initialTransparency: number?)
 	duration = math.max(tonumber(duration) or 0.35, 0.1)
 	initialTransparency = math.clamp(tonumber(initialTransparency) or 0, 0, 1)
 
@@ -225,7 +225,7 @@ function ScreenEffects.FlashDark(duration: number, initialTransparency: number?)
 	end
 
 	vignette.Visible = true
-	vignette.ImageColor3 = Color3.fromRGB(0, 0, 0)
+	vignette.ImageColor3 = if typeof(color) == "Color3" then color else Color3.fromRGB(0, 0, 0)
 
 	activeTween = TweenService:Create(vignette, TweenInfo.new(0.1, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), {
 		ImageTransparency = initialTransparency,
@@ -239,6 +239,10 @@ function ScreenEffects.FlashDark(duration: number, initialTransparency: number?)
 		})
 		activeTween:Play()
 	end)
+end
+
+function ScreenEffects.FlashDark(duration: number, initialTransparency: number?)
+	ScreenEffects.FlashColor(Color3.fromRGB(0, 0, 0), duration, initialTransparency)
 end
 
 function ScreenEffects.FlashBlack(duration: number, initialTransparency: number?)

@@ -1,11 +1,16 @@
+local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SoundService = game:GetService("SoundService")
+
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local ReplayAssets = {}
 
 local replayEmitModule = nil
 local replayEmitModuleInitialized = false
 local warnedMissingReplayEmitModule = false
+local prewarmInProgress = false
+local prewarmComplete = false
 
 function ReplayAssets.GetReplayConstants()
 	local sharedFolder = ReplicatedStorage:WaitForChild("Shared", 10)
@@ -43,6 +48,46 @@ end
 function ReplayAssets.GetAssetsFolder(): Folder?
 	local folder = ReplicatedStorage:FindFirstChild("Assets")
 	return if folder and folder:IsA("Folder") then folder else nil
+end
+
+local function appendPreloadRoot(list: { Instance }, root: Instance?)
+	if root then
+		table.insert(list, root)
+	end
+end
+
+function ReplayAssets.PrewarmContent(folderName: string?)
+	if prewarmComplete or prewarmInProgress then
+		return
+	end
+
+	prewarmInProgress = true
+	task.spawn(function()
+		local token = RuntimeProfiler.Begin("Client/Replay/Assets/PrewarmContent")
+		local preloadRoots = {}
+		appendPreloadRoot(preloadRoots, ReplayAssets.GetReplayAssetsFolder(folderName))
+
+		local assetsFolder = ReplayAssets.GetAssetsFolder()
+		appendPreloadRoot(preloadRoots, assetsFolder and assetsFolder:FindFirstChild("Bombs"))
+		appendPreloadRoot(preloadRoots, assetsFolder and assetsFolder:FindFirstChild("Replay"))
+
+		local ok, err = true, nil
+		if #preloadRoots > 0 then
+			ok, err = pcall(function()
+				ContentProvider:PreloadAsync(preloadRoots)
+			end)
+		end
+
+		prewarmInProgress = false
+		prewarmComplete = ok
+		if ok then
+			RuntimeProfiler.Count("Client/Replay/Assets/PrewarmedContentRoots", #preloadRoots)
+		else
+			warn("[ReplayClient] Failed to preload replay content: " .. tostring(err))
+			RuntimeProfiler.Count("Client/Replay/Assets/PrewarmContentFailed")
+		end
+		RuntimeProfiler.End("Client/Replay/Assets/PrewarmContent", token)
+	end)
 end
 
 function ReplayAssets.GetEmitModule()

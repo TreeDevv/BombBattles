@@ -81,6 +81,36 @@ local function getReplayTopbar(payload, hud: ScreenGui): (Frame?, TextLabel?, st
 	return nil, nil, nil
 end
 
+local function getMissingTopbarPath(payload, hud: ScreenGui): string
+	if payload.type == "POTGReplay" then
+		local frame = findFrame(hud, POTG_FRAME_NAME)
+		if not frame then
+			return "HUD.POTG"
+		end
+		local inner = findFrame(frame, "Inner")
+		if not inner then
+			return "HUD.POTG.Inner"
+		end
+		if not findTextLabel(inner, "ByPlayer") then
+			return "HUD.POTG.Inner.ByPlayer"
+		end
+	elseif payload.type == "KillReplay" then
+		local frame = findFrame(hud, KILL_REPLAY_FRAME_NAME)
+		if not frame then
+			return "HUD.KillReplay"
+		end
+		local inner = findFrame(frame, "Inner")
+		if not inner then
+			return "HUD.KillReplay.Inner"
+		end
+		if not findTextLabel(inner, "KilledBy") then
+			return "HUD.KillReplay.Inner.KilledBy"
+		end
+	end
+
+	return "HUD replay topbar"
+end
+
 function ReplayOverlay.Create(payload, options)
 	options = options or {}
 	if typeof(payload) ~= "table" then
@@ -97,7 +127,12 @@ function ReplayOverlay.Create(payload, options)
 
 	local frame, playerLabel, topbarName = getReplayTopbar(payload, hud)
 	if not (frame and playerLabel and topbarName) then
-		warnOnce(("Missing authored %s replay topbar or semantic label; replay topbar skipped"):format(tostring(payload.type)))
+		warnOnce(
+			("Missing authored %s replay topbar path %s; replay topbar skipped"):format(
+				tostring(payload.type),
+				getMissingTopbarPath(payload, hud)
+			)
+		)
 		return nil
 	end
 

@@ -15,8 +15,8 @@ type ThrowState = {
 	definition: AbilityDefinition,
 }
 
-local FireBomb = {} :: AbilityTypes.ClientBehavior
-FireBomb.HandlesInputState = true
+local BlackHole = {} :: AbilityTypes.ClientBehavior
+BlackHole.HandlesInputState = true
 
 local activeThrow: ThrowState? = nil
 local predictedCooldownEndsAt = 0
@@ -25,9 +25,6 @@ local emitModule = nil
 local emitModuleInitialized = false
 local warnedMissingEmitModule = false
 local warnedMissingTemplate = false
-local warnedInvalidTemplate = false
-local warnedMissingImpactTemplate = false
-local warnedInvalidImpactTemplate = false
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
 	local value = if definition then definition[key] else nil
@@ -48,18 +45,11 @@ local function clearPreview()
 	BombController:HideAbilityTrajectoryPreview()
 end
 
-local function clearHeldVisual()
-	if type(BombController.ClearLocalAbilityHeldVisual) == "function" then
-		BombController:ClearLocalAbilityHeldVisual()
-	end
-end
-
 local function updatePreview()
 	local state = activeThrow
 	if state and not BombController:IsHoldingBomb() then
 		activeThrow = nil
 		BombController:SetPrimaryBombInputSuppressed(false)
-		clearHeldVisual()
 		clearPreview()
 		return
 	end
@@ -73,7 +63,6 @@ local function updatePreview()
 		activeThrow = nil
 		BombController:SetPrimaryBombInputSuppressed(false)
 		BombController:CancelAbilityThrowHold()
-		clearHeldVisual()
 		clearPreview()
 		return
 	end
@@ -87,7 +76,7 @@ local function updatePreview()
 		0.05
 	)
 	local previewSeconds = math.min(maxFlightSeconds, BombConfig.PreviewMaxSeconds)
-	local color = getDefinitionColor(definition, "previewColor", BombConfig.PreviewColor)
+	local color = getDefinitionColor(definition, "previewColor", Color3.fromRGB(151, 93, 255))
 
 	BombController:ShowAbilityTrajectoryPreview({
 		launchSpeed = speed,
@@ -108,7 +97,6 @@ end
 local function stopThrow()
 	activeThrow = nil
 	clearPreview()
-	clearHeldVisual()
 	BombController:SetPrimaryBombInputSuppressed(false)
 end
 
@@ -127,14 +115,6 @@ local function beginThrow(context: ClientActivateRequestedContext): boolean
 	end
 	if not BombController:BeginAbilityThrowHold() then
 		return true
-	end
-
-	if type(BombController.SetLocalAbilityHeldVisual) == "function" then
-		BombController:SetLocalAbilityHeldVisual({
-			assetPath = context.definition.travelVfxAssetPath,
-			name = "FireBombHeldVFX",
-			disabledAttachmentName = "Impact",
-		})
 	end
 
 	activeThrow = {
@@ -182,44 +162,16 @@ local function getInstanceByPath(path: any): Instance?
 	return current
 end
 
-local function getFireTemplate(path: any): BasePart?
+local function getTemplate(path: any): Instance?
 	local template = getInstanceByPath(path)
-	if not template then
-		if not warnedMissingTemplate then
-			warn("[FireBomb] Missing ReplicatedStorage.Assets.Abilities.FireBomb.Fire")
-			warnedMissingTemplate = true
-		end
-		return nil
+	if template then
+		return template
 	end
-	if not template:IsA("BasePart") then
-		if not warnedInvalidTemplate then
-			warn("[FireBomb] Fire asset must be a BasePart for client VFX placement")
-			warnedInvalidTemplate = true
-		end
-		return nil
+	if not warnedMissingTemplate then
+		warn("[BlackHole] Missing ReplicatedStorage.Assets.Abilities.BlackHole.BlackHole")
+		warnedMissingTemplate = true
 	end
-
-	return template
-end
-
-local function getImpactTemplate(path: any): Attachment?
-	local template = getInstanceByPath(path)
-	if not template then
-		if not warnedMissingImpactTemplate then
-			warn("[FireBomb] Missing ReplicatedStorage.Assets.Abilities.FireBomb.FireBomb.Impact")
-			warnedMissingImpactTemplate = true
-		end
-		return nil
-	end
-	if not template:IsA("Attachment") then
-		if not warnedInvalidImpactTemplate then
-			warn("[FireBomb] Impact VFX asset must be an Attachment")
-			warnedInvalidImpactTemplate = true
-		end
-		return nil
-	end
-
-	return template
+	return nil
 end
 
 local function getEmitModule()
@@ -231,7 +183,7 @@ local function getEmitModule()
 	local moduleScript = packages and packages:FindFirstChild("EmitModule")
 	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
 		if not warnedMissingEmitModule then
-			warn("[FireBomb] Missing ReplicatedStorage.Packages.EmitModule")
+			warn("[BlackHole] Missing ReplicatedStorage.Packages.EmitModule")
 			warnedMissingEmitModule = true
 		end
 		return nil
@@ -240,7 +192,7 @@ local function getEmitModule()
 	local ok, result = pcall(require, moduleScript)
 	if not ok then
 		if not warnedMissingEmitModule then
-			warn("[FireBomb] Failed to require EmitModule: " .. tostring(result))
+			warn("[BlackHole] Failed to require EmitModule: " .. tostring(result))
 			warnedMissingEmitModule = true
 		end
 		return nil
@@ -264,7 +216,7 @@ local function ensureEmitModuleInitialized(module): boolean
 			initFn()
 		end)
 		if not ok then
-			warn("[FireBomb] Failed to initialize EmitModule: " .. tostring(err))
+			warn("[BlackHole] Failed to initialize EmitModule: " .. tostring(err))
 			return false
 		end
 	end
@@ -274,7 +226,7 @@ local function ensureEmitModuleInitialized(module): boolean
 end
 
 local function getVfxFolder(): Folder
-	local existing = workspace:FindFirstChild("FireBombVFX")
+	local existing = workspace:FindFirstChild("BlackHoleVFX")
 	if existing and existing:IsA("Folder") then
 		return existing
 	end
@@ -283,78 +235,49 @@ local function getVfxFolder(): Folder
 	end
 
 	local folder = Instance.new("Folder")
-	folder.Name = "FireBombVFX"
+	folder.Name = "BlackHoleVFX"
 	folder.Parent = workspace
 	return folder
 end
 
-local function prepareVisualClone(clone: BasePart)
-	clone.Anchored = true
-	clone.CanCollide = false
-	clone.CanTouch = false
-	clone.CanQuery = false
-	clone.AssemblyLinearVelocity = Vector3.zero
-	clone.AssemblyAngularVelocity = Vector3.zero
-
-	for _, descendant in ipairs(clone:GetDescendants()) do
+local function prepareVisual(root: Instance)
+	for _, descendant in ipairs(root:GetDescendants()) do
 		if descendant:IsA("BasePart") then
 			descendant.Anchored = true
 			descendant.CanCollide = false
 			descendant.CanTouch = false
 			descendant.CanQuery = false
-			descendant.AssemblyLinearVelocity = Vector3.zero
-			descendant.AssemblyAngularVelocity = Vector3.zero
 		end
+	end
+	if root:IsA("BasePart") then
+		root.Anchored = true
+		root.CanCollide = false
+		root.CanTouch = false
+		root.CanQuery = false
 	end
 end
 
-local function cleanupVisualAfterDelay(clone: Instance, cleanupSeconds: number)
-	local cleaned = false
-	local function cleanup()
-		if cleaned then
-			return
-		end
-		cleaned = true
-		if clone.Parent then
-			clone:Destroy()
-		end
+local function pivotVisual(instance: Instance, position: Vector3)
+	if instance:IsA("Model") then
+		instance:PivotTo(CFrame.new(position))
+	elseif instance:IsA("BasePart") then
+		instance.CFrame = CFrame.new(position)
+	elseif instance:IsA("Attachment") then
+		instance.Position = Vector3.zero
 	end
-
-	task.delay(cleanupSeconds, cleanup)
 end
 
-local function playBurnEffect(position: Vector3, payload: any, definition: AbilityDefinition?)
-	local assetPath = if typeof(payload) == "table" and typeof(payload.assetPath) == "table"
-		then payload.assetPath
-		else if definition then definition.assetPath else nil
-	local template = getFireTemplate(assetPath)
-	if not template then
-		return
-	end
-
-	local cleanupSeconds = math.max(getDefinitionNumber(definition, "fireVisualCleanupSeconds", 4), 0.25)
-	local clone = template:Clone()
-	clone.Name = "FireBombBurnVFX"
-	prepareVisualClone(clone)
-	clone.CFrame = CFrame.new(position)
-	clone.Parent = getVfxFolder()
-
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, err = pcall(function()
-			module.emit(clone)
-		end)
-		if not ok then
-			warn("[FireBomb] Failed to emit burn VFX: " .. tostring(err))
+local function cleanupVisualAfterDelay(instance: Instance, cleanupSeconds: number)
+	task.delay(cleanupSeconds, function()
+		if instance.Parent then
+			instance:Destroy()
 		end
-	end
-
-	cleanupVisualAfterDelay(clone, cleanupSeconds)
+	end)
 end
 
-local function createImpactHolder(position: Vector3): BasePart
+local function createAttachmentHolder(position: Vector3): BasePart
 	local holder = Instance.new("Part")
-	holder.Name = "FireBombImpactVFX"
+	holder.Name = "BlackHoleVFXHolder"
 	holder.Anchored = true
 	holder.CanCollide = false
 	holder.CanTouch = false
@@ -367,45 +290,51 @@ local function createImpactHolder(position: Vector3): BasePart
 	return holder
 end
 
-local function playImpactEffect(position: Vector3, payload: any, definition: AbilityDefinition?)
-	local assetPath = if typeof(payload) == "table" and typeof(payload.impactVfxAssetPath) == "table"
-		then payload.impactVfxAssetPath
-		else if definition then definition.impactVfxAssetPath else nil
-	local template = getImpactTemplate(assetPath)
-	if not template then
-		return
-	end
-
-	local holder = createImpactHolder(position)
-	local impact = template:Clone()
-	impact.Parent = holder
-
-	local cleanupSeconds = math.max(getDefinitionNumber(definition, "impactVisualCleanupSeconds", 3), 0.25)
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, err = pcall(function()
-			module.emit(impact)
-		end)
-		if not ok then
-			warn("[FireBomb] Failed to emit impact VFX: " .. tostring(err))
-		end
-	end
-
-	cleanupVisualAfterDelay(holder, cleanupSeconds)
-end
-
-local function playFireEffect(payload: any)
-	local definition = AbilityConfig.GetDefinition("FireBomb")
+local function playBlackHoleEffect(payload: any)
+	local definition = AbilityConfig.GetDefinition("BlackHole")
 	local position = if typeof(payload) == "table" then payload.position else nil
 	if typeof(position) ~= "Vector3" then
 		return
 	end
 
-	playBurnEffect(position, payload, definition)
-	playImpactEffect(position, payload, definition)
+	local assetPath = if typeof(payload) == "table" and typeof(payload.assetPath) == "table"
+		then payload.assetPath
+		else if definition then definition.assetPath else nil
+	local template = getTemplate(assetPath)
+	if not template then
+		return
+	end
+
+	local cleanupSeconds = if typeof(payload) == "table" and typeof(payload.cleanupSeconds) == "number"
+		then math.max(payload.cleanupSeconds, 0.1)
+		else getDefinitionNumber(definition, "visualCleanupSeconds", 4)
+	local root: Instance
+	local holder: BasePart? = nil
+	if template:IsA("Attachment") then
+		holder = createAttachmentHolder(position)
+		root = template:Clone()
+		root.Parent = holder
+	else
+		root = template:Clone()
+		pivotVisual(root, position)
+		prepareVisual(root)
+		root.Parent = getVfxFolder()
+	end
+
+	local module = getEmitModule()
+	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
+		local ok, err = pcall(function()
+			module.emit(root)
+		end)
+		if not ok then
+			warn("[BlackHole] Failed to emit VFX: " .. tostring(err))
+		end
+	end
+
+	cleanupVisualAfterDelay(holder or root, cleanupSeconds)
 end
 
-function FireBomb.OnActivateRequested(context: ClientActivateRequestedContext): boolean
+function BlackHole.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	local inputState = context.inputState
 	if inputState == nil or inputState == Enum.UserInputState.Begin then
 		return beginThrow(context)
@@ -419,12 +348,12 @@ function FireBomb.OnActivateRequested(context: ClientActivateRequestedContext): 
 	return true
 end
 
-function FireBomb.OnEffect(context: ClientEffectContext)
-	if context.effectName ~= "FireBombAreaStarted" or context.payload.abilityId ~= "FireBomb" then
+function BlackHole.OnEffect(context: ClientEffectContext)
+	if context.effectName ~= "BlackHoleStarted" or context.payload.abilityId ~= "BlackHole" then
 		return
 	end
 
-	playFireEffect(context.payload)
+	playBlackHoleEffect(context.payload)
 end
 
-return FireBomb
+return BlackHole

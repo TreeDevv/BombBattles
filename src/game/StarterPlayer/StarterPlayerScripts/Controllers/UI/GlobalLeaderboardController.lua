@@ -12,14 +12,17 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local REMOTES_FOLDER_NAME = "Remotes"
 local GET_LEADERBOARD_REMOTE_NAME = "GetGlobalLeaderboard"
+local LEADERBOARD_UPDATED_REMOTE_NAME = "GlobalLeaderboardUpdated"
 local ENTRY_NAME_PREFIX = "Entry_"
 local SURFACE_GUI_CLONE_PREFIX = "GlobalLeaderboardSurfaceGui_"
+local FETCH_RETRY_SECONDS = 2
 
 local BOARD_CONFIGS = {
 	{
 		id = "kills",
 		modelName = "KillsLeaderboard",
 		displayModelName = "KillsPlayerDisplay",
+		fallbackDisplayModelName = "PlayerDisplay",
 		metricLabel = "Kills",
 		rankText = "#1 MOST KILLS",
 	},
@@ -27,6 +30,7 @@ local BOARD_CONFIGS = {
 		id = "wins",
 		modelName = "WinsLeaderboard",
 		displayModelName = "WinsPlayerDisplay",
+		fallbackDisplayModelName = "PlayerDisplay",
 		metricLabel = "Wins",
 		rankText = "#1 MOST WINS",
 	},
@@ -34,6 +38,7 @@ local BOARD_CONFIGS = {
 		id = "destruction",
 		modelName = "DestructionLeaderboard",
 		displayModelName = "DestructionPlayerDisplay",
+		fallbackDisplayModelName = "PlayerDisplay",
 		metricLabel = "Destruction",
 		rankText = "#1 MOST DESTRUCTION",
 	},
@@ -75,6 +80,8 @@ type BoardRecord = {
 	displayAnimation: Animation?,
 	selectedPeriod: string,
 	cache: { [string]: any },
+	fetchingPeriods: { [string]: boolean },
+	lastFetchStartedAt: { [string]: number },
 	connections: { RBXScriptConnection },
 	lastInputSelectAt: number,
 	lastInputSelectPeriod: string?,
@@ -84,6 +91,7 @@ local GlobalLeaderboardController = {}
 
 local boardRecords: { BoardRecord } = {}
 local getLeaderboardRemote: RemoteFunction? = nil
+local leaderboardUpdatedRemote: RemoteEvent? = nil
 local rng = Random.new()
 local emoteAnimationCache: { Animation }? = nil
 local inputBeganPositions: { [InputObject]: Vector2 } = {}
@@ -113,6 +121,15 @@ local function findDescendantTextLabel(root: Instance?, name: string): TextLabel
 
 	local direct = root:FindFirstChild(name, true)
 	return if direct and direct:IsA("TextLabel") then direct else nil
+end
+
+local function getChildModel(parent: Instance?, name: string): Model?
+	local child = parent and parent:FindFirstChild(name)
+	return if child and child:IsA("Model") then child else nil
+end
+
+local function getModelPosition(model: Model): Vector3
+	return model:GetPivot().Position
 end
 
 local function formatDuration(seconds: number): string
@@ -509,6 +526,36 @@ local function updateTimer(record: BoardRecord)
 	timer.Text = ""
 end
 
+local function isPayloadExpired(payload): boolean
+	if typeof(payload) ~= "table" then
+		return true
+	end
+
+	local now = math.floor(Workspace:GetServerTimeNow())
+	if typeof(payload.periodResetsAt) == "number" and now >= payload.periodResetsAt then
+		return true
+	end
+	if typeof(payload.nextRefreshAt) == "number" and now >= payload.nextRefreshAt then
+		return true
+	end
+
+	return false
+end
+
+local function arrayContains(values, target: string): boolean
+	if typeof(values) ~= "table" then
+		return true
+	end
+
+	for _, value in ipairs(values) do
+		if value == target then
+			return true
+		end
+	end
+
+	return false
+end
+
 local function invokeLeaderboard(boardId: string, periodId: string)
 	local remote = getLeaderboardRemote
 	if not remote then
@@ -540,24 +587,43 @@ local function renderSelectedPeriod(record: BoardRecord)
 	updateFeaturedDisplay(record, entries)
 end
 
-local function fetchAndRender(record: BoardRecord, periodId: string)
+local function fetchAndRender(record: BoardRecord, periodId: string, force: boolean?): boolean
+	if record.fetchingPeriods[periodId] then
+		return false
+	end
+
+	local now = os.clock()
+	local lastFetchStartedAt = record.lastFetchStartedAt[periodId]
+	if not force and lastFetchStartedAt and now - lastFetchStartedAt < FETCH_RETRY_SECONDS then
+		return false
+	end
+
+	record.fetchingPeriods[periodId] = true
+	record.lastFetchStartedAt[periodId] = now
 	local payload = invokeLeaderboard(record.id, periodId)
+	record.fetchingPeriods[periodId] = nil
 	if not payload then
-		return
+		return false
 	end
 
 	record.cache[periodId] = payload
 	if record.selectedPeriod == periodId then
 		renderSelectedPeriod(record)
 	end
+	return true
 end
 
 local function selectPeriod(record: BoardRecord, periodId: string)
 	record.selectedPeriod = periodId
 	updateButtonState(record)
 
-	if not record.cache[periodId] then
+	local payload = record.cache[periodId]
+	if not payload then
 		fetchAndRender(record, periodId)
+	elseif isPayloadExpired(payload) then
+		if not fetchAndRender(record, periodId) then
+			renderSelectedPeriod(record)
+		end
 	else
 		renderSelectedPeriod(record)
 	end
@@ -572,6 +638,34 @@ local function selectPeriodFromInput(record: BoardRecord, periodId: string)
 	record.lastInputSelectAt = now
 	record.lastInputSelectPeriod = periodId
 	selectPeriod(record, periodId)
+end
+
+local function handleLeaderboardUpdated(payload)
+	if typeof(payload) ~= "table" then
+		return
+	end
+
+	local boards = payload.boards
+	local periods = payload.periods
+	for _, record in ipairs(boardRecords) do
+		if not arrayContains(boards, record.id) then
+			continue
+		end
+
+		local selectedPeriodUpdated = false
+		for periodId in pairs(PERIOD_BUTTONS) do
+			if arrayContains(periods, periodId) then
+				record.cache[periodId] = nil
+				if periodId == record.selectedPeriod then
+					selectedPeriodUpdated = true
+				end
+			end
+		end
+
+		if selectedPeriodUpdated then
+			fetchAndRender(record, record.selectedPeriod, true)
+		end
+	end
 end
 
 local function bindButtons(record: BoardRecord)
@@ -810,14 +904,62 @@ local function hostSurfaceGui(config, uiPart: BasePart, sourceSurfaceGui: Surfac
 	return clone
 end
 
-local function findBoardRecord(config): BoardRecord?
-	local lobby = Workspace:WaitForChild("Lobby", 30)
-	if not lobby then
-		warn("[GlobalLeaderboardController] Missing Workspace.Lobby")
+local function findLeaderboardModel(config): Model?
+	local lobby = Workspace:FindFirstChild("Lobby") or Workspace:WaitForChild("Lobby", 30)
+	if lobby then
+		local model = lobby:FindFirstChild(config.modelName) or lobby:WaitForChild(config.modelName, 30)
+		if model and model:IsA("Model") then
+			return model
+		end
+	end
+
+	local model = Workspace:FindFirstChild(config.modelName, true)
+	if model and model:IsA("Model") then
+		return model
+	end
+
+	warn("[GlobalLeaderboardController] Missing leaderboard model", config.modelName)
+	return nil
+end
+
+local function findNearestSiblingDisplayModel(config, model: Model, uiPart: BasePart): Model?
+	local parent = model.Parent
+	if not parent then
 		return nil
 	end
 
-	local model = lobby:WaitForChild(config.modelName, 30)
+	local nearestModel = nil
+	local nearestDistance = math.huge
+	local anchorPosition = uiPart.Position
+	for _, child in ipairs(parent:GetChildren()) do
+		if child:IsA("Model") and child.Name == config.fallbackDisplayModelName then
+			local distance = (getModelPosition(child) - anchorPosition).Magnitude
+			if distance < nearestDistance then
+				nearestDistance = distance
+				nearestModel = child
+			end
+		end
+	end
+
+	return nearestModel
+end
+
+local function findDisplayModel(config, model: Model, uiPart: BasePart): Model?
+	local displayModel = getChildModel(model, config.displayModelName)
+	if displayModel then
+		return displayModel
+	end
+
+	displayModel = getChildModel(model, config.fallbackDisplayModelName)
+	if displayModel then
+		return displayModel
+	end
+
+	return findNearestSiblingDisplayModel(config, model, uiPart)
+end
+
+local function findBoardRecord(config): BoardRecord?
+	local model = findLeaderboardModel(config)
 	local uiPart = model and model:WaitForChild("UIPart", 30)
 	if not (uiPart and uiPart:IsA("BasePart")) then
 		warn("[GlobalLeaderboardController] Missing UIPart for", config.modelName)
@@ -858,8 +1000,7 @@ local function findBoardRecord(config): BoardRecord?
 		return nil
 	end
 
-	local displayModelInstance = model:FindFirstChild(config.displayModelName)
-	local displayModel = if displayModelInstance and displayModelInstance:IsA("Model") then displayModelInstance else nil
+	local displayModel = findDisplayModel(config, model, uiPart)
 	local displayRig = displayModel and displayModel:FindFirstChild("Rig")
 	local displayRootPart = if displayRig and displayRig:IsA("Model") then getRigRootPart(displayRig) else nil
 	local displayRootCFrame = displayRootPart and displayRootPart.CFrame or nil
@@ -867,7 +1008,7 @@ local function findBoardRecord(config): BoardRecord?
 	if displayModel and not displayRootCFrame then
 		warn("[GlobalLeaderboardController] Missing display Rig HumanoidRootPart for", config.modelName)
 	elseif not displayModel then
-		warn("[GlobalLeaderboardController] Missing player display model for", config.modelName)
+		warn("[GlobalLeaderboardController] Missing player display model for", config.modelName, config.displayModelName)
 	end
 
 	return {
@@ -899,6 +1040,8 @@ local function findBoardRecord(config): BoardRecord?
 		displayAnimation = nil,
 		selectedPeriod = "allTime",
 		cache = {},
+		fetchingPeriods = {},
+		lastFetchStartedAt = {},
 		connections = connections,
 		lastInputSelectAt = 0,
 		lastInputSelectPeriod = nil,
@@ -908,10 +1051,9 @@ end
 local function startTimerLoop()
 	task.spawn(function()
 		while true do
-			local now = math.floor(Workspace:GetServerTimeNow())
 			for _, record in ipairs(boardRecords) do
 				local payload = record.cache[record.selectedPeriod]
-				if typeof(payload) == "table" and typeof(payload.nextRefreshAt) == "number" and now >= payload.nextRefreshAt then
+				if isPayloadExpired(payload) then
 					fetchAndRender(record, record.selectedPeriod)
 				else
 					updateTimer(record)
@@ -932,6 +1074,13 @@ function GlobalLeaderboardController:OnStart()
 		return
 	end
 	getLeaderboardRemote = remote
+	local updatedRemote = remotesFolder and remotesFolder:WaitForChild(LEADERBOARD_UPDATED_REMOTE_NAME, 30)
+	if updatedRemote and updatedRemote:IsA("RemoteEvent") then
+		leaderboardUpdatedRemote = updatedRemote
+		leaderboardUpdatedRemote.OnClientEvent:Connect(handleLeaderboardUpdated)
+	else
+		warn("[GlobalLeaderboardController] Missing GlobalLeaderboardUpdated remote")
+	end
 
 	for _, config in ipairs(BOARD_CONFIGS) do
 		local record = findBoardRecord(config)

@@ -374,7 +374,10 @@ local function getProjectileFolder(): Folder
 	return folder
 end
 
+local setBasePartTransparency
+
 local function preparePhysicalProjectile(projectileId: string, owner: any, bombType: string, skinId: string, visuals): (Instance, BasePart)
+	local hideBaseVisual = typeof(visuals) == "table" and visuals.hideBaseVisual == true
 	local visualScale = if typeof(visuals) == "table" and typeof(visuals.visualScale) == "number"
 		then math.max(visuals.visualScale, 0.05)
 		else BombConfig.ProjectileVisualScale
@@ -384,15 +387,18 @@ local function preparePhysicalProjectile(projectileId: string, owner: any, bombT
 		canQuery = true,
 		massless = false,
 		effectState = {
-			vfx = true,
-			fuseSpark = true,
-			trail = true,
+			vfx = not hideBaseVisual,
+			fuseSpark = not hideBaseVisual,
+			trail = not hideBaseVisual,
 		},
 		visualScale = visualScale,
 	})
 	projectile.Name = "BombProjectile_" .. projectileId
 	if projectile:IsA("Model") then
 		projectile.PrimaryPart = rootPart
+	end
+	if hideBaseVisual then
+		setBasePartTransparency(projectile, 1)
 	end
 
 	projectile:SetAttribute("ProjectileId", projectileId)
@@ -431,6 +437,20 @@ local function setPhysicalMotion(projectile: Instance, velocity: Vector3, angula
 	if projectile:IsA("BasePart") then
 		projectile.AssemblyLinearVelocity = velocity
 		projectile.AssemblyAngularVelocity = angularVelocity
+	end
+end
+
+setBasePartTransparency = function(instance: Instance, transparency: number)
+	transparency = math.clamp(transparency, 0, 1)
+	if instance:IsA("BasePart") then
+		instance.Transparency = transparency
+		instance.CastShadow = transparency < 1
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Transparency = transparency
+			descendant.CastShadow = transparency < 1
+		end
 	end
 end
 
@@ -627,6 +647,7 @@ local function attachProjectile(state: ProjectileState, result, currentTime: num
 		attachInstance = instance,
 		targetKind = state.attached.targetKind,
 		normal = normal,
+		visuals = state.visuals,
 	})
 	fireSnapshot(state, currentTime, true)
 	return true
@@ -1119,11 +1140,13 @@ function startBurrowProjectile(state: ProjectileState, result, currentTime: numb
 	local startInset = readNumber(result.startInset, math.min(carveRadius * 0.45, 2.5), 0, 12)
 	local startPosition = readFiniteVector(result.position, state.position) + direction * startInset
 	local abilityId = if typeof(result.abilityId) == "string" and result.abilityId ~= "" then result.abilityId else "DrillBomb"
+	local burrowEndsAt = currentTime + maxDuration
 
 	destroyPhysicalProjectile(state)
 	state.position = startPosition
 	state.lastPosition = startPosition
 	state.velocity = direction * speed
+	state.explodeAt = math.max(state.explodeAt, burrowEndsAt)
 	state.settled = false
 	state.hasImpacted = true
 	state.grounded = false
@@ -1133,7 +1156,7 @@ function startBurrowProjectile(state: ProjectileState, result, currentTime: numb
 		direction = direction,
 		startPosition = startPosition,
 		startedAt = currentTime,
-		endsAt = math.min(currentTime + maxDuration, state.explodeAt),
+		endsAt = burrowEndsAt,
 		remainingDistance = maxDistance,
 		speed = speed,
 		carveRadius = carveRadius,

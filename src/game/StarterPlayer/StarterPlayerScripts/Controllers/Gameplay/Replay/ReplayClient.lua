@@ -73,6 +73,8 @@ local BASE_BOMB_SIZE = Vector3.new(1.4, 1.4, 1.4)
 local MAX_REPLAY_DURATION_SECONDS = 12
 local MAX_REPLAY_WALL_SECONDS = MAX_REPLAY_DURATION_SECONDS + 4
 local MAX_REPLAY_OBJECTS = 720
+local MAX_KILL_REPLAY_PLAYER_VISUALS = 6
+local MAX_POTG_REPLAY_PLAYER_VISUALS = 10
 local MAX_EVENT_VISUALS = 160
 local MAX_EVENTS_PER_STEP = 12
 local EXPLOSION_VFX_CLEANUP_SECONDS = 8
@@ -588,6 +590,12 @@ local function prepareReplayAvatar(model: Model)
 	return records, rootPart
 end
 
+local function getMotorJointKey(motor: Motor6D): string
+	local part0Name = if motor.Part0 then motor.Part0.Name else ""
+	local part1Name = if motor.Part1 then motor.Part1.Name else ""
+	return part0Name .. ">" .. motor.Name .. ">" .. part1Name
+end
+
 local function buildReplayPoseJoints(model: Model)
 	local joints = {}
 	for _, descendant in ipairs(model:GetDescendants()) do
@@ -628,13 +636,6 @@ local function makeAvatarCharacterVisual(
 	end
 
 	local model = ReplayAvatarFactory.CloneCachedTemplate(userId)
-	if not model and userId > 0 then
-		ReplayAvatarFactory.CacheLiveCharacter(userId)
-		model = ReplayAvatarFactory.CloneCachedTemplate(userId)
-		if model then
-			RuntimeProfiler.Count("Client/Replay/AvatarFactory/LiveCharacterCacheMissRecovered")
-		end
-	end
 	if not model then
 		if userId <= 0 then
 			RuntimeProfiler.Count("Client/Replay/AvatarFactory/MissingCachedNPCAvatars")
@@ -729,73 +730,8 @@ local function makeCharacterVisual(
 	if avatarVisual then
 		return avatarVisual
 	end
-
-	local pooledVisual = ReplayCharacterVisualPool.Take("fallback", parent, userId, teamName, bombSkinId, displayName)
-	if pooledVisual then
-		return pooledVisual
-	end
-
-	local model = Instance.new("Model")
-	model.Name = "ReplayPlayer_" .. tostring(userId)
-	model.Parent = parent
-
-	local color = getTeamColor(teamName, userId)
-	local root = makePart("Root", Vector3.new(0.2, 0.2, 0.2), color, nil)
-	root.Transparency = 1
-	root.Parent = model
-	model.PrimaryPart = root
-
-	local body = makePart("Body", Vector3.new(2, 2.4, 2), color, nil)
-	body.Parent = model
-
-	local head = makePart("Head", Vector3.new(1.25, 1.25, 1.25), Color3.fromRGB(245, 218, 178), Enum.PartType.Ball)
-	head.Parent = model
-
-	local leftArm = makePart("LeftArm", Vector3.new(0.55, 1.7, 0.55), color:Lerp(Color3.new(0, 0, 0), 0.12), nil)
-	leftArm.Parent = model
-
-	local rightArm = makePart("RightArm", Vector3.new(0.55, 1.7, 0.55), color:Lerp(Color3.new(0, 0, 0), 0.12), nil)
-	rightArm.Parent = model
-
-	local teamRing = makePart("TeamRing", Vector3.new(2.8, 0.08, 2.8), color, Enum.PartType.Cylinder)
-	teamRing.Material = Enum.Material.Neon
-	teamRing.Transparency = 0.18
-	teamRing.Parent = model
-
-	local highlight = Instance.new("Highlight")
-	highlight.Name = "TeamOutline"
-	highlight.DepthMode = Enum.HighlightDepthMode.Occluded
-	highlight.FillTransparency = 1
-	highlight.OutlineColor = color
-	highlight.OutlineTransparency = 0.12
-	highlight.Parent = model
-
-	local nameplate = makeNameplate(root, userId, teamName, color, displayName)
-
-	local parts = {
-		{ part = root, offset = CFrame.new(), root = true },
-		{ part = body, offset = CFrame.new(0, 0.1, 0) },
-		{ part = head, offset = CFrame.new(0, 1.95, 0) },
-		{ part = leftArm, offset = CFrame.new(-1.35, 0.15, 0) },
-		{ part = rightArm, offset = CFrame.new(1.35, 0.15, 0) },
-		{ part = teamRing, offset = CFrame.new(0, -2.7, 0) },
-	}
-	local hipBomb = HipBombVisual.new(model, nil, {
-		carrierPart = body,
-		mode = "animated",
-		skinId = bombSkinId,
-	})
-
-	return {
-		model = model,
-		root = root,
-		parts = parts,
-		nameplate = nameplate,
-		highlight = highlight,
-		hipBomb = hipBomb,
-		lastCFrame = nil,
-		replayPoolKey = ReplayCharacterVisualPool.BuildKey("fallback", userId, teamName, bombSkinId, displayName),
-	}
+	RuntimeProfiler.Count("Client/Replay/AvatarFactory/SkippedCharacterFallbacks")
+	return nil
 end
 
 local function makeFallbackBombVisual(parent: Instance, bombId: string, bombType: any)
@@ -2187,6 +2123,16 @@ function ReplayClient:CancelReplay(reason: string?)
 		ReplayMapSimulator.PrewarmReusableScenes()
 	end)
 
+	debugReplayClient(
+		"Replay ended",
+		state.replayType,
+		"reason",
+		reason or "Canceled",
+		"playhead",
+		state.playhead,
+		"end",
+		state.endTime
+	)
 	self.ReplayEnded:Fire(buildReplaySignalPayloadFromState(state, reason or "Canceled"))
 end
 
@@ -2199,6 +2145,8 @@ function ReplayClient:_getStateBuilderDeps()
 		isFiniteNumber = isFiniteNumber,
 		maxReplayDurationSeconds = MAX_REPLAY_DURATION_SECONDS,
 		maxReplayObjects = MAX_REPLAY_OBJECTS,
+		maxKillReplayPlayerVisuals = MAX_KILL_REPLAY_PLAYER_VISUALS,
+		maxPOTGReplayPlayerVisuals = MAX_POTG_REPLAY_PLAYER_VISUALS,
 		createScene = createScene,
 		takePreparedSceneContext = function(payload)
 			return ReplayMapSimulator.TakePreparedScene(payload)
@@ -2421,7 +2369,17 @@ function ReplayClient:PlayReplay(payload): boolean
 			"end",
 			state.endTime,
 			"frames",
-			#state.frames
+			#state.frames,
+			"playerVisuals",
+			countTableEntries(state.playerVisuals),
+			"bombVisuals",
+			countTableEntries(state.bombVisuals),
+			"cameraUserId",
+			state.cameraUserId,
+			"hasRecordedCamera",
+			state.hasRecordedCamera,
+			"overlay",
+			state.overlay ~= nil
 		)
 		self.ReplayStarted:Fire(buildReplaySignalPayloadFromState(state, "Started"))
 		RunService:UnbindFromRenderStep(REPLAY_RENDER_STEP_NAME)
@@ -2471,7 +2429,10 @@ function ReplayClient:PlayKillReplay(payload)
 end
 
 function ReplayClient:ReceiveKillReplay(payload)
-	return self:PlayKillReplay(payload)
+	task.defer(function()
+		self:PlayKillReplay(payload)
+	end)
+	return true
 end
 
 function ReplayClient:PlayPOTGReplay(payload)
@@ -2502,6 +2463,7 @@ function ReplayClient:OnStart()
 		maxCache = MAX_AVATAR_TEMPLATE_CACHE,
 		debug = DEBUG_REPLAY_ANIMATION,
 	})
+	ReplayAssets.PrewarmContent(REPLAY_ASSETS_FOLDER_NAME)
 	ReplayMapSimulator.PrewarmTemplates()
 	ReplayMapSimulator.PrewarmReusableScenes()
 

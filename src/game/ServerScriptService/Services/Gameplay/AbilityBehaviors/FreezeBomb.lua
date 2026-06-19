@@ -11,27 +11,27 @@ local RoundService = require(ServerScriptService.Services.RoundService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityHookResult = AbilityTypes.AbilityHookResult
 type AbilityServiceLike = AbilityTypes.AbilityServiceLike
 type ServerActivateContext = AbilityTypes.ServerActivateContext
 type ServerHookContext = AbilityTypes.ServerHookContext
 
-type FireRecord = {
+type FreezeRecord = {
 	player: Player,
 }
 
-local FireBomb = {} :: AbilityTypes.ServerBehavior
+local FreezeBomb = {} :: AbilityTypes.ServerBehavior
 
-local RESULT_KIND = AbilityResult.Kind
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
-local ZONE_FOLDER_NAME = "FireBombZones"
+local ZONE_FOLDER_NAME = "FreezeBombZones"
+local SLOW_UNTIL_ATTRIBUTE = "FreezeBomb_SlowUntil"
+local SLOW_MULTIPLIER_ATTRIBUTE = "FreezeBomb_SlowMultiplier"
 
-local PROJECTILES: { [string]: FireRecord } = {}
+local PROJECTILES: { [string]: FreezeRecord } = {}
 local projectileSerial = 0
 local bombProjectileService = nil
 local abilityService: AbilityServiceLike? = nil
-local warnedMissingTemplate = false
-local warnedInvalidTemplate = false
 
 local function getBombProjectileService()
 	if bombProjectileService then
@@ -122,7 +122,7 @@ end
 
 local function createProjectileId(player: Player): string
 	projectileSerial += 1
-	return ("FireBomb_%d_%d_%04d"):format(
+	return ("FreezeBomb_%d_%d_%04d"):format(
 		player.UserId,
 		math.floor(workspace:GetServerTimeNow() * 1000),
 		projectileSerial % 10000
@@ -144,69 +144,6 @@ local function getZoneFolder(): Folder
 	return folder
 end
 
-local function getInstanceByPath(path: any): Instance?
-	if typeof(path) ~= "table" then
-		return nil
-	end
-
-	local current: Instance? = ReplicatedStorage
-	for _, name in ipairs(path) do
-		if typeof(name) ~= "string" or name == "" or not current then
-			return nil
-		end
-		current = current:FindFirstChild(name)
-	end
-	return current
-end
-
-local function getFireTemplate(definition: AbilityDefinition?): BasePart?
-	local template = getInstanceByPath(if definition then definition.assetPath else nil)
-	if not template then
-		if not warnedMissingTemplate then
-			warn("[FireBomb] Missing ReplicatedStorage.Assets.Abilities.FireBomb.Fire")
-			warnedMissingTemplate = true
-		end
-		return nil
-	end
-	if not template:IsA("BasePart") then
-		if not warnedInvalidTemplate then
-			warn("[FireBomb] Fire asset must be a BasePart for server overlap damage")
-			warnedInvalidTemplate = true
-		end
-		return nil
-	end
-
-	return template
-end
-
-local function prepareGameplayZone(zone: BasePart)
-	zone.Anchored = true
-	zone.CanCollide = false
-	zone.CanTouch = false
-	zone.CanQuery = true
-	zone.Transparency = 1
-	zone.AssemblyLinearVelocity = Vector3.zero
-	zone.AssemblyAngularVelocity = Vector3.zero
-
-	for _, descendant in ipairs(zone:GetDescendants()) do
-		if descendant:IsA("ParticleEmitter") or descendant:IsA("Trail") or descendant:IsA("Beam") then
-			descendant.Enabled = false
-		elseif descendant:IsA("PointLight") or descendant:IsA("SpotLight") or descendant:IsA("SurfaceLight") then
-			descendant.Enabled = false
-		elseif descendant:IsA("Sound") then
-			descendant:Stop()
-		elseif descendant:IsA("BasePart") then
-			descendant.Anchored = true
-			descendant.CanCollide = false
-			descendant.CanTouch = false
-			descendant.CanQuery = false
-			descendant.Transparency = 1
-			descendant.AssemblyLinearVelocity = Vector3.zero
-			descendant.AssemblyAngularVelocity = Vector3.zero
-		end
-	end
-end
-
 local function getTeamName(player: Player): string?
 	local teamName = player:GetAttribute("RoundTeam")
 	return if typeof(teamName) == "string" and teamName ~= "" then teamName else nil
@@ -225,112 +162,85 @@ local function isEnemyPlayer(owner: Player, target: Player?): boolean
 	return not (ownerTeam and targetTeam and ownerTeam == targetTeam)
 end
 
-local function getDamageTargets(owner: Player, zone: BasePart, overlapParams: OverlapParams): { [Player]: Humanoid }
-	local targets: { [Player]: Humanoid } = {}
+local function applyFreeze(owner: Player, target: Player, definition: AbilityDefinition?, projectileId: string?, notify: boolean)
+	if not isEnemyPlayer(owner, target) then
+		return
+	end
+
+	local character = target.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not (character and humanoid and humanoid.Health > 0) then
+		return
+	end
+
+	local now = workspace:GetServerTimeNow()
+	local duration = math.max(getDefinitionNumber(definition, "freezeSlowDurationSeconds", 2.5), 0)
+	local multiplier = math.clamp(getDefinitionNumber(definition, "freezeSlowMultiplier", 0.6), 0.05, 1)
+	if duration <= 0 or multiplier >= 1 then
+		return
+	end
+
+	local previousUntil = character:GetAttribute(SLOW_UNTIL_ATTRIBUTE)
+	local wasActive = typeof(previousUntil) == "number" and previousUntil > now
+	local slowUntil = math.max(if typeof(previousUntil) == "number" then previousUntil else 0, now + duration)
+
+	character:SetAttribute(SLOW_UNTIL_ATTRIBUTE, slowUntil)
+	character:SetAttribute(SLOW_MULTIPLIER_ATTRIBUTE, multiplier)
+
+	if notify and not wasActive and abilityService then
+		abilityService:FireEffectToPlayer(target, "FreezeBombApplied", {
+			abilityId = "FreezeTnt",
+			projectileId = projectileId,
+			durationSeconds = duration,
+			slowMultiplier = multiplier,
+			slowUntil = slowUntil,
+		})
+	end
+end
+
+local function getZoneTargets(owner: Player, zone: BasePart, overlapParams: OverlapParams): { Player }
+	local targetsByPlayer: { [Player]: boolean } = {}
 	local ok, parts = pcall(function()
 		return workspace:GetPartsInPart(zone, overlapParams)
 	end)
 	if not ok then
-		warn("[FireBomb] Failed to query fire zone overlaps: " .. tostring(parts))
-		return targets
+		warn("[FreezeBomb] Failed to query freeze zone overlaps: " .. tostring(parts))
+		return {}
 	end
 
 	for _, part in ipairs(parts) do
 		local model = part:FindFirstAncestorOfClass("Model")
-		local humanoid = model and model:FindFirstChildOfClass("Humanoid")
-		if not (humanoid and humanoid.Health > 0) then
-			continue
-		end
-
-		local target = Players:GetPlayerFromCharacter(model)
+		local target = model and Players:GetPlayerFromCharacter(model)
 		if isEnemyPlayer(owner, target) then
-			targets[target :: Player] = humanoid
+			targetsByPlayer[target :: Player] = true
 		end
 	end
 
+	local targets = {}
+	for target in pairs(targetsByPlayer) do
+		table.insert(targets, target)
+	end
 	return targets
 end
 
-local function resolvePlayerDamage(owner: Player, target: Player, humanoid: Humanoid, damage: number, sourceContext): (number, boolean)
-	local service = abilityService
-	if not service then
-		return damage, false
-	end
-
-	local character = target.Character
-	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-	local hookResult = service:RunHook("OnBeforePlayerDamage", {
-		owner = owner,
-		target = target,
-		character = character,
-		humanoid = humanoid,
-		rootPart = if rootPart and rootPart:IsA("BasePart") then rootPart else nil,
-		damage = damage,
-		sourceType = sourceContext.sourceType,
-		sourceId = sourceContext.sourceId,
-		projectileId = sourceContext.projectileId,
-		sourceContext = sourceContext,
-	})
-	if typeof(hookResult) ~= "table" then
-		return damage, false
-	end
-	if hookResult.kind == RESULT_KIND.Block or hookResult.kind == RESULT_KIND.Absorb or hookResult.skipDamage == true then
-		return 0, true
-	end
-	if typeof(hookResult.damage) == "number" then
-		return math.max(hookResult.damage, 0), false
-	end
-	if typeof(hookResult.damageMultiplier) == "number" then
-		return math.max(damage * hookResult.damageMultiplier, 0), false
-	end
-
-	return damage, false
-end
-
-local function damageTargets(owner: Player, zone: BasePart, overlapParams: OverlapParams, damage: number, projectileId: string)
-	if damage <= 0 then
-		return
-	end
-
-	for target, humanoid in pairs(getDamageTargets(owner, zone, overlapParams)) do
-		local healthBefore = humanoid.Health
-		if healthBefore <= 0 then
-			continue
-		end
-
-		local sourceContext = {
-			sourceType = "Ability",
-			sourceId = "FireBomb",
-			projectileId = projectileId,
-		}
-		local resolvedDamage, blocked = resolvePlayerDamage(owner, target, humanoid, damage, sourceContext)
-		if blocked or resolvedDamage <= 0 then
-			continue
-		end
-
-		local appliedDamage = math.min(resolvedDamage, healthBefore)
-		RoundService:RecordPlayerDamage(owner, target, appliedDamage, sourceContext)
-		humanoid:TakeDamage(resolvedDamage)
-	end
-end
-
-local function startBurnZone(owner: Player, definition: AbilityDefinition?, projectileId: string, position: Vector3)
-	local template = getFireTemplate(definition)
-	if not template then
+local function startFreezeZone(owner: Player, definition: AbilityDefinition?, projectileId: string, position: Vector3): boolean
+	local radius = math.max(BombConfig.OuterRadius, 1)
+	local durationSeconds = math.max(getDefinitionNumber(definition, "freezeZoneDurationSeconds", 4), 0)
+	local tickSeconds = math.max(getDefinitionNumber(definition, "freezeZoneTickSeconds", 0.25), 0.05)
+	if durationSeconds <= 0 then
 		return false
 	end
 
-	local durationSeconds = math.max(getDefinitionNumber(definition, "fireDurationSeconds", 6), 0)
-	local tickSeconds = math.max(getDefinitionNumber(definition, "fireTickSeconds", 0.5), 0.05)
-	local tickDamage = math.max(getDefinitionNumber(definition, "fireTickDamage", 10), 0)
-	if durationSeconds <= 0 or tickDamage <= 0 then
-		return false
-	end
-
-	local zone = template:Clone()
-	zone.Name = "FireBombZone_" .. projectileId
-	prepareGameplayZone(zone)
+	local zone = Instance.new("Part")
+	zone.Name = "FreezeBombZone_" .. projectileId
+	zone.Shape = Enum.PartType.Ball
+	zone.Size = Vector3.new(radius * 2, radius * 2, radius * 2)
 	zone.CFrame = CFrame.new(position)
+	zone.Transparency = 1
+	zone.Anchored = true
+	zone.CanCollide = false
+	zone.CanTouch = false
+	zone.CanQuery = true
 	zone.Parent = getZoneFolder()
 
 	local overlapParams = OverlapParams.new()
@@ -339,9 +249,10 @@ local function startBurnZone(owner: Player, definition: AbilityDefinition?, proj
 
 	task.spawn(function()
 		local expiresAt = workspace:GetServerTimeNow() + durationSeconds
-
 		while zone.Parent and owner.Parent == Players do
-			damageTargets(owner, zone, overlapParams, tickDamage, projectileId)
+			for _, target in ipairs(getZoneTargets(owner, zone, overlapParams)) do
+				applyFreeze(owner, target, definition, projectileId, true)
+			end
 
 			local remaining = expiresAt - workspace:GetServerTimeNow()
 			if remaining <= 0 then
@@ -358,12 +269,12 @@ local function startBurnZone(owner: Player, definition: AbilityDefinition?, proj
 	return true
 end
 
-local function getTrackedProjectile(player: Player, context): FireRecord?
+local function getTrackedProjectile(player: Player, context): FreezeRecord?
 	if typeof(context) ~= "table" then
 		return nil
 	end
 
-	local projectileId = context.projectileId
+	local projectileId = context.projectileId or context.sourceId
 	if typeof(projectileId) ~= "string" or projectileId == "" then
 		return nil
 	end
@@ -375,7 +286,7 @@ local function getTrackedProjectile(player: Player, context): FireRecord?
 	return nil
 end
 
-local function cleanupProjectileLater(projectileId: string, record: FireRecord, delaySeconds: number)
+local function cleanupProjectileLater(projectileId: string, record: FreezeRecord, delaySeconds: number)
 	task.delay(delaySeconds, function()
 		if PROJECTILES[projectileId] == record then
 			PROJECTILES[projectileId] = nil
@@ -383,15 +294,15 @@ local function cleanupProjectileLater(projectileId: string, record: FireRecord, 
 	end)
 end
 
-function FireBomb.OnStart(service: AbilityServiceLike)
+function FreezeBomb.OnStart(service: AbilityServiceLike)
 	abilityService = service
 end
 
-function FireBomb.CanActivate(context: ServerActivateContext): boolean
+function FreezeBomb.CanActivate(context: ServerActivateContext): boolean
 	return getCharacterRoot(context.player) ~= nil and getBombProjectileService() ~= nil
 end
 
-function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationResult
+function FreezeBomb.OnActivate(context: ServerActivateContext): AbilityActivationResult
 	local projectileService = getBombProjectileService()
 	local rootPart = getCharacterRoot(context.player)
 	if not (projectileService and rootPart) then
@@ -406,6 +317,9 @@ function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 	local upwardVelocity = getDefinitionNumber(context.definition, "projectileUpwardVelocity", BombConfig.ProjectileUpwardVelocity)
 	local gravityScale = getDefinitionNumber(context.definition, "projectileGravityScale", BombConfig.ProjectileGravityScale)
 	local remainingFuse = math.max(getDefinitionNumber(context.definition, "projectileMaxFlightSeconds", BombConfig.FuseSeconds), 0.05)
+	local highlightColor = if typeof(context.definition.freezeHighlightColor) == "Color3"
+		then context.definition.freezeHighlightColor
+		else Color3.fromRGB(91, 226, 255)
 
 	local launched = projectileService:Launch({
 		owner = context.player,
@@ -430,11 +344,16 @@ function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 				playerContactExplodes = false,
 				playerContactImpacts = false,
 			},
+			explosion = {
+				abilityId = "FreezeTnt",
+				suppressDefaultExplosionVfx = true,
+			},
 			visuals = {
 				abilityVisualOverlay = true,
 				abilityVisualAssetPath = context.definition.travelVfxAssetPath,
-				abilityVisualName = "FireBombProjectileVFX",
+				abilityVisualName = "FreezeBombVFX",
 				abilityVisualDisabledAttachmentName = "Impact",
+				highlightColor = highlightColor,
 			},
 		},
 	})
@@ -446,24 +365,24 @@ function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 		player = context.player,
 	}
 	PROJECTILES[projectileId] = record
-	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 4)
+	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 8)
 
 	local state = context.slotState.state
-	local fireBombsThrown = if typeof(state) == "table" and typeof(state.fireBombsThrown) == "number"
-		then state.fireBombsThrown
+	local freezeBombsThrown = if typeof(state) == "table" and typeof(state.freezeBombsThrown) == "number"
+		then state.freezeBombsThrown
 		else 0
-	local fireZonesCreated = if typeof(state) == "table" and typeof(state.fireZonesCreated) == "number"
-		then state.fireZonesCreated
+	local freezeZonesCreated = if typeof(state) == "table" and typeof(state.freezeZonesCreated) == "number"
+		then state.freezeZonesCreated
 		else 0
 
 	return {
 		state = {
-			fireBombsThrown = fireBombsThrown + 1,
-			fireZonesCreated = fireZonesCreated,
+			freezeBombsThrown = freezeBombsThrown + 1,
+			freezeZonesCreated = freezeZonesCreated,
 			lastActivatedAt = context.now,
 		},
 		effect = {
-			name = "FireBombFired",
+			name = "FreezeBombFired",
 			payload = {
 				projectileId = projectileId,
 			},
@@ -471,7 +390,7 @@ function FireBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 	}
 end
 
-function FireBomb.OnBeforeExplosion(context: ServerHookContext)
+function FreezeBomb.OnBeforeExplosion(context: ServerHookContext): AbilityHookResult
 	local payload = context.context
 	local record = getTrackedProjectile(context.player, payload)
 	if not record then
@@ -479,33 +398,35 @@ function FireBomb.OnBeforeExplosion(context: ServerHookContext)
 	end
 
 	local projectileId = payload.projectileId
-	PROJECTILES[projectileId] = nil
+	if typeof(projectileId) ~= "string" or projectileId == "" then
+		return AbilityResult.Continue()
+	end
 
 	if typeof(payload.position) == "Vector3" then
-		local zoneCreated = startBurnZone(record.player, context.definition, projectileId, payload.position)
+		local zoneCreated = startFreezeZone(record.player, context.definition, projectileId, payload.position)
 		if zoneCreated and abilityService then
-			abilityService:FireEffect("FireBombAreaStarted", {
+			abilityService:FireEffect("FreezeBombAreaStarted", {
 				player = record.player,
 				slot = context.slot,
-				abilityId = "FireBomb",
+				abilityId = "FreezeTnt",
 				projectileId = projectileId,
 				position = payload.position,
-				durationSeconds = getDefinitionNumber(context.definition, "fireDurationSeconds", 6),
-				assetPath = context.definition.assetPath,
+				durationSeconds = getDefinitionNumber(context.definition, "freezeZoneDurationSeconds", 4),
+				zoneVfxAssetPath = context.definition.zoneVfxAssetPath or context.definition.assetPath,
 				impactVfxAssetPath = context.definition.impactVfxAssetPath,
 			})
 
 			local state = context.slotState.state
-			local fireBombsThrown = if typeof(state) == "table" and typeof(state.fireBombsThrown) == "number"
-				then state.fireBombsThrown
+			local freezeBombsThrown = if typeof(state) == "table" and typeof(state.freezeBombsThrown) == "number"
+				then state.freezeBombsThrown
 				else 0
-			local fireZonesCreated = if typeof(state) == "table" and typeof(state.fireZonesCreated) == "number"
-				then state.fireZonesCreated
+			local freezeZonesCreated = if typeof(state) == "table" and typeof(state.freezeZonesCreated) == "number"
+				then state.freezeZonesCreated
 				else 0
 			abilityService:SetSlotValues(record.player, context.slot, {
 				state = {
-					fireBombsThrown = fireBombsThrown,
-					fireZonesCreated = fireZonesCreated + 1,
+					freezeBombsThrown = freezeBombsThrown,
+					freezeZonesCreated = freezeZonesCreated + 1,
 					lastActivatedAt = if typeof(state) == "table" and typeof(state.lastActivatedAt) == "number"
 						then state.lastActivatedAt
 						else context.now,
@@ -517,7 +438,22 @@ function FireBomb.OnBeforeExplosion(context: ServerHookContext)
 	return AbilityResult.Continue()
 end
 
-function FireBomb.OnPlayerRemoving(player: Player)
+function FreezeBomb.OnBeforePlayerBombDamage(context: ServerHookContext): AbilityHookResult
+	local payload = context.context
+	local record = getTrackedProjectile(context.player, payload)
+	if not record then
+		return AbilityResult.Continue()
+	end
+
+	local target = if typeof(payload) == "table" then payload.target else nil
+	if typeof(target) == "Instance" and target:IsA("Player") then
+		applyFreeze(record.player, target, context.definition, payload.sourceId, true)
+	end
+
+	return AbilityResult.Continue()
+end
+
+function FreezeBomb.OnPlayerRemoving(player: Player)
 	for projectileId, record in pairs(PROJECTILES) do
 		if record.player == player then
 			PROJECTILES[projectileId] = nil
@@ -525,4 +461,4 @@ function FireBomb.OnPlayerRemoving(player: Player)
 	end
 end
 
-return FireBomb
+return FreezeBomb

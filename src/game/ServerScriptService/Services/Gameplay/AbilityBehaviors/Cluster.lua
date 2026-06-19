@@ -10,12 +10,26 @@ local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysi
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityHookResult = AbilityTypes.AbilityHookResult
 type ServerActivateContext = AbilityTypes.ServerActivateContext
 type ServerHookContext = AbilityTypes.ServerHookContext
 
 type ClusterRecord = {
 	player: Player,
 	skinId: string,
+	groupId: string,
+}
+
+type MiniRecord = {
+	player: Player,
+	groupId: string,
+	expiresAt: number,
+}
+
+type KnockbackGroupRecord = {
+	player: Player,
+	expiresAt: number,
+	targets: { [string]: boolean },
 }
 
 local Cluster = {} :: AbilityTypes.ServerBehavior
@@ -23,6 +37,8 @@ local Cluster = {} :: AbilityTypes.ServerBehavior
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
 local PRIMARY_PROJECTILES: { [string]: ClusterRecord } = {}
+local MINI_PROJECTILES: { [string]: MiniRecord } = {}
+local KNOCKBACK_GROUPS: { [string]: KnockbackGroupRecord } = {}
 local projectileSerial = 0
 local bombProjectileService = nil
 
@@ -173,6 +189,95 @@ local function cleanupProjectileLater(projectileId: string, record: ClusterRecor
 	end)
 end
 
+local function cleanupMiniLater(projectileId: string, record: MiniRecord, delaySeconds: number)
+	task.delay(delaySeconds, function()
+		if MINI_PROJECTILES[projectileId] == record then
+			MINI_PROJECTILES[projectileId] = nil
+		end
+	end)
+end
+
+local function cleanupKnockbackGroupLater(groupId: string, record: KnockbackGroupRecord, delaySeconds: number)
+	task.delay(delaySeconds, function()
+		if KNOCKBACK_GROUPS[groupId] == record then
+			KNOCKBACK_GROUPS[groupId] = nil
+		end
+	end)
+end
+
+local function getProjectileIdFromPayload(payload): string?
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+
+	local projectileId = payload.sourceId or payload.projectileId
+	return if typeof(projectileId) == "string" and projectileId ~= "" then projectileId else nil
+end
+
+local function getTrackedMini(player: Player, payload): MiniRecord?
+	local projectileId = getProjectileIdFromPayload(payload)
+	if not projectileId then
+		return nil
+	end
+
+	local record = MINI_PROJECTILES[projectileId]
+	if record and record.player == player then
+		if record.expiresAt <= workspace:GetServerTimeNow() then
+			MINI_PROJECTILES[projectileId] = nil
+			return nil
+		end
+		return record
+	end
+	return nil
+end
+
+local function getTargetKey(target: any): string?
+	if typeof(target) == "Instance" and target:IsA("Player") then
+		return "Player:" .. tostring(target.UserId)
+	end
+	return nil
+end
+
+local function getRepeatKnockbackResult(context: ServerHookContext, payload, target: any): AbilityHookResult
+	local miniRecord = getTrackedMini(context.player, payload)
+	if not miniRecord then
+		return AbilityResult.Continue()
+	end
+
+	local targetKey = getTargetKey(target)
+	if not targetKey then
+		return AbilityResult.Continue()
+	end
+
+	local group = KNOCKBACK_GROUPS[miniRecord.groupId]
+	if not group or group.expiresAt <= context.now then
+		group = {
+			player = context.player,
+			expiresAt = math.max(miniRecord.expiresAt, context.now),
+			targets = {},
+		}
+		KNOCKBACK_GROUPS[miniRecord.groupId] = group
+	end
+
+	if not group.targets[targetKey] then
+		group.targets[targetKey] = true
+		return AbilityResult.Continue()
+	end
+
+	local multiplier = math.max(getDefinitionNumber(context.definition, "miniRepeatKnockbackMultiplier", 0), 0)
+	if multiplier <= 0 then
+		return {
+			kind = AbilityResult.Kind.ModifyDamage,
+			skipKnockback = true,
+		}
+	end
+
+	return {
+		kind = AbilityResult.Kind.ModifyDamage,
+		knockbackMultiplier = multiplier,
+	}
+end
+
 local function getRingDirections(count: number): { Vector3 }
 	count = math.max(math.floor(count), 1)
 	local directions = {}
@@ -199,8 +304,17 @@ local function spawnMiniBombs(context: ServerHookContext, record: ClusterRecord,
 	local radiusScale = math.max(getDefinitionNumber(definition, "miniRadiusScale", 0.45), 0.05)
 	local visualScale = math.max(getDefinitionNumber(definition, "miniVisualScale", BombConfig.ProjectileVisualScale * 0.45), 0.05)
 	local spawnYOffset = getDefinitionNumber(definition, "miniSpawnYOffset", 1.25)
+	local repeatWindowSeconds = math.max(getDefinitionNumber(definition, "miniRepeatKnockbackWindowSeconds", 3), 0)
 	local origin = position + Vector3.yAxis * spawnYOffset
 	local launchedIds = {}
+	local cleanupDelay = fuseSeconds + BombConfig.ProjectileLifetimePadding + repeatWindowSeconds + 1
+	local groupRecord: KnockbackGroupRecord = {
+		player = record.player,
+		expiresAt = context.now + cleanupDelay,
+		targets = {},
+	}
+	KNOCKBACK_GROUPS[record.groupId] = groupRecord
+	cleanupKnockbackGroupLater(record.groupId, groupRecord, cleanupDelay)
 
 	for index, direction in ipairs(getRingDirections(count)) do
 		local projectileId = createProjectileId("ClusterMini", record.player, index)
@@ -242,6 +356,13 @@ local function spawnMiniBombs(context: ServerHookContext, record: ClusterRecord,
 			},
 		})
 		if launched then
+			local miniRecord: MiniRecord = {
+				player = record.player,
+				groupId = record.groupId,
+				expiresAt = context.now + cleanupDelay,
+			}
+			MINI_PROJECTILES[projectileId] = miniRecord
+			cleanupMiniLater(projectileId, miniRecord, cleanupDelay)
 			table.insert(launchedIds, projectileId)
 		end
 	end
@@ -301,6 +422,7 @@ function Cluster.OnActivate(context: ServerActivateContext): AbilityActivationRe
 	local record = {
 		player = context.player,
 		skinId = skinId,
+		groupId = projectileId,
 	}
 	PRIMARY_PROJECTILES[projectileId] = record
 	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 4)
@@ -341,10 +463,32 @@ function Cluster.OnBeforeExplosion(context: ServerHookContext)
 	return AbilityResult.Continue()
 end
 
+function Cluster.OnBeforePlayerBombDamage(context: ServerHookContext): AbilityHookResult
+	local payload = context.context
+	local target = if typeof(payload) == "table" then payload.target else nil
+	return getRepeatKnockbackResult(context, payload, target)
+end
+
+function Cluster.OnBeforeOwnerBombKnockback(context: ServerHookContext): AbilityHookResult
+	local payload = context.context
+	local owner = if typeof(payload) == "table" then payload.owner else nil
+	return getRepeatKnockbackResult(context, payload, owner)
+end
+
 function Cluster.OnPlayerRemoving(player: Player)
 	for projectileId, record in pairs(PRIMARY_PROJECTILES) do
 		if record.player == player then
 			PRIMARY_PROJECTILES[projectileId] = nil
+		end
+	end
+	for projectileId, record in pairs(MINI_PROJECTILES) do
+		if record.player == player then
+			MINI_PROJECTILES[projectileId] = nil
+		end
+	end
+	for groupId, record in pairs(KNOCKBACK_GROUPS) do
+		if record.player == player then
+			KNOCKBACK_GROUPS[groupId] = nil
 		end
 	end
 end

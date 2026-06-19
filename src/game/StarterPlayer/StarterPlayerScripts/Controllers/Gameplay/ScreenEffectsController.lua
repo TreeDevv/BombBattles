@@ -1,4 +1,5 @@
 local Players = game:GetService("Players")
+local Lighting = game:GetService("Lighting")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
@@ -6,8 +7,27 @@ local TweenService = game:GetService("TweenService")
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local LocalPlayer = Players.LocalPlayer
+local ROUND_ALIVE_ATTR = "RoundAlive"
+local ROUND_RESPAWN_ENDS_AT_ATTR = "RoundRespawnEndsAt"
+
+local function isPendingRoundRespawn(): boolean
+	if LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) ~= false then
+		return false
+	end
+
+	local respawnEndsAt = LocalPlayer:GetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR)
+	return typeof(respawnEndsAt) == "number" and respawnEndsAt > workspace:GetServerTimeNow()
+end
 
 type ColorCorrectionConfig = {
+	name: string,
+	tweenInTime: number,
+	tweenOutTime: number,
+	inProperties: { [string]: any },
+	outProperties: { [string]: any },
+}
+
+type BlurConfig = {
 	name: string,
 	tweenInTime: number,
 	tweenOutTime: number,
@@ -19,7 +39,9 @@ type PresetConfig = {
 	frontOffset: CFrame,
 	cleanupDelay: number?,
 	screenFit: boolean?,
+	requiresEffectPart: boolean?,
 	colorCorrection: ColorCorrectionConfig?,
+	blur: BlurConfig?,
 	burnFlash: boolean?,
 	explosionAssetName: string?,
 	minRateScale: number?,
@@ -34,6 +56,8 @@ type ActiveEffect = {
 	renderConn: RBXScriptConnection?,
 	colorCorrection: ColorCorrectionEffect?,
 	colorCorrectionTween: Tween?,
+	blur: BlurEffect?,
+	blurTween: Tween?,
 	hasStarted: boolean,
 	intensity: number,
 	emitterRates: { [ParticleEmitter]: number },
@@ -129,6 +153,34 @@ local PRESETS: { [string]: PresetConfig } = {
 		frontOffset = CFrame.new(0, 0, -1.4),
 		minRateScale = 0.45,
 		maxRateScale = 1.35,
+	},
+	Acid = {
+		frontOffset = CFrame.new(0, 0, -1.4),
+		cleanupDelay = 0.75,
+		requiresEffectPart = false,
+		colorCorrection = {
+			name = "AcidColorCorrection",
+			tweenInTime = 0.16,
+			tweenOutTime = 0.45,
+			inProperties = {
+				TintColor = Color3.fromRGB(184, 255, 128),
+				Contrast = 0.18,
+				Saturation = -0.25,
+				Brightness = -0.05,
+			},
+			outProperties = CC_OUT_PROPERTIES,
+		},
+		blur = {
+			name = "AcidBlur",
+			tweenInTime = 0.16,
+			tweenOutTime = 0.45,
+			inProperties = {
+				Size = 14,
+			},
+			outProperties = {
+				Size = 0,
+			},
+		},
 	},
 }
 
@@ -287,29 +339,35 @@ function ScreenEffectsController:_startPreset(presetName: string, config: Preset
 
 	local presetFolder = getPresetAssetFolder(presetName)
 	local template = presetFolder and presetFolder:FindFirstChild("EffectPart")
-	if not (template and template:IsA("BasePart")) then
+	if template and not template:IsA("BasePart") then
 		warn(("[ScreenEffectsController] Missing EffectPart for preset %s"):format(presetName))
 		return false
 	end
 
-	local part = template:Clone()
-	part.Name = presetName .. "Effect"
-	setVisualPartProperties(part)
-	part.Parent = camera
+	local part: BasePart? = nil
+	if template and template:IsA("BasePart") then
+		part = template:Clone()
+		part.Name = presetName .. "Effect"
+		setVisualPartProperties(part)
+		part.Parent = camera
 
-	local originalSize = template.Size
-	active.effectPart = part
-	active.renderConn = RunService.RenderStepped:Connect(function()
-		local token = RuntimeProfiler.Begin("Client/ScreenEffectsController/EffectRender")
-		if part.Parent and workspace.CurrentCamera then
-			updatePartForCamera(part, workspace.CurrentCamera, config, originalSize)
-		end
-		RuntimeProfiler.End("Client/ScreenEffectsController/EffectRender", token)
-	end)
+		local originalSize = template.Size
+		active.effectPart = part
+		active.renderConn = RunService.RenderStepped:Connect(function()
+			local token = RuntimeProfiler.Begin("Client/ScreenEffectsController/EffectRender")
+			if part and part.Parent and workspace.CurrentCamera then
+				updatePartForCamera(part, workspace.CurrentCamera, config, originalSize)
+			end
+			RuntimeProfiler.End("Client/ScreenEffectsController/EffectRender", token)
+		end)
 
-	updatePartForCamera(part, camera, config, originalSize)
-	setEmittersEnabled(part, true)
-	active.emitterRates = captureEmitterRates(part)
+		updatePartForCamera(part, camera, config, originalSize)
+		setEmittersEnabled(part, true)
+		active.emitterRates = captureEmitterRates(part)
+	elseif config.requiresEffectPart ~= false or not (config.colorCorrection or config.blur) then
+		warn(("[ScreenEffectsController] Missing EffectPart for preset %s"):format(presetName))
+		return false
+	end
 
 	local colorCorrectionConfig = config.colorCorrection
 	if colorCorrectionConfig then
@@ -329,7 +387,25 @@ function ScreenEffectsController:_startPreset(presetName: string, config: Preset
 		active.colorCorrectionTween:Play()
 	end
 
-		self:_applyIntensity(active, config)
+	local blurConfig = config.blur
+	if blurConfig then
+		local blur = Instance.new("BlurEffect")
+		blur.Name = blurConfig.name
+		for property, value in pairs(blurConfig.outProperties) do
+			(blur :: any)[property] = value
+		end
+		blur.Parent = Lighting
+
+		active.blur = blur
+		active.blurTween = TweenService:Create(
+			blur,
+			TweenInfo.new(blurConfig.tweenInTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+			blurConfig.inProperties
+		)
+		active.blurTween:Play()
+	end
+
+	self:_applyIntensity(active, config)
 
 	if config.burnFlash and not active.hasStarted then
 		active.hasStarted = true
@@ -337,7 +413,7 @@ function ScreenEffectsController:_startPreset(presetName: string, config: Preset
 
 		local explosionAssetName = config.explosionAssetName
 		local explosionTemplate = explosionAssetName and presetFolder and presetFolder:FindFirstChild(explosionAssetName)
-		if explosionTemplate then
+		if explosionTemplate and part then
 			local explosion = explosionTemplate:Clone()
 			explosion.Parent = part
 			emitDescendantParticles(explosion)
@@ -371,10 +447,14 @@ function ScreenEffectsController:Apply(presetName: string, duration: number, opt
 	local now = os.clock()
 	local active = self._activeEffects[presetName]
 	if active then
-		active.endTime += duration
+		if typeof(options) == "table" and options.refresh == true then
+			active.endTime = math.max(active.endTime, now + duration)
+		else
+			active.endTime += duration
+		end
 		if typeof(options) == "table" and typeof(options.intensity) == "number" then
 			active.intensity = math.clamp(options.intensity, 0, 1)
-	self:_applyIntensity(active, config)
+			self:_applyIntensity(active, config)
 		end
 		return true
 	end
@@ -387,6 +467,8 @@ function ScreenEffectsController:Apply(presetName: string, duration: number, opt
 		renderConn = nil,
 		colorCorrection = nil,
 		colorCorrectionTween = nil,
+		blur = nil,
+		blurTween = nil,
 		hasStarted = false,
 		intensity = if typeof(options) == "table" and typeof(options.intensity) == "number"
 			then math.clamp(options.intensity, 0, 1)
@@ -433,12 +515,14 @@ function ScreenEffectsController:Stop(presetName: string): boolean
 	local runId = active.runId
 	local part = active.effectPart
 	local colorCorrection = active.colorCorrection
+	local blur = active.blur
 	local renderConn = active.renderConn
 
 	self._activeEffects[presetName] = nil
 	active.effectPart = nil
 	active.renderConn = nil
 	active.colorCorrection = nil
+	active.blur = nil
 
 	if part then
 		setEmittersEnabled(part, false)
@@ -448,12 +532,24 @@ function ScreenEffectsController:Stop(presetName: string): boolean
 		active.colorCorrectionTween:Cancel()
 		active.colorCorrectionTween = nil
 	end
+	if active.blurTween then
+		active.blurTween:Cancel()
+		active.blurTween = nil
+	end
 
 	if colorCorrection and config and config.colorCorrection then
 		local tweenOut = TweenService:Create(
 			colorCorrection,
 			TweenInfo.new(config.colorCorrection.tweenOutTime, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
 			config.colorCorrection.outProperties
+		)
+		tweenOut:Play()
+	end
+	if blur and config and config.blur then
+		local tweenOut = TweenService:Create(
+			blur,
+			TweenInfo.new(config.blur.tweenOutTime, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+			config.blur.outProperties
 		)
 		tweenOut:Play()
 	end
@@ -470,6 +566,9 @@ function ScreenEffectsController:Stop(presetName: string): boolean
 		end
 		if colorCorrection and colorCorrection.Parent then
 			colorCorrection:Destroy()
+		end
+		if blur and blur.Parent then
+			blur:Destroy()
 		end
 	end)
 
@@ -501,6 +600,10 @@ function ScreenEffectsController:OnStart()
 	self:StopAll()
 
 	LocalPlayer.CharacterRemoving:Connect(function()
+		if isPendingRoundRespawn() then
+			return
+		end
+
 		self:StopAll()
 	end)
 end

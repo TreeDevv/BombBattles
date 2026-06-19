@@ -257,6 +257,9 @@
           "GlobalLeaderboardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GlobalLeaderboardController.lua"
           },
+          "HexagonBarrierController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/HexagonBarrierController.lua"
+          },
           "WorldTextController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/WorldTextController.lua"
           },

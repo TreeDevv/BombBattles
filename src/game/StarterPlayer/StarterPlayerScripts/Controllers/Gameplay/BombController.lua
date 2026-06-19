@@ -18,6 +18,7 @@ local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debris)
 
 local LocalPlayer = Players.LocalPlayer
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local CameraController = require(script.Parent:WaitForChild("CameraController"))
 local BombTrajectoryClient = require(script.Parent:WaitForChild("BombTrajectoryClient"))
@@ -35,6 +36,7 @@ local HELD_BOMB_VISUAL_NAME = "BombHeldVisual"
 local HELD_BOMB_GRIP_ATTACHMENT_NAME = "BombGripAttachment"
 local HELD_BOMB_CONSTRAINT_NAME = "BombGripConstraint"
 local HELD_BOMB_WELD_NAME = "BombHeldWeld"
+local ABILITY_VISUAL_OVERLAY_NAME = "AbilityVisualOverlay"
 local HIP_BOMB_VISUAL_NAME = (BombConfig.HipCarry and BombConfig.HipCarry.VisualName) or "BombHipVisual"
 local HIP_BOMB_MOTOR_NAME = (BombConfig.HipCarry and BombConfig.HipCarry.MotorName) or "BombHipMotor"
 local HELD_BOMB_ATTACH_RETRY_SECONDS = 0.1
@@ -99,6 +101,7 @@ BombController._emitModule = nil :: any
 BombController._emitModuleInitialized = false
 BombController._warnedMissingExplosionVfx = false
 BombController._warnedMissingEmitModule = false
+BombController._warnedMissingAbilityVisuals = {} :: { [string]: boolean }
 BombController._characterConnection = nil :: RBXScriptConnection?
 BombController._characterRemovingConnection = nil :: RBXScriptConnection?
 BombController._playerRemovingConnection = nil :: RBXScriptConnection?
@@ -138,6 +141,7 @@ BombController._heldBombs = {} :: {
 		pulseConnection: RBXScriptConnection?,
 		fuseStartedAt: number?,
 		fuseEndsAt: number?,
+		abilityVisualOverlay: Instance?,
 		frozen: boolean?,
 		frozenUntil: number?,
 	},
@@ -151,6 +155,7 @@ BombController._heldBombPulseTimes = {} :: {
 		fuseEndsAt: number,
 	},
 }
+BombController._localAbilityHeldVisualOptions = nil :: any?
 BombController._hipBombs = {} :: { [Player]: any }
 BombController._projectileVisualFolder = nil :: Folder?
 BombController._projectileVisuals = {} :: {
@@ -176,6 +181,7 @@ BombController._projectileVisuals = {} :: {
 		handoffPhysical: Instance?,
 		fuseStartedAt: number?,
 		fuseEndsAt: number?,
+		abilityVisualOverlay: Instance?,
 		visuals: { [string]: any }?,
 		burrowing: boolean?,
 	},
@@ -271,6 +277,25 @@ local function getMouseAimDirection(): Vector3
 	return BombTrajectoryClient.GetMouseAimDirection(getRootPart())
 end
 
+local function isPrimaryBombInputOverGui(inputObject: InputObject): boolean
+	if inputObject.UserInputType ~= Enum.UserInputType.MouseButton1 then
+		return false
+	end
+
+	local position = inputObject.Position
+	local guiObjects = PlayerGui:GetGuiObjectsAtPosition(position.X, position.Y)
+	for _, guiObject in ipairs(guiObjects) do
+		if guiObject:IsA("GuiButton") and guiObject.Active and guiObject.Visible then
+			return true
+		end
+	end
+	return false
+end
+
+local function sanitizeAimDirection(aimDirection: Vector3, fallback: Vector3): Vector3
+	return BombTrajectoryClient.SanitizeAimDirection(aimDirection, fallback)
+end
+
 local function getThrowOrigin(rootPart: BasePart): Vector3
 	return BombTrajectoryClient.GetThrowOrigin(rootPart)
 end
@@ -356,6 +381,77 @@ local function getBaseParts(instance: Instance): { BasePart }
 	return parts
 end
 
+local function getInstanceByPath(path: any): Instance?
+	if typeof(path) ~= "table" then
+		return nil
+	end
+
+	local current: Instance? = ReplicatedStorage
+	for _, name in ipairs(path) do
+		if typeof(name) ~= "string" or name == "" or not current then
+			return nil
+		end
+		current = current:FindFirstChild(name)
+	end
+	return current
+end
+
+local function getFirstBasePart(instance: Instance?): BasePart?
+	if not instance then
+		return nil
+	end
+	if instance:IsA("BasePart") then
+		return instance
+	end
+	return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function isDescendantOfNamedAttachment(instance: Instance, attachmentName: any): boolean
+	if typeof(attachmentName) ~= "string" or attachmentName == "" then
+		return false
+	end
+
+	local current = instance.Parent
+	while current do
+		if current:IsA("Attachment") and current.Name == attachmentName then
+			return true
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+local function setOverlayEffectsEnabled(instance: Instance, enabled: boolean, disabledAttachmentName: any?)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		local descendantEnabled = enabled and not isDescendantOfNamedAttachment(descendant, disabledAttachmentName)
+		if descendant:IsA("ParticleEmitter")
+			or descendant:IsA("Trail")
+			or descendant:IsA("Beam")
+			or descendant:IsA("PointLight")
+			or descendant:IsA("SpotLight")
+			or descendant:IsA("SurfaceLight")
+		then
+			descendant.Enabled = descendantEnabled
+		elseif descendant:IsA("Sound") and descendantEnabled then
+			descendant:Play()
+		end
+	end
+end
+
+local function pivotOverlayToRoot(overlay: Instance, overlayRoot: BasePart, rootPart: BasePart)
+	local targetCFrame = rootPart.CFrame
+	if overlay:IsA("Model") then
+		overlay:PivotTo(targetCFrame)
+		return
+	end
+
+	local sourceCFrame = overlayRoot.CFrame
+	for _, part in ipairs(getBaseParts(overlay)) do
+		local relativeCFrame = sourceCFrame:ToObjectSpace(part.CFrame)
+		part.CFrame = targetCFrame * relativeCFrame
+	end
+end
+
 local function prepareHeldBombVisual(instance: Instance, rootPart: BasePart)
 	for _, part in ipairs(getBaseParts(instance)) do
 		part.Anchored = false
@@ -372,6 +468,172 @@ local function prepareHeldBombVisual(instance: Instance, rootPart: BasePart)
 			weld.Parent = rootPart
 		end
 	end
+end
+
+local function isSelfOrDescendantOfInstance(instance: Instance, ancestor: Instance?): boolean
+	return ancestor ~= nil and (instance == ancestor or instance:IsDescendantOf(ancestor))
+end
+
+local function setVisualLocalTransparency(instance: Instance?, alpha: number)
+	if not instance then
+		return
+	end
+
+	alpha = math.clamp(alpha, 0, 1)
+	if instance:IsA("BasePart") then
+		instance.LocalTransparencyModifier = alpha
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.LocalTransparencyModifier = alpha
+		end
+	end
+end
+
+local function setVisualLocalTransparencyExcept(instance: Instance?, alpha: number, excluded: Instance?)
+	if not instance then
+		return
+	end
+
+	alpha = math.clamp(alpha, 0, 1)
+	if instance:IsA("BasePart") and not isSelfOrDescendantOfInstance(instance, excluded) then
+		instance.LocalTransparencyModifier = alpha
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") and not isSelfOrDescendantOfInstance(descendant, excluded) then
+			descendant.LocalTransparencyModifier = alpha
+		end
+	end
+end
+
+function BombController:_destroyAbilityVisualOverlay(visual)
+	if visual and visual.abilityVisualOverlay then
+		if visual.abilityVisualOverlay.Parent then
+			visual.abilityVisualOverlay:Destroy()
+		end
+		visual.abilityVisualOverlay = nil
+	end
+end
+
+function BombController:_applyAbilityVisualOverlay(visual, assetPath: any, overlayName: string?, disabledAttachmentName: any?)
+	if not (visual and visual.instance and visual.rootPart and visual.rootPart.Parent) then
+		return
+	end
+	if visual.abilityVisualOverlay and visual.abilityVisualOverlay.Parent then
+		if visual.abilityVisualOverlay:IsDescendantOf(visual.instance) then
+			return
+		end
+		self:_destroyAbilityVisualOverlay(visual)
+	end
+	if visual.abilityVisualOverlay and visual.abilityVisualOverlay.Parent then
+		return
+	end
+
+	local template = getInstanceByPath(assetPath)
+	if not template then
+		local key = if typeof(assetPath) == "table" then table.concat(assetPath, ".") else "unknown"
+		if not self._warnedMissingAbilityVisuals[key] then
+			self._warnedMissingAbilityVisuals[key] = true
+			warn(("[BombController] Missing ability visual template: ReplicatedStorage.%s"):format(key))
+		end
+		return
+	end
+
+	local overlay = template:Clone()
+	overlay.Name = if typeof(overlayName) == "string" and overlayName ~= "" then overlayName else ABILITY_VISUAL_OVERLAY_NAME
+	local overlayRoot = getFirstBasePart(overlay)
+	if not overlayRoot then
+		overlay:Destroy()
+		return
+	end
+
+	pivotOverlayToRoot(overlay, overlayRoot, visual.rootPart)
+	for _, part in ipairs(getBaseParts(overlay)) do
+		part.Anchored = false
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Massless = true
+
+		local weld = Instance.new("WeldConstraint")
+		weld.Name = ABILITY_VISUAL_OVERLAY_NAME .. "Weld"
+		weld.Part0 = visual.rootPart
+		weld.Part1 = part
+		weld.Parent = visual.rootPart
+	end
+
+	setOverlayEffectsEnabled(overlay, true, disabledAttachmentName)
+	overlay.Parent = visual.instance
+	visual.abilityVisualOverlay = overlay
+end
+
+function BombController:_syncAbilityVisualOverlay(visual)
+	local visuals = visual and visual.visuals
+	if typeof(visuals) == "table" and visuals.freezeBomb == true then
+		self:_applyAbilityVisualOverlay(visual, visuals.freezeAssetPath, "FreezeBombVFX")
+	elseif typeof(visuals) == "table" and visuals.abilityVisualOverlay == true then
+		self:_applyAbilityVisualOverlay(
+			visual,
+			visuals.abilityVisualAssetPath,
+			visuals.abilityVisualName,
+			visuals.abilityVisualDisabledAttachmentName
+		)
+	else
+		self:_destroyAbilityVisualOverlay(visual)
+	end
+end
+
+function BombController:_syncProjectileBaseVisual(visual)
+	local visuals = visual and visual.visuals
+	local hideBase = typeof(visuals) == "table"
+		and visuals.hideBaseVisual == true
+		and visual.abilityVisualOverlay
+		and visual.abilityVisualOverlay.Parent
+	if hideBase then
+		setVisualLocalTransparencyExcept(visual.instance, 1, visual.abilityVisualOverlay)
+	else
+		setVisualLocalTransparency(visual.instance, 0)
+	end
+	if visual.highlight then
+		visual.highlight.Enabled = not hideBase
+	end
+end
+
+function BombController:_syncHeldBaseVisual(held)
+	local replaceBase = typeof(self._localAbilityHeldVisualOptions) == "table"
+		and self._localAbilityHeldVisualOptions.replaceBaseVisual == true
+		and held
+		and held.abilityVisualOverlay
+		and held.abilityVisualOverlay.Parent
+	if replaceBase then
+		setVisualLocalTransparencyExcept(held.instance, 1, held.abilityVisualOverlay)
+	else
+		setVisualLocalTransparency(held and held.instance or nil, 0)
+	end
+	if held and held.highlight then
+		held.highlight.Enabled = not replaceBase
+	end
+end
+
+function BombController:_refreshHeldAbilityVisual(player: Player)
+	local held = self._heldBombs[player]
+	if not held then
+		return
+	end
+	if player ~= LocalPlayer or typeof(self._localAbilityHeldVisualOptions) ~= "table" then
+		self:_destroyAbilityVisualOverlay(held)
+		self:_syncHeldBaseVisual(held)
+		return
+	end
+
+	self:_applyAbilityVisualOverlay(
+		held,
+		self._localAbilityHeldVisualOptions.assetPath,
+		self._localAbilityHeldVisualOptions.name,
+		self._localAbilityHeldVisualOptions.disabledAttachmentName
+	)
+
+	self:_syncHeldBaseVisual(held)
 end
 
 local function getServerTime(): number
@@ -810,6 +1072,7 @@ function BombController:_destroyHeldBomb(player: Player)
 	local held = self._heldBombs[player]
 	if held then
 		self:_stopBombPulse(held)
+		self:_destroyAbilityVisualOverlay(held)
 	end
 	if held and held.instance.Parent then
 		held.instance:Destroy()
@@ -845,6 +1108,8 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 	local skinId = self._heldBombSkinIds[player] or getPlayerBombSkinId(player)
 	local visualScale = math.max(tonumber(self._heldBombVisualScales[player]) or BombConfig.HeldVisualScale, 0.05)
 	if held and held.instance.Parent and held.skinId == skinId and math.abs((held.visualScale or BombConfig.HeldVisualScale) - visualScale) <= 0.075 then
+		self:_refreshHeldAbilityVisual(player)
+		self:_syncHeldBaseVisual(held)
 		return
 	end
 	self:_destroyHeldBomb(player)
@@ -906,12 +1171,15 @@ function BombController:_ensureHeldBomb(player: Player, attempt: number)
 		pulseConnection = nil,
 		fuseStartedAt = nil,
 		fuseEndsAt = nil,
+		abilityVisualOverlay = nil,
 	}
 	self._heldBombs[player] = held
+	self:_refreshHeldAbilityVisual(player)
 
 	local pulseTimes = self._heldBombPulseTimes[player]
 	if pulseTimes then
 		self:_startBombPulse(held, instance, pulseTimes.fuseStartedAt, pulseTimes.fuseEndsAt)
+		self:_syncHeldBaseVisual(held)
 	end
 end
 
@@ -933,6 +1201,7 @@ function BombController:_setHeldBombEffects(player: Player, fuseSpark: boolean, 
 		fuseSpark = fuseSpark,
 		trail = trail,
 	})
+	self:_syncHeldBaseVisual(held)
 end
 
 function BombController:SetLocalHeldBombVisualScale(scale: number)
@@ -948,6 +1217,16 @@ function BombController:ResetLocalHeldBombVisualScale()
 	if self._heldBombWanted[LocalPlayer] == true then
 		self:_ensureHeldBomb(LocalPlayer, 0)
 	end
+end
+
+function BombController:SetLocalAbilityHeldVisual(options)
+	self._localAbilityHeldVisualOptions = if typeof(options) == "table" then options else nil
+	self:_refreshHeldAbilityVisual(LocalPlayer)
+end
+
+function BombController:ClearLocalAbilityHeldVisual()
+	self._localAbilityHeldVisualOptions = nil
+	self:_refreshHeldAbilityVisual(LocalPlayer)
 end
 
 function BombController:_destroyHipBomb(player: Player)
@@ -1081,6 +1360,7 @@ function BombController:_startHeldBombPulse(player: Player, startedAt: number?, 
 	if held and held.instance.Parent then
 		self:_startBombPulse(held, held.instance, fuseStartedAt, fuseEndsAt)
 		self:_setHeldBombEffects(player, true, false)
+		self:_syncHeldBaseVisual(held)
 	end
 end
 
@@ -1109,6 +1389,7 @@ function BombController:_stopPreview()
 	if self._trajectoryPreview then
 		setTrajectoryPreviewEnabled(self._trajectoryPreview, false)
 	end
+	self:_hideExtraTrajectoryPreviews(1)
 end
 
 function BombController:_disconnectAnimationConnections()
@@ -1746,9 +2027,12 @@ function BombController:IsHoldingBomb(): boolean
 	return self._holding == true
 end
 
-function BombController:_handleAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
+function BombController:_handleAction(_actionName: string, inputState: Enum.UserInputState, inputObject: InputObject)
 	if self._primaryBombInputSuppressed then
 		return Enum.ContextActionResult.Sink
+	end
+	if inputState == Enum.UserInputState.Begin and isPrimaryBombInputOverGui(inputObject) then
+		return Enum.ContextActionResult.Pass
 	end
 
 	if inputState == Enum.UserInputState.Begin then
@@ -1824,7 +2108,7 @@ function BombController:_getExplosionVfxFolder(): Folder
 	return folder
 end
 
-function BombController:_playExplosionEffect(position: Vector3, skinId: any, visualScale: number?)
+function BombController:_playExplosionEffect(position: Vector3, skinId: any, visualScale: number?, assetPath: any?)
 	local emitModule = self:_getEmitModule()
 	if emitModule and not self:_ensureEmitModuleInitialized(emitModule) then
 		emitModule = nil
@@ -1834,6 +2118,7 @@ function BombController:_playExplosionEffect(position: Vector3, skinId: any, vis
 		parent = self:_getExplosionVfxFolder(),
 		position = position,
 		skinId = skinId,
+		assetPath = assetPath,
 		emitModule = emitModule,
 		name = "BombExplosionVFX",
 		cleanupSeconds = EXPLOSION_VFX_CLEANUP_SECONDS,
@@ -2055,7 +2340,9 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 		visual.rootPart = rootPart
 		visual.path = nil
 		visual.ownsInstance = false
+		self:_syncAbilityVisualOverlay(visual)
 		setInstanceLocalTransparency(projectile, 0)
+		self:_syncProjectileBaseVisual(visual)
 		BombVisualUtil.SetEffectState(projectile, {
 			vfx = true,
 			fuseSpark = true,
@@ -2067,6 +2354,7 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 			visual.fuseStartedAt or getServerTime(),
 			visual.fuseEndsAt or (getServerTime() + BombConfig.ProjectileLifetimePadding)
 		)
+		self:_syncProjectileBaseVisual(visual)
 		return true
 	end
 
@@ -2112,18 +2400,11 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 				visual.connection = nil
 			end
 
-			setInstanceLocalTransparency(projectile, 0)
 			BombVisualUtil.SetEffectState(projectile, {
 				vfx = true,
 				fuseSpark = true,
 				trail = true,
 			})
-			self:_startBombPulse(
-				visual,
-				projectile,
-				visual.fuseStartedAt or getServerTime(),
-				visual.fuseEndsAt or (getServerTime() + BombConfig.ProjectileLifetimePadding)
-			)
 			if airborneInstance.Parent then
 				airborneInstance:Destroy()
 			end
@@ -2132,12 +2413,20 @@ function BombController:_transferProjectilePulseToPhysical(projectileId: string,
 			visual.rootPart = rootPart
 			visual.path = nil
 			visual.ownsInstance = false
+			self:_syncAbilityVisualOverlay(visual)
+			self:_startBombPulse(
+				visual,
+				projectile,
+				visual.fuseStartedAt or getServerTime(),
+				visual.fuseEndsAt or (getServerTime() + BombConfig.ProjectileLifetimePadding)
+			)
 			visual.handoffPhysical = nil
 			visual.position = rootPart.Position
 			visual.velocity = rootPart.AssemblyLinearVelocity
 			visual.targetPosition = visual.position
 			visual.targetVelocity = visual.velocity
 			RuntimeProfiler.Count("Client/BombController/ProjectilePhysicalHandoffCompleted")
+			self:_syncProjectileBaseVisual(visual)
 		end
 	end)
 
@@ -2218,6 +2507,7 @@ function BombController:_createProjectileVisual(projectileId: string, skinId: an
 		handoffPhysical = nil,
 		fuseStartedAt = nil,
 		fuseEndsAt = nil,
+		abilityVisualOverlay = nil,
 		frozen = false,
 		frozenUntil = nil,
 		visuals = nil,
@@ -2246,6 +2536,7 @@ function BombController:_destroyProjectileVisual(projectileId: string)
 		})
 	end
 	self:_stopBombPulse(visual)
+	self:_destroyAbilityVisualOverlay(visual)
 	if visual.ownsInstance and visual.instance.Parent then
 		visual.instance:Destroy()
 	end
@@ -2292,6 +2583,8 @@ function BombController:_playThrowEffect(payload)
 	visual.path = path
 	visual.customProjectile = customProjectile
 	visual.visuals = if typeof(payload.visuals) == "table" then payload.visuals else nil
+	self:_syncAbilityVisualOverlay(visual)
+	self:_syncProjectileBaseVisual(visual)
 	if customProjectile then
 		local velocity = if typeof(payload.velocity) == "Vector3" then payload.velocity else payload.initialVelocity
 		local acceleration = if typeof(payload.acceleration) == "Vector3" then payload.acceleration else Vector3.new(0, -workspace.Gravity, 0)
@@ -2314,6 +2607,7 @@ function BombController:_playThrowEffect(payload)
 	local fuseStartedAt = if typeof(payload.fuseStartedAt) == "number" then payload.fuseStartedAt else startedAt
 	local fuseEndsAt = startedAt + lifetime
 	self:_startBombPulse(visual, visual.instance, fuseStartedAt, fuseEndsAt)
+	self:_syncProjectileBaseVisual(visual)
 	local rootPart = visual.rootPart
 
 	if visual.connection then
@@ -2493,6 +2787,8 @@ function BombController:_handleProjectileSnapshot(payload)
 	visual.customProjectile = true
 	if typeof(payload.visuals) == "table" then
 		visual.visuals = payload.visuals
+		self:_syncAbilityVisualOverlay(visual)
+		self:_syncProjectileBaseVisual(visual)
 	end
 	local wasFrozen = visual.frozen == true
 	local frozen = payload.frozen == true
@@ -2547,6 +2843,7 @@ function BombController:_handleProjectileAttach(payload)
 			fuseStartedAt = if typeof(payload.serverTime) == "number" then payload.serverTime else getServerTime(),
 			remainingFuse = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds,
 			bombSkinId = payload.bombSkinId,
+			visuals = payload.visuals,
 		})
 		visual = self._projectileVisuals[projectileId]
 		if not visual then
@@ -2555,6 +2852,11 @@ function BombController:_handleProjectileAttach(payload)
 	end
 
 	visual.customProjectile = true
+	if typeof(payload.visuals) == "table" then
+		visual.visuals = payload.visuals
+		self:_syncAbilityVisualOverlay(visual)
+		self:_syncProjectileBaseVisual(visual)
+	end
 	visual.targetPosition = payload.position
 	visual.targetVelocity = Vector3.zero
 	visual.position = payload.position
@@ -2822,7 +3124,14 @@ function BombController:_bindEffects()
 				CameraController:PlayLocalBombExplosionShake()
 			end
 			self:_playHitFlashes(payload.hitUserIds)
-			self:_playExplosionEffect(payload.position, payload.bombSkinId, payload.explosionVisualScale)
+			local explosionVfxAssetPath = if typeof(payload.explosionVfxAssetPath) == "table"
+				then payload.explosionVfxAssetPath
+				else nil
+			if explosionVfxAssetPath then
+				self:_playExplosionEffect(payload.position, payload.bombSkinId, payload.explosionVisualScale, explosionVfxAssetPath)
+			elseif payload.suppressDefaultExplosionVfx ~= true then
+				self:_playExplosionEffect(payload.position, payload.bombSkinId, payload.explosionVisualScale)
+			end
 		elseif effectName == "TerrainDebris" and typeof(payload) == "table" then
 			self:_playTerrainDebris(payload.payloads)
 		elseif effectName == "Cook" and typeof(payload) == "table" then

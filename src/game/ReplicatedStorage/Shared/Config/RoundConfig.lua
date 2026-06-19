@@ -6,6 +6,7 @@ return {
 	IntermissionSeconds = 30,
 	RoundStartingSeconds = 3,
 	RoundSeconds = 180,
+	PlayOfTheGameSeconds = 10,
 	RespawnSeconds = 7,
 	ResetSeconds = 5,
 	VoteChoiceCount = 4,

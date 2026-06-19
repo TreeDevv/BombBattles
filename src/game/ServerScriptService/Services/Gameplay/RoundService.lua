@@ -34,8 +34,10 @@ local AFK_MARKER_NAME = "AFK"
 local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
 local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
 local ASSIST_WINDOW_SECONDS = 10
+local DEATH_BODY_RETAIN_SECONDS = 1.8
 local RESPAWN_LOAD_VERIFY_DELAY_SECONDS = 0.65
 local RESPAWN_LOAD_MAX_ATTEMPTS = 3
+local ROUND_CHARACTER_READY_TIMEOUT_SECONDS = 5
 local CASH_KEY = "cash"
 local DEBUG_REPLAY_EVENTS = false
 local DEBUG_DEATH_FLOW = RunService:IsStudio()
@@ -89,6 +91,8 @@ local playerTeams: { [Player]: string } = {}
 local characterConnections: { [Player]: { RBXScriptConnection } } = {}
 local lobbyCharacterConnections: { [Player]: { RBXScriptConnection } } = {}
 local respawnTokens: { [Player]: number } = {}
+local characterDestroyTokens: { [Player]: number } = {}
+local pendingRoundRespawnTokens: { [Player]: number } = {}
 local teamCoreInstances: { [string]: { Instance } } = {}
 local coreConnections: { [Instance]: { RBXScriptConnection } } = {}
 local scoreboardStats: { [string]: { damage: number, eliminations: number, assists: number, deaths: number, destruction: number } } =
@@ -98,7 +102,16 @@ local rewardedRoundIds: { [number]: boolean } = {}
 local recentDamageContributors: { [string]: { [string]: { damagedAt: number, teamName: string?, sourceType: string?, sourceId: string? } } } =
 	{}
 local rng = Random.new()
+local RespawnFlow = {}
+local RoundFlow = {}
 local missingAFKTemplateWarned = false
+RespawnFlow.VoidFallPadding = 70
+RespawnFlow.RagdollVelocityScale = 0.25
+RespawnFlow.RagdollAngularVelocityScale = 0.2
+RespawnFlow.RagdollFolderName = "_DeathRagdollConstraints"
+RespawnFlow.RagdolledAttribute = "DeathRagdolled"
+RespawnFlow.LobbyDeathBoundAttribute = "LobbyDeathBound"
+RespawnFlow.RoundDeathBoundAttribute = "RoundDeathBound"
 
 local function debugDeathFlow(message: string, ...)
 	if DEBUG_DEATH_FLOW then
@@ -395,23 +408,34 @@ local function getRoundReplayRecipients(): { Player }
 	return recipients
 end
 
-local function playRoundEndPOTG(): number
+function RoundFlow.getConfiguredDuration(value: any, fallback: number): number
+	if typeof(value) == "number" and value == value then
+		return math.max(value, 0)
+	end
+	return fallback
+end
+
+function RoundFlow.getPlayOfTheGameDuration(): number
+	return RoundFlow.getConfiguredDuration(RoundConfig.PlayOfTheGameSeconds, 10)
+end
+
+function RoundFlow.playRoundEndPOTG(maxWaitSeconds: number): boolean
 	local service = getReplayService()
 	if not (service and type(service.PlayPOTG) == "function") then
-		return 0
+		return false
 	end
 
-	local startedAt = os.clock()
+	local sent = false
 	local ok, err = pcall(function()
-		service.PlayPOTG(getRoundReplayRecipients(), {
-			maxWaitSeconds = RoundConfig.ResetSeconds,
+		sent = service.PlayPOTG(getRoundReplayRecipients(), {
+			maxWaitSeconds = maxWaitSeconds,
 		})
 	end)
 	if DEBUG_REPLAY_EVENTS and not ok then
 		warn("[RoundService] POTG playback failed:", err)
 	end
 
-	return os.clock() - startedAt
+	return ok and sent == true
 end
 
 local function getPlayerKey(playerOrUserId: Player | number | string): string
@@ -736,6 +760,21 @@ end
 
 local function setState(state: string, status: string?, duration: number?)
 	currentState = state
+	if state == RoundStates.WaitingForPlayers then
+		for _, player in ipairs(Players:GetPlayers()) do
+			player:SetAttribute(ROUND_ID_ATTR, nil)
+			player:SetAttribute(ROUND_TEAM_ATTR, nil)
+			player:SetAttribute(ROUND_ALIVE_ATTR, nil)
+			player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, nil)
+			player.Neutral = true
+			player.Team = nil
+		end
+		task.defer(function()
+			if currentState == RoundStates.WaitingForPlayers and type(RespawnFlow.clearWaitingStateResidue) == "function" then
+				RespawnFlow.clearWaitingStateResidue()
+			end
+		end)
+	end
 	setReplicaValues({}, {
 		state = state,
 		status = status or state,
@@ -978,17 +1017,52 @@ end
 
 local function cancelScheduledRespawn(player: Player)
 	bumpRespawnToken(player)
+	pendingRoundRespawnTokens[player] = nil
+end
+
+local function bumpCharacterDestroyToken(player: Player): number
+	local token = (characterDestroyTokens[player] or 0) + 1
+	characterDestroyTokens[player] = token
+	return token
+end
+
+local function cancelScheduledCharacterDestroy(player: Player)
+	bumpCharacterDestroyToken(player)
 end
 
 local function destroyPlayerCharacter(player: Player)
+	cancelScheduledCharacterDestroy(player)
 	local character = player.Character
 	if character then
 		character:Destroy()
 	end
 end
 
+local function destroyPlayerCharacterAfter(player: Player, delaySeconds: number)
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local token = bumpCharacterDestroyToken(player)
+	task.delay(math.max(delaySeconds, 0), function()
+		if characterDestroyTokens[player] ~= token then
+			return
+		end
+		if player.Parent ~= Players then
+			return
+		end
+		if player.Character ~= character then
+			return
+		end
+
+		character:Destroy()
+	end)
+end
+
 local function clearPlayerRoundState(player: Player)
 	cancelScheduledRespawn(player)
+	cancelScheduledCharacterDestroy(player)
 	player:SetAttribute(ROUND_ID_ATTR, nil)
 	player:SetAttribute(ROUND_TEAM_ATTR, nil)
 	player:SetAttribute(ROUND_ALIVE_ATTR, nil)
@@ -1023,6 +1097,31 @@ local function clearAllRoundTracking()
 	playerVotes = {}
 	voteCounts = {}
 	currentChoices = {}
+end
+
+function RespawnFlow.clearWaitingStateResidue()
+	if currentState ~= RoundStates.WaitingForPlayers then
+		return
+	end
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		clearPlayerRoundState(player)
+	end
+	clearActiveMap()
+	clearAllRoundTracking()
+	setReplicaValue({ "aliveCounts" }, {
+		[RoundConfig.Teams.Red.name] = 0,
+		[RoundConfig.Teams.Blue.name] = 0,
+	})
+	setReplicaValue({ "coreCounts" }, {
+		[RoundConfig.Teams.Red.name] = 0,
+		[RoundConfig.Teams.Blue.name] = 0,
+	})
+	setReplicaValue({ "respawnsEnabled" }, {
+		[RoundConfig.Teams.Red.name] = false,
+		[RoundConfig.Teams.Blue.name] = false,
+	})
+	setReplicaValue({ "selectedMapId" }, "")
 end
 
 local function countAlivePlayers()
@@ -1093,6 +1192,7 @@ local function buildRespawnState(coreCounts: { [string]: number })
 end
 
 local reconcilePlayersWithoutRespawns: (() -> ())?
+local eliminatePlayer: ((Player) -> ())?
 
 local function syncCoreState()
 	local coreCounts = countAliveCores()
@@ -1130,10 +1230,163 @@ local function hasUsableCharacter(player: Player): boolean
 
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	return humanoid ~= nil and rootPart ~= nil and rootPart:IsA("BasePart")
+	return humanoid ~= nil and humanoid.Health > 0 and rootPart ~= nil and rootPart:IsA("BasePart")
 end
 
-local function safeLoadCharacter(player: Player, context: string): boolean
+function RespawnFlow.prepareDeathRagdoll(character: Model)
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	humanoid.BreakJointsOnDeath = false
+	pcall(function()
+		humanoid.RequiresNeck = false
+	end)
+end
+
+function RespawnFlow.applyDeathRagdoll(character: Model, reason: string)
+	if character:GetAttribute(RespawnFlow.RagdolledAttribute) == true then
+		return
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		return
+	end
+
+	RespawnFlow.prepareDeathRagdoll(character)
+	character:SetAttribute(RespawnFlow.RagdolledAttribute, true)
+
+	local previousFolder = character:FindFirstChild(RespawnFlow.RagdollFolderName)
+	if previousFolder then
+		previousFolder:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = RespawnFlow.RagdollFolderName
+	folder.Parent = character
+
+	local constraintCount = 0
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if not descendant:IsA("Motor6D") then
+			continue
+		end
+
+		local motor = descendant :: Motor6D
+		local part0 = motor.Part0
+		local part1 = motor.Part1
+		if not (part0 and part1) then
+			continue
+		end
+
+		local attachment0 = Instance.new("Attachment")
+		attachment0.Name = motor.Name .. "_DeathRagdollA0"
+		attachment0.CFrame = motor.C0
+		attachment0.Parent = part0
+
+		local attachment1 = Instance.new("Attachment")
+		attachment1.Name = motor.Name .. "_DeathRagdollA1"
+		attachment1.CFrame = motor.C1
+		attachment1.Parent = part1
+
+		local socket = Instance.new("BallSocketConstraint")
+		socket.Name = motor.Name .. "_DeathRagdollSocket"
+		socket.Attachment0 = attachment0
+		socket.Attachment1 = attachment1
+		socket.LimitsEnabled = true
+		socket.TwistLimitsEnabled = true
+		socket.UpperAngle = 70
+		socket.TwistLowerAngle = -45
+		socket.TwistUpperAngle = 45
+		socket.Parent = folder
+
+		motor.Enabled = false
+		constraintCount += 1
+	end
+
+	for _, descendant in ipairs(character:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = descendant.Name ~= "HumanoidRootPart"
+			descendant.AssemblyLinearVelocity *= RespawnFlow.RagdollVelocityScale
+			descendant.AssemblyAngularVelocity *= RespawnFlow.RagdollAngularVelocityScale
+		end
+	end
+
+	humanoid.AutoRotate = false
+	humanoid.PlatformStand = true
+	pcall(function()
+		humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+	end)
+	RuntimeProfiler.Count("Server/Round/Death/RagdollConstraints", constraintCount)
+	RuntimeProfiler.Count("Server/Round/Death/Ragdolled")
+	debugDeathFlow("Applied death ragdoll", character.Name, reason, "constraints", constraintCount)
+end
+
+function RespawnFlow.getVoidKillY(): number?
+	local activeMap = getActiveMap()
+	if activeMap then
+		local pivot, size = activeMap:GetBoundingBox()
+		return pivot.Position.Y - (size.Y * 0.5) - RespawnFlow.VoidFallPadding
+	end
+
+	local fallenPartsDestroyHeight = workspace.FallenPartsDestroyHeight
+	if typeof(fallenPartsDestroyHeight) == "number" then
+		return fallenPartsDestroyHeight + RespawnFlow.VoidFallPadding
+	end
+
+	return nil
+end
+
+function RespawnFlow.killPlayerForVoidFall(player: Player, voidKillY: number): boolean
+	if currentState ~= RoundStates.Active or alivePlayers[player] ~= true or player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+		return false
+	end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if not (character and humanoid and rootPart and rootPart:IsA("BasePart") and humanoid.Health > 0) then
+		return false
+	end
+	if rootPart.Position.Y >= voidKillY then
+		return false
+	end
+
+	debugDeathFlow("Void fall death", player.Name, "y", rootPart.Position.Y, "threshold", voidKillY)
+	RuntimeProfiler.Count("Server/Round/Death/VoidFalls")
+	character:SetAttribute("DeathReason", "VoidFall")
+	RespawnFlow.applyDeathRagdoll(character, "VoidFall")
+	humanoid.Health = 0
+	return true
+end
+
+function RespawnFlow.checkVoidFalls()
+	local voidKillY = RespawnFlow.getVoidKillY()
+	if not voidKillY then
+		return
+	end
+
+	for player in pairs(alivePlayers) do
+		RespawnFlow.killPlayerForVoidFall(player, voidKillY)
+	end
+end
+
+function RespawnFlow.waitForUsableCharacter(player: Player, timeoutSeconds: number): boolean
+	local deadline = os.clock() + math.max(timeoutSeconds, 0)
+	while os.clock() <= deadline do
+		if player.Parent ~= Players then
+			return false
+		end
+		if hasUsableCharacter(player) then
+			return true
+		end
+		task.wait(0.05)
+	end
+	return false
+end
+
+function RespawnFlow.safeLoadCharacter(player: Player, context: string): boolean
 	if player.Parent ~= Players then
 		debugDeathFlow("LoadCharacter skipped; player left", player.Name, context)
 		return false
@@ -1150,7 +1403,55 @@ local function safeLoadCharacter(player: Player, context: string): boolean
 	return true
 end
 
-local function shouldRetryRoundRespawn(player: Player, token: number): boolean
+function RespawnFlow.moveRoundCharacterToTeamSpawn(player: Player): boolean
+	local activeMap = getActiveMap()
+	local teamName = playerTeams[player]
+	if not (activeMap and teamName) then
+		return false
+	end
+
+	local spawns = getTeamSpawns(teamName, activeMap)
+	if #spawns == 0 then
+		warn("[RoundService] Missing TeamSpawn parts for team:", teamName)
+		return false
+	end
+
+	moveCharacterToSpawn(player, spawns[rng:NextInteger(1, #spawns)])
+	return true
+end
+
+function RespawnFlow.finalizeRoundRespawnIfReady(player: Player, token: number, context: string): boolean
+	if pendingRoundRespawnTokens[player] ~= token then
+		return false
+	end
+	if respawnTokens[player] ~= token then
+		debugDeathFlow("Round respawn finalize skipped; stale token", player.Name, token, respawnTokens[player])
+		return false
+	end
+	if not hasUsableCharacter(player) then
+		return false
+	end
+	if currentState ~= RoundStates.Active or not roundPlayers[player] or alivePlayers[player] ~= true then
+		debugDeathFlow("Round respawn finalize skipped; state changed", player.Name, context)
+		return false
+	end
+	if not teamHasRespawns(playerTeams[player]) then
+		debugDeathFlow("Round respawn finalize skipped; team respawns unavailable", player.Name, tostring(playerTeams[player]))
+		return false
+	end
+	if not RespawnFlow.moveRoundCharacterToTeamSpawn(player) then
+		debugDeathFlow("Round respawn finalize skipped; missing spawn", player.Name, tostring(playerTeams[player]))
+		return false
+	end
+
+	pendingRoundRespawnTokens[player] = nil
+	player:SetAttribute(ROUND_ALIVE_ATTR, true)
+	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
+	debugDeathFlow("Round respawn finalized", player.Name, context)
+	return true
+end
+
+function RespawnFlow.shouldRetryRoundRespawn(player: Player, token: number): boolean
 	if respawnTokens[player] ~= token then
 		debugDeathFlow("Round respawn verify skipped; stale token", player.Name, token, respawnTokens[player])
 		return false
@@ -1176,35 +1477,44 @@ local function shouldRetryRoundRespawn(player: Player, token: number): boolean
 		debugDeathFlow("Round respawn verify skipped; team respawns unavailable", player.Name, "team", tostring(playerTeams[player]))
 		return false
 	end
-	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
-		debugDeathFlow("Round respawn verify skipped; RoundAlive changed", player.Name, player:GetAttribute(ROUND_ALIVE_ATTR))
+	if pendingRoundRespawnTokens[player] ~= token and player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+		debugDeathFlow("Round respawn verify skipped; no pending respawn", player.Name, player:GetAttribute(ROUND_ALIVE_ATTR))
 		return false
 	end
 
 	return true
 end
 
-local function verifyRoundRespawn(player: Player, token: number, attempt: number)
+function RespawnFlow.verifyRoundRespawn(player: Player, token: number, attempt: number)
 	task.delay(RESPAWN_LOAD_VERIFY_DELAY_SECONDS, function()
-		if not shouldRetryRoundRespawn(player, token) then
+		if not RespawnFlow.shouldRetryRoundRespawn(player, token) then
+			return
+		end
+		if RespawnFlow.finalizeRoundRespawnIfReady(player, token, "VerifyAttempt" .. tostring(attempt)) then
 			return
 		end
 		if hasUsableCharacter(player) then
-			debugDeathFlow("Round respawn verified", player.Name, "attempt", attempt)
-			return
+			if pendingRoundRespawnTokens[player] ~= token then
+				debugDeathFlow("Round respawn verified", player.Name, "attempt", attempt)
+				return
+			end
+			debugDeathFlow("Round respawn has character but is still pending finalization", player.Name, "attempt", attempt)
 		end
 		if attempt >= RESPAWN_LOAD_MAX_ATTEMPTS then
 			warn(("[RoundService] Round respawn did not produce a usable character for %s after %d attempts"):format(
 				player.Name,
 				attempt
 			))
+			if pendingRoundRespawnTokens[player] == token and alivePlayers[player] == true and eliminatePlayer then
+				eliminatePlayer(player)
+			end
 			return
 		end
 
 		local nextAttempt = attempt + 1
 		debugDeathFlow("Retrying round respawn LoadCharacter", player.Name, "attempt", nextAttempt)
-		safeLoadCharacter(player, "RoundRespawnRetry" .. tostring(nextAttempt))
-		verifyRoundRespawn(player, token, nextAttempt)
+		RespawnFlow.safeLoadCharacter(player, "RoundRespawnRetry" .. tostring(nextAttempt))
+		RespawnFlow.verifyRoundRespawn(player, token, nextAttempt)
 	end)
 end
 
@@ -1244,12 +1554,18 @@ local function bindLobbyCharacter(player: Player)
 	end
 
 	local function bindNonRoundHumanoid(character: Model)
+		if character:GetAttribute(RespawnFlow.LobbyDeathBoundAttribute) == true then
+			return
+		end
+		character:SetAttribute(RespawnFlow.LobbyDeathBoundAttribute, true)
+		RespawnFlow.prepareDeathRagdoll(character)
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
 		if not humanoid then
 			return
 		end
 
 		track(humanoid.Died:Connect(function()
+			RespawnFlow.applyDeathRagdoll(character, "NonRoundDeath")
 			if currentState == RoundStates.Active and roundPlayers[player] then
 				return
 			end
@@ -1273,10 +1589,11 @@ local function bindLobbyCharacter(player: Player)
 
 	local function onCharacterAdded(character: Model)
 		task.defer(function()
-			if currentState == RoundStates.Active and roundPlayers[player] and alivePlayers[player] then
+			if roundPlayers[player] then
 				return
 			end
 
+			clearPlayerRoundState(player)
 			bindNonRoundHumanoid(character)
 			movePlayerToLobby(player)
 			syncPlayerAFKMarker(player)
@@ -1439,7 +1756,7 @@ local function getTimeoutWinner(): string
 	return "Draw"
 end
 
-local function eliminatePlayer(player: Player)
+eliminatePlayer = function(player: Player)
 	if not alivePlayers[player] then
 		debugDeathFlow("eliminatePlayer ignored; player not alive", player.Name)
 		return
@@ -1468,7 +1785,7 @@ local function respawnPlayerInRound(player: Player)
 	clearRecentDamageFor(player)
 	player:SetAttribute(ROUND_ALIVE_ATTR, false)
 	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, workspace:GetServerTimeNow() + RoundConfig.RespawnSeconds)
-	destroyPlayerCharacter(player)
+	destroyPlayerCharacterAfter(player, DEATH_BODY_RETAIN_SECONDS)
 
 	local token = bumpRespawnToken(player)
 	task.delay(RoundConfig.RespawnSeconds, function()
@@ -1508,10 +1825,10 @@ local function respawnPlayerInRound(player: Player)
 		end
 
 		debugDeathFlow("Loading round respawn character", player.Name)
-		player:SetAttribute(ROUND_ALIVE_ATTR, true)
-		player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
-		safeLoadCharacter(player, "RoundRespawn")
-		verifyRoundRespawn(player, token, 1)
+		pendingRoundRespawnTokens[player] = token
+		cancelScheduledCharacterDestroy(player)
+		RespawnFlow.safeLoadCharacter(player, "RoundRespawn")
+		RespawnFlow.verifyRoundRespawn(player, token, 1)
 	end)
 end
 
@@ -1519,6 +1836,11 @@ local function handlePlayerDeath(player: Player)
 	local token = RuntimeProfiler.Begin("Server/Round/Death/HandlePlayerDeath")
 	if not alivePlayers[player] then
 		debugDeathFlow("handlePlayerDeath ignored; player not alive", player.Name)
+		RuntimeProfiler.End("Server/Round/Death/HandlePlayerDeath", token)
+		return
+	end
+	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
+		debugDeathFlow("handlePlayerDeath ignored; player already pending death/respawn", player.Name)
 		RuntimeProfiler.End("Server/Round/Death/HandlePlayerDeath", token)
 		return
 	end
@@ -1552,6 +1874,11 @@ local function bindCharacter(player: Player)
 	characterConnections[player] = {}
 
 	local function bindHumanoid(character: Model)
+		if character:GetAttribute(RespawnFlow.RoundDeathBoundAttribute) == true then
+			return
+		end
+		character:SetAttribute(RespawnFlow.RoundDeathBoundAttribute, true)
+		RespawnFlow.prepareDeathRagdoll(character)
 		local humanoid = character:FindFirstChildOfClass("Humanoid")
 		if not humanoid then
 			return
@@ -1560,6 +1887,7 @@ local function bindCharacter(player: Player)
 		table.insert(characterConnections[player], humanoid.Died:Connect(function()
 			local deathToken = RuntimeProfiler.Begin("Server/Round/Death/HumanoidDied")
 			RuntimeProfiler.Count("Server/Round/Death/HumanoidDiedEvents")
+			RespawnFlow.applyDeathRagdoll(character, "RoundDeath")
 			if currentState == RoundStates.Active then
 				debugDeathFlow("Humanoid.Died", player.Name, "roundId", roundId, "health", humanoid.Health)
 				handlePlayerDeath(player)
@@ -1574,25 +1902,36 @@ local function bindCharacter(player: Player)
 
 	table.insert(characterConnections[player], player.CharacterAdded:Connect(function(character)
 		task.defer(function()
-			if currentState == RoundStates.Active and roundPlayers[player] and not alivePlayers[player] then
+			if roundPlayers[player] and not alivePlayers[player] then
 				movePlayerToLobby(player)
 				syncPlayerAFKMarker(player)
 				return
 			end
 
-			if currentState == RoundStates.Active and roundPlayers[player] then
+			if roundPlayers[player] and alivePlayers[player] then
+				if not RespawnFlow.waitForUsableCharacter(player, ROUND_CHARACTER_READY_TIMEOUT_SECONDS) then
+					warn("[RoundService] Active round character missing humanoid/root:", player.Name)
+					return
+				end
+				if not roundPlayers[player] or not alivePlayers[player] then
+					return
+				end
+				if player.Character ~= character then
+					return
+				end
 				bindHumanoid(character)
-				player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
-				local activeMap = getActiveMap()
-				local teamName = playerTeams[player]
-				if activeMap and teamName then
-					local spawns = getTeamSpawns(teamName, activeMap)
-					if #spawns > 0 then
-						moveCharacterToSpawn(player, spawns[rng:NextInteger(1, #spawns)])
+				local pendingToken = pendingRoundRespawnTokens[player]
+				if pendingToken then
+					RespawnFlow.finalizeRoundRespawnIfReady(player, pendingToken, "CharacterAdded")
+				else
+					if currentState == RoundStates.Active then
+						RespawnFlow.moveRoundCharacterToTeamSpawn(player)
 					end
+					player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 				end
 				syncPlayerAFKMarker(player)
 			else
+				clearPlayerRoundState(player)
 				movePlayerToLobby(player)
 				syncPlayerAFKMarker(player)
 			end
@@ -1825,8 +2164,14 @@ local function teleportTeamsToMap(map: Model): boolean
 		local teamName = playerTeams[player]
 		local spawns = teamName and getTeamSpawns(teamName, map) or {}
 		if #spawns > 0 then
-			if not player.Character then
-				player:LoadCharacter()
+			if not hasUsableCharacter(player) then
+				if
+					not RespawnFlow.safeLoadCharacter(player, "RoundStart")
+					or not RespawnFlow.waitForUsableCharacter(player, ROUND_CHARACTER_READY_TIMEOUT_SECONDS)
+				then
+					warn("[RoundService] Timed out waiting for round character:", player.Name)
+					return false
+				end
 			end
 			moveCharacterToSpawn(player, spawns[rng:NextInteger(1, #spawns)])
 		end
@@ -1857,7 +2202,7 @@ local function createGameReplica()
 	})
 end
 
-local function createNewRound()
+function RoundFlow.createNewRound()
 	roundId += 1
 	resetReplayRoundState()
 	resetScoreboardStats()
@@ -1869,7 +2214,7 @@ local function createNewRound()
 	syncCoreState()
 end
 
-local function waitForSecondsOrInvalid(seconds: number, requireMinPlayers: boolean): boolean
+function RoundFlow.waitForSecondsOrInvalid(seconds: number, requireMinPlayers: boolean): boolean
 	local deadline = os.clock() + seconds
 	while os.clock() < deadline do
 		if pendingAdminReset or pendingAdminForceStartMapId or pendingAdminWinnerTeam then
@@ -1883,17 +2228,26 @@ local function waitForSecondsOrInvalid(seconds: number, requireMinPlayers: boole
 	return true
 end
 
-local function endRound(winnerTeam: string)
-	local resetStartedAt = os.clock()
+function RoundFlow.endRound(winnerTeam: string)
 	setWinner(winnerTeam)
+	local potgDuration = RoundFlow.getPlayOfTheGameDuration()
+	if potgDuration > 0 then
+		setState(RoundStates.PlayOfTheGame, "Play of the Game", potgDuration)
+		local sentPOTG = RoundFlow.playRoundEndPOTG(potgDuration)
+		if sentPOTG then
+			setState(RoundStates.PlayOfTheGame, "Play of the Game", potgDuration)
+			task.wait(potgDuration)
+		end
+	end
+
+	local resetStartedAt = os.clock()
 	publishRoundResults(winnerTeam)
 	setState(RoundStates.RoundEnding, if winnerTeam == "Draw" then "Draw" else winnerTeam .. " wins", RoundConfig.ResetSeconds)
-	playRoundEndPOTG()
 	local remainingResetSeconds = math.max(RoundConfig.ResetSeconds - (os.clock() - resetStartedAt), 0)
 	task.wait(remainingResetSeconds)
 end
 
-local function runActiveRound()
+function RoundFlow.runActiveRound()
 	setState(RoundStates.Active, "Battle", RoundConfig.RoundSeconds)
 	activeRoundStartedAt = os.clock()
 	local deadline = os.clock() + RoundConfig.RoundSeconds
@@ -1903,10 +2257,12 @@ local function runActiveRound()
 			return
 		end
 
+		RespawnFlow.checkVoidFalls()
+
 		if pendingAdminWinnerTeam then
 			local winnerTeam = pendingAdminWinnerTeam
 			pendingAdminWinnerTeam = nil
-			endRound(winnerTeam)
+			RoundFlow.endRound(winnerTeam)
 			return
 		end
 
@@ -1917,16 +2273,16 @@ local function runActiveRound()
 				task.wait(0.2)
 				continue
 			end
-			endRound(winner)
+			RoundFlow.endRound(winner)
 			return
 		end
 		task.wait(0.2)
 	end
 
-	endRound(getTimeoutWinner())
+	RoundFlow.endRound(getTimeoutWinner())
 end
 
-local function resetRound()
+function RoundFlow.resetRound()
 	setState(RoundStates.Resetting, "Resetting", 0)
 	pendingAdminReset = false
 	pendingAdminWinnerTeam = nil
@@ -1934,6 +2290,9 @@ local function resetRound()
 	DestructionService:Cleanup()
 	clearActiveMap()
 	clearAllRoundTracking()
+	for _, player in ipairs(Players:GetPlayers()) do
+		clearPlayerRoundState(player)
+	end
 	resetScoreboardStats()
 	setReplicaValue({ "selectedMapId" }, "")
 	setReplicaValue({ "roundResults" }, {})
@@ -1943,16 +2302,16 @@ local function resetRound()
 	syncCoreState()
 end
 
-local function cancelToWaiting(reason: string)
+function RoundFlow.cancelToWaiting(reason: string)
 	warn("[RoundService] " .. reason)
-	resetRound()
+	RoundFlow.resetRound()
 	setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
 end
 
 function RoundService:_runRoundLoop()
 	while running do
 		if pendingAdminReset and not pendingAdminForceStartMapId then
-			resetRound()
+			RoundFlow.resetRound()
 			setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
 			task.wait(0.2)
 			continue
@@ -1994,7 +2353,7 @@ function RoundService:_runRoundLoop()
 			continue
 		end
 
-		createNewRound()
+		RoundFlow.createNewRound()
 		playerVotes = {}
 		voteCounts = {}
 		syncVoteChoices()
@@ -2010,15 +2369,15 @@ function RoundService:_runRoundLoop()
 			setState(RoundStates.Intermission, "Intermission", RoundConfig.IntermissionSeconds)
 		end
 
-		if not forcedMapId and not waitForSecondsOrInvalid(RoundConfig.IntermissionSeconds, true) then
-			cancelToWaiting("Round cancelled because not enough players remain")
+		if not forcedMapId and not RoundFlow.waitForSecondsOrInvalid(RoundConfig.IntermissionSeconds, true) then
+			RoundFlow.cancelToWaiting("Round cancelled because not enough players remain")
 			continue
 		end
 
 		setVotingOpen(false)
 		selectedMapId = selectedMapId or chooseWinningMap()
 		if not selectedMapId or not getConfiguredMap(selectedMapId) then
-			cancelToWaiting("Round cancelled because no voted map could be selected")
+			RoundFlow.cancelToWaiting("Round cancelled because no voted map could be selected")
 			continue
 		end
 
@@ -2028,7 +2387,7 @@ function RoundService:_runRoundLoop()
 		local roster = getEligiblePlayers()
 		local minimumRosterCount = if forcedMapId then 1 else getRequiredPlayerCount()
 		if #roster < minimumRosterCount then
-			cancelToWaiting("Round cancelled because roster is below minimum")
+			RoundFlow.cancelToWaiting("Round cancelled because roster is below minimum")
 			continue
 		end
 
@@ -2039,7 +2398,7 @@ function RoundService:_runRoundLoop()
 
 		local map = spawnActiveMap(selectedMapId)
 		if not map or not setupTeamCores(map) or not teleportTeamsToMap(map) then
-			cancelToWaiting("Round cancelled because map setup is incomplete")
+			RoundFlow.cancelToWaiting("Round cancelled because map setup is incomplete")
 			continue
 		end
 		setReplayRoundMap(selectedMapId, map)
@@ -2048,13 +2407,13 @@ function RoundService:_runRoundLoop()
 			then math.max(RoundConfig.RoundStartingSeconds, 0)
 			else 0
 		setState(RoundStates.RoundStarting, "Round starting", roundStartingSeconds)
-		if roundStartingSeconds > 0 and not waitForSecondsOrInvalid(roundStartingSeconds, not forcedMapId) then
-			cancelToWaiting("Round cancelled before battle start")
+		if roundStartingSeconds > 0 and not RoundFlow.waitForSecondsOrInvalid(roundStartingSeconds, not forcedMapId) then
+			RoundFlow.cancelToWaiting("Round cancelled before battle start")
 			continue
 		end
 
-		runActiveRound()
-		resetRound()
+		RoundFlow.runActiveRound()
+		RoundFlow.resetRound()
 	end
 end
 
@@ -2063,6 +2422,9 @@ function RoundService:RecordPlayerDamage(attacker: any, target: Player, damage: 
 		return
 	end
 	if not (target and target.Parent == Players) then
+		return
+	end
+	if not RoundService:IsPlayerActive(target) then
 		return
 	end
 	if typeof(damage) ~= "number" or damage ~= damage or damage <= 0 then
@@ -2258,6 +2620,8 @@ end
 
 function RoundService:OnPlayerRemoving(player: Player)
 	respawnTokens[player] = nil
+	characterDestroyTokens[player] = nil
+	pendingRoundRespawnTokens[player] = nil
 	local voteChanged = clearPlayerVote(player)
 	if voteChanged then
 		syncVoteChoices()
@@ -2282,7 +2646,10 @@ function RoundService:GetState()
 end
 
 function RoundService:IsPlayerActive(player: Player): boolean
-	return currentState == RoundStates.Active and alivePlayers[player] == true
+	return currentState == RoundStates.Active
+		and alivePlayers[player] == true
+		and player:GetAttribute(ROUND_ALIVE_ATTR) == true
+		and hasUsableCharacter(player)
 end
 
 function RoundService:GetCoreCounts()
@@ -2381,6 +2748,11 @@ function RoundService:AdminForceStart(mapId: string?): (boolean, string?)
 		return false, "Map template is missing: " .. selectedMapId
 	end
 
+	if currentState == RoundStates.WaitingForPlayers then
+		for _, player in ipairs(Players:GetPlayers()) do
+			clearPlayerRoundState(player)
+		end
+	end
 	pendingAdminForceStartMapId = selectedMapId
 	pendingAdminReset = currentState ~= RoundStates.WaitingForPlayers
 	pendingAdminWinnerTeam = nil
@@ -2390,6 +2762,9 @@ end
 function RoundService:AdminResetRound(): (boolean, string?)
 	pendingAdminReset = true
 	pendingAdminWinnerTeam = nil
+	for _, player in ipairs(Players:GetPlayers()) do
+		clearPlayerRoundState(player)
+	end
 	return true, "Queued round reset"
 end
 
@@ -2485,7 +2860,7 @@ function RoundService:AdminRespawnPlayer(player: Player): (boolean, string?)
 
 	cancelScheduledRespawn(player)
 	if currentState ~= RoundStates.Active or not roundPlayers[player] then
-		safeLoadCharacter(player, "AdminRespawnLobby")
+		RespawnFlow.safeLoadCharacter(player, "AdminRespawnLobby")
 		task.defer(function()
 			if player.Parent == Players then
 				movePlayerToLobby(player)
@@ -2496,15 +2871,17 @@ function RoundService:AdminRespawnPlayer(player: Player): (boolean, string?)
 
 	alivePlayers[player] = true
 	clearRecentDamageFor(player)
-	player:SetAttribute(ROUND_ALIVE_ATTR, true)
-	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
+	player:SetAttribute(ROUND_ALIVE_ATTR, false)
+	player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, workspace:GetServerTimeNow())
 	bindCharacter(player)
 	syncAliveCounts()
 	task.defer(function()
 		if player.Parent == Players then
 			local token = bumpRespawnToken(player)
-			safeLoadCharacter(player, "AdminRespawnRound")
-			verifyRoundRespawn(player, token, 1)
+			pendingRoundRespawnTokens[player] = token
+			cancelScheduledCharacterDestroy(player)
+			RespawnFlow.safeLoadCharacter(player, "AdminRespawnRound")
+			RespawnFlow.verifyRoundRespawn(player, token, 1)
 		end
 	end)
 	return true, "Respawned " .. player.Name .. " in round"

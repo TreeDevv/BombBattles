@@ -4,6 +4,7 @@ return {
 	AssigningTeams = "AssigningTeams",
 	RoundStarting = "RoundStarting",
 	Active = "Active",
+	PlayOfTheGame = "PlayOfTheGame",
 	RoundEnding = "RoundEnding",
 	Resetting = "Resetting",
 }

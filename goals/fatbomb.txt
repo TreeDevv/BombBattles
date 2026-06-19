@@ -1,0 +1,98 @@
+game.ReplicatedStorage.Assets.Abilities.FatBomb
+
+Using only the assets in this folder.
+
+Implement the fat bomb ability to the best of your ability with this flow. You are able to use screen effects/vignettes/camera but no extra particles or models outside of a landing visual or what is normal in the throw flow. Make it smooth
+
+Fat Bomb — Flare Summon Flow
+
+Total time from flare landing to damage: about 0.9–1.1 seconds.
+
+1. Throw the flare
+
+The player throws a small glowing flare using the same readable arc as a normal bomb.
+
+While airborne, it should have:
+
+A bright red-orange trail
+A faint smoke ribbon
+A rising flare whistle
+A unique projectile silhouette so enemies recognize the ability immediately
+2. Flare lands and activates
+
+When it hits the ground, it sticks upright or embeds at a slight angle.
+
+Immediately:
+
+It spits sparks upward.
+A thin column of colored smoke shoots into the sky.
+The full damage radius appears around it.
+A circular shadow appears beneath the flare.
+A loud flare pop confirms the target location.
+
+The warning circle should appear at full size instantly rather than slowly expanding.
+
+3. The incoming giant is revealed
+
+About 0.2 seconds after the flare lands, the camera-facing smoke column parts near the top and the giant Roblox character appears directly above it.
+
+He should already be falling quickly rather than spawning extremely high up.
+
+Visual pose:
+
+Sitting or belly-first
+Arms and legs flailing
+Slight body wobble
+Clothes fluttering upward
+A few downward speed streaks
+Slowly rotating off-center
+
+The smoke column visually connects the flare to the falling character, making it feel like the flare called him in.
+
+4. Final warning
+
+As he descends:
+
+The ground shadow rapidly expands.
+The flare sparks faster.
+The danger circle pulses twice.
+Wind streaks spiral inward toward the center.
+The falling whistle becomes deeper and louder.
+
+During the final 0.1 seconds, the flare extinguishes and the whistle abruptly cuts out.
+
+No gameplay freeze or slow motion is needed.
+
+5. Impact
+
+The giant lands directly on the flare.
+
+At contact:
+
+His body squashes outward slightly.
+The flare disappears beneath him.
+A sharp circular shockwave crosses the damage radius.
+Dust and chunky debris burst outward.
+Nearby players are launched away from the center.
+A shallow circular crater decal appears underneath him.
+
+Damage should happen immediately on contact, synchronized with the first shockwave.
+
+6. Fast exit
+
+He should only remain for around 0.3 seconds after impact.
+
+A clean exit could be:
+
+He bounces once from the force of landing.
+A smoke cloud briefly covers him.
+He disappears inside the smoke.
+The smoke collapses into a few fading flare sparks.
+
+This is faster and less visually obstructive than having a hook slowly pull him back into the sky.
+
+Final rhythm
+
+Throw flare → flare lands → smoke beacon activates → giant appears overhead → shadow expands → impact → smoke-pop disappearance
+
+The flare remains the visual anchor throughout the sequence, so players instantly understand where the attack will land without needing excessive UI or a long cinematic.

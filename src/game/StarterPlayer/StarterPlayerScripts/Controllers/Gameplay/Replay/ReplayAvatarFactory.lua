@@ -1,3 +1,4 @@
+local ContentProvider = game:GetService("ContentProvider")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Workspace = game:GetService("Workspace")
@@ -18,6 +19,8 @@ local templateOrder = {}
 local playerConnections = {}
 local workspaceConnections = {}
 local watchedNPCModels = {}
+local avatarPreloadInFlight = {}
+local avatarPreloaded = {}
 
 local function isFiniteNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
@@ -191,6 +194,30 @@ local function destroyTemplate(template: Instance?)
 	end
 end
 
+local function preloadTemplateContent(userId: number, template: Model)
+	local key = getUserIdKey(userId)
+	if not key or avatarPreloaded[key] or avatarPreloadInFlight[key] then
+		return
+	end
+
+	avatarPreloadInFlight[key] = true
+	task.spawn(function()
+		local token = RuntimeProfiler.Begin("Client/Replay/AvatarFactory/PreloadTemplateContent")
+		local ok, err = pcall(function()
+			ContentProvider:PreloadAsync({ template })
+		end)
+		avatarPreloadInFlight[key] = nil
+		if ok then
+			avatarPreloaded[key] = true
+			RuntimeProfiler.Count("Client/Replay/AvatarFactory/PreloadedTemplateContent")
+		else
+			warnDebug("Failed to preload avatar template content", tostring(userId), tostring(err))
+			RuntimeProfiler.Count("Client/Replay/AvatarFactory/PreloadTemplateContentFailed")
+		end
+		RuntimeProfiler.End("Client/Replay/AvatarFactory/PreloadTemplateContent", token)
+	end)
+end
+
 local function rememberTemplate(userId: number, template: Model, preferLive: boolean)
 	local key = getUserIdKey(userId)
 	if not key then
@@ -208,17 +235,24 @@ local function rememberTemplate(userId: number, template: Model, preferLive: boo
 	if existing and preferLive then
 		destroyTemplate(existing)
 		templateCache[key] = nil
+		avatarPreloaded[key] = nil
+		avatarPreloadInFlight[key] = nil
 	end
 
 	if not templateCache[key] then
 		table.insert(templateOrder, key)
 	end
 	templateCache[key] = template
+	preloadTemplateContent(userId, template)
 
 	while #templateOrder > maxCache do
 		local oldKey = table.remove(templateOrder, 1)
 		local oldTemplate = oldKey and templateCache[oldKey]
 		templateCache[oldKey] = nil
+		if oldKey then
+			avatarPreloaded[oldKey] = nil
+			avatarPreloadInFlight[oldKey] = nil
+		end
 		destroyTemplate(oldTemplate)
 	end
 
@@ -359,6 +393,25 @@ function ReplayAvatarFactory.PreloadUserIds(userIds, timeoutSeconds: number?)
 	end
 end
 
+function ReplayAvatarFactory.PreloadCachedUserIds(userIds)
+	if typeof(userIds) ~= "table" then
+		return
+	end
+
+	local queued = 0
+	for _, userId in ipairs(userIds) do
+		local positiveUserId = getPositiveUserId(userId)
+		local template = positiveUserId and ReplayAvatarFactory.GetCachedTemplate(positiveUserId)
+		if positiveUserId and template then
+			preloadTemplateContent(positiveUserId, template)
+			queued += 1
+		end
+	end
+	if queued > 0 then
+		RuntimeProfiler.Count("Client/Replay/AvatarFactory/PreloadCachedQueued", queued)
+	end
+end
+
 function ReplayAvatarFactory.PrewarmCurrentPlayers()
 	local count = 0
 	for _, player in ipairs(Players:GetPlayers()) do
@@ -413,6 +466,11 @@ local function watchPlayer(player: Player)
 		task.defer(function()
 			ReplayAvatarFactory.CacheLiveCharacter(player.UserId)
 		end)
+	end))
+	table.insert(connections, player.CharacterRemoving:Connect(function(character)
+		if character and character:IsA("Model") then
+			ReplayAvatarFactory.CacheLiveModel(player.UserId, character, "CharacterRemoving")
+		end
 	end))
 
 	if player.Character then

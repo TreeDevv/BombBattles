@@ -1,6 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
@@ -8,14 +9,23 @@ local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
+type AbilityHookResult = AbilityTypes.AbilityHookResult
+type AbilityServiceLike = AbilityTypes.AbilityServiceLike
 type ServerActivateContext = AbilityTypes.ServerActivateContext
+type ServerHookContext = AbilityTypes.ServerHookContext
+
+type WindRecord = {
+	player: Player,
+}
 
 local WindBomb = {} :: AbilityTypes.ServerBehavior
 
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
+local PROJECTILES: { [string]: WindRecord } = {}
 local projectileSerial = 0
 local bombProjectileService = nil
+local abilityService: AbilityServiceLike? = nil
 
 local function getBombProjectileService()
 	if bombProjectileService then
@@ -131,6 +141,35 @@ local function buildExplosionConfig(damageMultiplier: number, knockbackMultiplie
 	}
 end
 
+local function getTrackedProjectile(player: Player, context): WindRecord?
+	if typeof(context) ~= "table" then
+		return nil
+	end
+
+	local projectileId = context.projectileId or context.sourceId
+	if typeof(projectileId) ~= "string" or projectileId == "" then
+		return nil
+	end
+
+	local record = PROJECTILES[projectileId]
+	if record and record.player == player then
+		return record
+	end
+	return nil
+end
+
+local function cleanupProjectileLater(projectileId: string, record: WindRecord, delaySeconds: number)
+	task.delay(delaySeconds, function()
+		if PROJECTILES[projectileId] == record then
+			PROJECTILES[projectileId] = nil
+		end
+	end)
+end
+
+function WindBomb.OnStart(service: AbilityServiceLike)
+	abilityService = service
+end
+
 function WindBomb.CanActivate(context: ServerActivateContext): boolean
 	return getCharacterRoot(context.player) ~= nil and getBombProjectileService() ~= nil
 end
@@ -177,11 +216,26 @@ function WindBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 				playerContactImpacts = false,
 			},
 			explosion = buildExplosionConfig(damageMultiplier, knockbackMultiplier),
+			visuals = {
+				abilityVisualOverlay = true,
+				abilityVisualAssetPath = context.definition.assetPath,
+				abilityVisualName = "WindBombVFX",
+				abilityVisualDisabledAttachmentName = "Impact",
+				highlightColor = if typeof(context.definition.highlightColor) == "Color3"
+					then context.definition.highlightColor
+					else Color3.fromRGB(96, 221, 255),
+			},
 		},
 	})
 	if not launched then
 		return false
 	end
+
+	local record = {
+		player = context.player,
+	}
+	PROJECTILES[projectileId] = record
+	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 8)
 
 	local state = context.slotState.state
 	local windBombsThrown = if typeof(state) == "table" and typeof(state.windBombsThrown) == "number"
@@ -202,6 +256,42 @@ function WindBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 			},
 		},
 	}
+end
+
+function WindBomb.OnBeforeExplosion(context: ServerHookContext): AbilityHookResult
+	local payload = context.context
+	local record = getTrackedProjectile(context.player, payload)
+	if not record then
+		return AbilityResult.Continue()
+	end
+
+	local projectileId = if typeof(payload) == "table" then payload.projectileId else nil
+	if typeof(projectileId) ~= "string" or projectileId == "" then
+		return AbilityResult.Continue()
+	end
+
+	PROJECTILES[projectileId] = nil
+
+	if abilityService and typeof(payload.position) == "Vector3" then
+		abilityService:FireEffect("WindBombImpact", {
+			player = record.player,
+			slot = context.slot,
+			abilityId = "WindBomb",
+			projectileId = projectileId,
+			position = payload.position,
+			assetPath = context.definition.assetPath,
+		})
+	end
+
+	return AbilityResult.Continue()
+end
+
+function WindBomb.OnPlayerRemoving(player: Player)
+	for projectileId, record in pairs(PROJECTILES) do
+		if record.player == player then
+			PROJECTILES[projectileId] = nil
+		end
+	end
 end
 
 return WindBomb

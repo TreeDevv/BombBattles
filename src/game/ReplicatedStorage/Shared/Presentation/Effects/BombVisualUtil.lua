@@ -384,7 +384,14 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 		return result
 	end
 
-	local template, resolvedSkinId, usedFallback = BombVisualUtil.GetExplosionTemplate(options.skinId)
+	local template
+	local resolvedSkinId = BombSkinConfig.DefaultSkinId
+	local usedFallback = false
+	if typeof(options.assetPath) == "table" then
+		template = getByPath(ReplicatedStorage, options.assetPath)
+	else
+		template, resolvedSkinId, usedFallback = BombVisualUtil.GetExplosionTemplate(options.skinId)
+	end
 	result.template = template
 	result.resolvedSkinId = resolvedSkinId
 	result.usedFallback = usedFallback

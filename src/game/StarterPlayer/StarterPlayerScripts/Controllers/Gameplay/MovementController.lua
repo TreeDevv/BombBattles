@@ -21,6 +21,8 @@ local AIR_CONTROL_LAUNCH_SOURCE_ATTR = "AirControl_LaunchSource"
 local AIR_CONTROL_LAUNCH_SERIAL_ATTR = "AirControl_LaunchSerial"
 local AIR_CONTROL_LAUNCHED_AT_ATTR = "AirControl_LaunchedAt"
 local GRAVITY_BOOTS_ACTIVE_UNTIL_ATTR = "GravityBoots_ActiveUntil"
+local FREEZE_BOMB_SLOW_UNTIL_ATTR = "FreezeBomb_SlowUntil"
+local FREEZE_BOMB_SLOW_MULTIPLIER_ATTR = "FreezeBomb_SlowMultiplier"
 local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 1
 local CONTROLLER_LOOKUP_TIMEOUT = 0.75
 local CONTROLLER_BIND_RETRY_TIMEOUT = 20
@@ -133,6 +135,7 @@ MovementController._airControlBrakeForce = Vector3.zero
 MovementController._airControlFallBrakeForce = Vector3.zero
 MovementController._airControlVerticalSpeed = 0
 MovementController._airControlHorizontalSpeed = 0
+MovementController._airControlMinimumSpeedLatched = false
 MovementController._airControlLaunchSource = AIR_LAUNCH_SOURCE_DEFAULT
 MovementController._airControlLaunchSerial = 0
 MovementController._airControlLaunchedAt = NEVER
@@ -292,6 +295,20 @@ local function getBombKnockbackUntil(character: Model?): number
 
 	local knockbackUntil = character:GetAttribute(KNOCKBACK_UNTIL_ATTR)
 	return if typeof(knockbackUntil) == "number" then knockbackUntil else NEVER
+end
+
+local function getFreezeBombSlowMultiplier(character: Model?): number
+	if not character then
+		return 1
+	end
+
+	local slowUntil = character:GetAttribute(FREEZE_BOMB_SLOW_UNTIL_ATTR)
+	if typeof(slowUntil) ~= "number" or slowUntil <= workspace:GetServerTimeNow() then
+		return 1
+	end
+
+	local multiplier = character:GetAttribute(FREEZE_BOMB_SLOW_MULTIPLIER_ATTR)
+	return if typeof(multiplier) == "number" then math.clamp(multiplier, 0.05, 1) else 1
 end
 
 local exponentialAlpha = MovementMath.ExponentialAlpha
@@ -574,6 +591,7 @@ function MovementController:_setAirControlEnabled(enabled: boolean)
 		self._airControlFallBrakeForce = Vector3.zero
 		self._airControlVerticalSpeed = 0
 		self._airControlHorizontalSpeed = 0
+		self._airControlMinimumSpeedLatched = false
 		self:_resetGravityBootsAirControlState()
 	end
 end
@@ -650,7 +668,16 @@ function MovementController:_shouldUseCustomAirControl(): boolean
 		return true
 	end
 
-	return flattenVelocity(rootPart.AssemblyLinearVelocity).Magnitude >= activationHorizontalSpeed
+	if self._airControlMinimumSpeedLatched then
+		return true
+	end
+
+	if flattenVelocity(rootPart.AssemblyLinearVelocity).Magnitude >= activationHorizontalSpeed then
+		self._airControlMinimumSpeedLatched = true
+		return true
+	end
+
+	return false
 end
 
 function MovementController:_setAirControlLaunchState(
@@ -2048,6 +2075,8 @@ function MovementController:_setDebugAttributes(data)
 	character:SetAttribute("Movement_Crouching", data.isCrouching)
 	character:SetAttribute("Movement_Sliding", data.isSliding)
 	character:SetAttribute("Movement_EffectiveSpeed", data.effectiveSpeed)
+	character:SetAttribute("Movement_FreezeSlowed", data.freezeSlowed)
+	character:SetAttribute("Movement_FreezeSlowMultiplier", data.freezeSlowMultiplier)
 	character:SetAttribute("Movement_MoveMagnitude", data.moveMagnitude)
 	character:SetAttribute("Movement_InCoyoteTime", data.inCoyoteTime)
 	character:SetAttribute("Movement_JumpBuffered", data.jumpBuffered)
@@ -2198,6 +2227,7 @@ function MovementController:_unbindCharacter()
 	self._airJumpCount = 0
 	self._jumpSerial = 0
 	self._lastAirControlLaunchTime = NEVER
+	self._airControlMinimumSpeedLatched = false
 	self._groundedCandidateStartTime = NEVER
 	self._observedAirControlLaunchSerial = 0
 	self._lastObservedKnockbackUntil = NEVER
@@ -2342,6 +2372,8 @@ function MovementController:_step(dt: number)
 	if adminWalkSpeed then
 		targetSpeed = adminWalkSpeed
 	end
+	local freezeSlowMultiplier = getFreezeBombSlowMultiplier(self._character)
+	targetSpeed *= freezeSlowMultiplier
 
 	local hasMoveInput = targetMoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
 	local isSprinting = sprintIntent and not isSliding and not isCrouching
@@ -2419,6 +2451,8 @@ function MovementController:_step(dt: number)
 		isCrouching = isCrouching,
 		isSliding = isSliding,
 		effectiveSpeed = targetSpeed,
+		freezeSlowed = freezeSlowMultiplier < 1,
+		freezeSlowMultiplier = freezeSlowMultiplier,
 		moveMagnitude = targetMoveDirection.Magnitude,
 		inCoyoteTime = inCoyoteTime,
 		jumpBuffered = jumpBuffered,
@@ -2506,6 +2540,7 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	self._smoothedFacingYaw = directionToYaw(self._smoothedFacingDirection)
 	self._airJumpCount = 0
 	self._jumpSerial = 0
+	self._airControlMinimumSpeedLatched = false
 	self:_bindFallingDownStateWatcher(character)
 
 	character:SetAttribute("Movement_JumpSerial", self._jumpSerial)
@@ -2517,6 +2552,8 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	character:SetAttribute("Movement_SlideSpeed", 0)
 	character:SetAttribute("Movement_SlideJumpBurstActive", false)
 	character:SetAttribute("Movement_HorizontalSpeed", self:_getHorizontalSpeed())
+	character:SetAttribute("Movement_FreezeSlowed", false)
+	character:SetAttribute("Movement_FreezeSlowMultiplier", 1)
 	character:SetAttribute("Movement_AirControlActive", false)
 	character:SetAttribute("Movement_AirControlState", "Grounded")
 	character:SetAttribute("Movement_AirControlGravityScale", 1)

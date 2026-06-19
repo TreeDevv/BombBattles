@@ -608,6 +608,8 @@ local function formatSubheading(state): string
 		return "Round starting..."
 	elseif stateName == RoundStates.Active then
 		return "Round in progress..."
+	elseif stateName == RoundStates.PlayOfTheGame then
+		return "Play of the Game..."
 	elseif stateName == RoundStates.RoundEnding then
 		return formatRoundEnding(state)
 	elseif stateName == RoundStates.Resetting then

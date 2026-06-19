@@ -235,12 +235,11 @@ function ReplayPayloadPrep.PrewarmAvatarTemplates(playerMeta)
 		if key and not seen[key] and isFiniteNumber(userId) and userId > 0 then
 			seen[key] = true
 			local resolvedUserId = math.floor(userId)
-			ReplayAvatarFactory.CacheLiveCharacter(resolvedUserId)
 			table.insert(userIds, resolvedUserId)
 		end
 	end
 
-	ReplayAvatarFactory.PrewarmUserIds(userIds)
+	ReplayAvatarFactory.PreloadCachedUserIds(userIds)
 end
 
 function ReplayPayloadPrep.CollectBombMeta(frames)

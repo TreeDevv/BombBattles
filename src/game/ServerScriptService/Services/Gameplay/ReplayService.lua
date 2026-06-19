@@ -1474,7 +1474,127 @@ local function getPOTGRecipients(recipients)
 			table.insert(players, player)
 		end
 	end
-	return players
+	return if #players > 0 then players else Players:GetPlayers()
+end
+
+local function getReplaySnapshotUserId(snapshot): number?
+	if typeof(snapshot) ~= "table" or not isFiniteNumber(snapshot.userId) or snapshot.userId == 0 then
+		return nil
+	end
+	return math.floor(snapshot.userId)
+end
+
+local function findReplayPlayerSnapshot(frames, userId: any)
+	if not isFiniteNumber(userId) or typeof(frames) ~= "table" then
+		return nil
+	end
+
+	local resolvedUserId = math.floor(userId)
+	for _, frame in ipairs(frames) do
+		local players = if typeof(frame) == "table" then frame.players else nil
+		if typeof(players) ~= "table" then
+			continue
+		end
+		for _, snapshot in ipairs(players) do
+			if getReplaySnapshotUserId(snapshot) == resolvedUserId then
+				return snapshot
+			end
+		end
+	end
+	return nil
+end
+
+local function findAnyReplayPlayerSnapshot(frames, requirePositiveUserId: boolean)
+	if typeof(frames) ~= "table" then
+		return nil
+	end
+
+	for _, frame in ipairs(frames) do
+		local players = if typeof(frame) == "table" then frame.players else nil
+		if typeof(players) ~= "table" then
+			continue
+		end
+		for _, snapshot in ipairs(players) do
+			local userId = getReplaySnapshotUserId(snapshot)
+			if userId and (not requirePositiveUserId or userId > 0) then
+				return snapshot
+			end
+		end
+	end
+	return nil
+end
+
+local function getReplaySnapshotString(snapshot, fieldName: string): string?
+	local value = if typeof(snapshot) == "table" then snapshot[fieldName] else nil
+	return if typeof(value) == "string" and value ~= "" then value else nil
+end
+
+local function buildFallbackPOTGCandidate(recipients)
+	local bufferCounts = ensureBuffer():GetDebugCounts()
+	if not (isFiniteNumber(bufferCounts.frames) and bufferCounts.frames > 0 and isFiniteNumber(bufferCounts.newestTimestamp)) then
+		return nil
+	end
+
+	local endTime = bufferCounts.newestTimestamp
+	local bufferSeconds = if isFiniteNumber(bufferCounts.bufferSeconds) and bufferCounts.bufferSeconds > 0
+		then bufferCounts.bufferSeconds
+		else ReplayConstants.BUFFER_SECONDS
+	local windowSeconds = math.min(ReplayConstants.POTG_PRE_SECONDS + ReplayConstants.POTG_POST_SECONDS, bufferSeconds)
+	local startTime = endTime - windowSeconds
+	local clip = ensureBuffer():GetClip(startTime, endTime)
+	if typeof(clip.frames) ~= "table" or #clip.frames == 0 then
+		return nil
+	end
+
+	local player = nil
+	local snapshot = nil
+	for _, recipient in ipairs(getPOTGRecipients(recipients)) do
+		if recipient.Parent ~= Players then
+			continue
+		end
+
+		snapshot = findReplayPlayerSnapshot(clip.frames, recipient.UserId)
+		if snapshot then
+			player = recipient
+			break
+		end
+	end
+
+	snapshot = snapshot or findAnyReplayPlayerSnapshot(clip.frames, true) or findAnyReplayPlayerSnapshot(clip.frames, false)
+	if not snapshot then
+		return nil
+	end
+
+	local playerUserId = getReplaySnapshotUserId(snapshot)
+	if not playerUserId then
+		return nil
+	end
+	if not player and playerUserId > 0 then
+		player = getUserIdPlayer(playerUserId)
+	end
+
+	return {
+		roundId = currentRoundId,
+		playerUserId = playerUserId,
+		playerName = if player then player.Name else getReplaySnapshotString(snapshot, "name") or tostring(playerUserId),
+		playerDisplayName = if player
+			then player.DisplayName
+			else getReplaySnapshotString(snapshot, "displayName") or getReplaySnapshotString(snapshot, "name") or tostring(playerUserId),
+		playerTeam = if player then getTeamName(player) else getReplaySnapshotString(snapshot, "teamName"),
+		playerIsNPC = if typeof(snapshot.isNPC) == "boolean" then snapshot.isNPC else player == nil,
+		sourceType = "RoundReplay",
+		sourceId = "Fallback",
+		startTime = startTime,
+		endTime = endTime,
+		score = 1,
+		reason = "Round Recap",
+		eventTypes = { "RoundFallback" },
+		primaryEventTime = endTime,
+		kills = 0,
+		baseDamage = 0,
+		rareRank = 0,
+		sourceConfidence = 0,
+	}
 end
 
 local function clearPOTGSendInProgress(token: number)
@@ -1783,7 +1903,7 @@ function ReplayService.GetRecentDebugInfo(_self)
 			killReplay = getKillClipCaps(),
 			potgReplay = getPOTGClipCaps(),
 		},
-		potgBestCandidate = POTGService.GetBestCandidate(),
+		potgBestCandidate = POTGService.GetBestCandidate() or buildFallbackPOTGCandidate(nil),
 		buffer = bufferCounts,
 	}
 end
@@ -1843,6 +1963,17 @@ function ReplayService.DebugPrintPOTGCandidates(first, second)
 	local requester = unwrapOptionalSelf(first, second)
 	local candidates = POTGService.GetDebugCandidates()
 	if #candidates == 0 then
+		local fallback = buildFallbackPOTGCandidate(if requester then { requester } else nil)
+		if fallback then
+			print(
+				"[ReplayDebug]",
+				if requester and requester.Name then requester.Name else "Server",
+				"POTG candidates: fallback",
+				formatCandidateSummary(fallback, 1)
+			)
+			return true, "POTG candidates: fallback available", { fallback }
+		end
+
 		print("[ReplayDebug]", if requester and requester.Name then requester.Name else "Server", "POTG candidates: none")
 		return true, "POTG candidates: none", candidates
 	end
@@ -1895,7 +2026,7 @@ function ReplayService.DebugPlayBestPOTG(first, second)
 		return false, "Calling developer is not available"
 	end
 
-	local candidate = POTGService.GetBestCandidate()
+	local candidate = POTGService.GetBestCandidate() or buildFallbackPOTGCandidate({ player })
 	if not candidate then
 		return false, "No POTG candidate is available"
 	end
@@ -2022,7 +2153,7 @@ function ReplayService.PlayPOTG(first, second, third)
 	local sendToken = potgSendToken
 	potgSendInProgress = true
 	local startedGeneration = roundStorageGeneration
-	local candidate = POTGService.GetBestCandidate()
+	local candidate = POTGService.GetBestCandidate() or buildFallbackPOTGCandidate(recipients)
 	if not candidate then
 		debugPOTGReplaySend("skipped-no-candidate", nil, nil)
 		clearPOTGSendInProgress(sendToken)

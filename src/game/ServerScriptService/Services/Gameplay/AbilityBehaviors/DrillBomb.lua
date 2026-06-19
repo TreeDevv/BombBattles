@@ -219,6 +219,10 @@ function DrillBomb.OnActivate(context: ServerActivateContext): AbilityActivation
 	local upwardVelocity = getDefinitionNumber(context.definition, "projectileUpwardVelocity", BombConfig.ProjectileUpwardVelocity)
 	local gravityScale = getDefinitionNumber(context.definition, "projectileGravityScale", BombConfig.ProjectileGravityScale)
 	local remainingFuse = math.max(getDefinitionNumber(context.definition, "projectileMaxFlightSeconds", BombConfig.FuseSeconds), 0.05)
+	local cleanupDelay = math.max(
+		remainingFuse + BombConfig.ProjectileLifetimePadding + 4,
+		getDefinitionNumber(context.definition, "durationSeconds", remainingFuse) + 1
+	)
 
 	local launched = projectileService:Launch({
 		owner = context.player,
@@ -262,7 +266,7 @@ function DrillBomb.OnActivate(context: ServerActivateContext): AbilityActivation
 		burrowing = false,
 	}
 	PROJECTILES[projectileId] = record
-	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 4)
+	cleanupProjectileLater(projectileId, record, cleanupDelay)
 
 	local state = context.slotState.state
 	local drillsFired = if typeof(state) == "table" and typeof(state.drillsFired) == "number" then state.drillsFired else 0

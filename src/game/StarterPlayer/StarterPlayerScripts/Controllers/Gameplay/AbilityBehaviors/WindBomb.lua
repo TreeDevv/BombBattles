@@ -21,6 +21,11 @@ WindBomb.HandlesInputState = true
 local activeThrow: ThrowState? = nil
 local predictedCooldownEndsAt = 0
 local previewConnection: RBXScriptConnection? = nil
+local emitModule = nil
+local emitModuleInitialized = false
+local warnedMissingEmitModule = false
+local warnedMissingImpactTemplate = false
+local warnedInvalidImpactTemplate = false
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
 	local value = if definition then definition[key] else nil
@@ -41,11 +46,18 @@ local function clearPreview()
 	BombController:HideAbilityTrajectoryPreview()
 end
 
+local function clearHeldVisual()
+	if type(BombController.ClearLocalAbilityHeldVisual) == "function" then
+		BombController:ClearLocalAbilityHeldVisual()
+	end
+end
+
 local function updatePreview()
 	local state = activeThrow
 	if state and not BombController:IsHoldingBomb() then
 		activeThrow = nil
 		BombController:SetPrimaryBombInputSuppressed(false)
+		clearHeldVisual()
 		clearPreview()
 		return
 	end
@@ -59,6 +71,7 @@ local function updatePreview()
 		activeThrow = nil
 		BombController:SetPrimaryBombInputSuppressed(false)
 		BombController:CancelAbilityThrowHold()
+		clearHeldVisual()
 		clearPreview()
 		return
 	end
@@ -93,6 +106,7 @@ end
 local function stopThrow()
 	activeThrow = nil
 	clearPreview()
+	clearHeldVisual()
 	BombController:SetPrimaryBombInputSuppressed(false)
 end
 
@@ -111,6 +125,14 @@ local function beginThrow(context: ClientActivateRequestedContext): boolean
 	end
 	if not BombController:BeginAbilityThrowHold() then
 		return true
+	end
+
+	if type(BombController.SetLocalAbilityHeldVisual) == "function" then
+		BombController:SetLocalAbilityHeldVisual({
+			assetPath = context.definition.assetPath,
+			name = "WindBombHeldVFX",
+			disabledAttachmentName = "Impact",
+		})
 	end
 
 	activeThrow = {
@@ -143,6 +165,170 @@ local function releaseThrow(context: ClientActivateRequestedContext): boolean
 	return true
 end
 
+local function getInstanceByPath(path: any): Instance?
+	if typeof(path) ~= "table" then
+		return nil
+	end
+
+	local current: Instance? = ReplicatedStorage
+	for _, name in ipairs(path) do
+		if typeof(name) ~= "string" or name == "" or not current then
+			return nil
+		end
+		current = current:FindFirstChild(name)
+	end
+	return current
+end
+
+local function getImpactTemplate(path: any): Attachment?
+	local template = getInstanceByPath(path)
+	local impact = template and template:FindFirstChild("Impact")
+	if not impact then
+		if not warnedMissingImpactTemplate then
+			warn("[WindBomb] Missing ReplicatedStorage.Assets.Abilities.WindBomb.WindBomb.Impact")
+			warnedMissingImpactTemplate = true
+		end
+		return nil
+	end
+	if not impact:IsA("Attachment") then
+		if not warnedInvalidImpactTemplate then
+			warn("[WindBomb] Impact VFX asset must be an Attachment")
+			warnedInvalidImpactTemplate = true
+		end
+		return nil
+	end
+
+	return impact
+end
+
+local function getEmitModule()
+	if emitModule then
+		return emitModule
+	end
+
+	local packages = ReplicatedStorage:FindFirstChild("Packages")
+	local moduleScript = packages and packages:FindFirstChild("EmitModule")
+	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
+		if not warnedMissingEmitModule then
+			warn("[WindBomb] Missing ReplicatedStorage.Packages.EmitModule")
+			warnedMissingEmitModule = true
+		end
+		return nil
+	end
+
+	local ok, result = pcall(require, moduleScript)
+	if not ok then
+		if not warnedMissingEmitModule then
+			warn("[WindBomb] Failed to require EmitModule: " .. tostring(result))
+			warnedMissingEmitModule = true
+		end
+		return nil
+	end
+
+	emitModule = result
+	return emitModule
+end
+
+local function ensureEmitModuleInitialized(module): boolean
+	if emitModuleInitialized then
+		return true
+	end
+	if not module then
+		return false
+	end
+
+	local initFn = module.init or module.Init
+	if type(initFn) == "function" then
+		local ok, err = pcall(function()
+			initFn()
+		end)
+		if not ok then
+			warn("[WindBomb] Failed to initialize EmitModule: " .. tostring(err))
+			return false
+		end
+	end
+
+	emitModuleInitialized = true
+	return true
+end
+
+local function getVfxFolder(): Folder
+	local existing = workspace:FindFirstChild("WindBombVFX")
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = "WindBombVFX"
+	folder.Parent = workspace
+	return folder
+end
+
+local function cleanupVisualAfterDelay(instance: Instance, cleanupSeconds: number)
+	local cleaned = false
+	local function cleanup()
+		if cleaned then
+			return
+		end
+		cleaned = true
+		if instance.Parent then
+			instance:Destroy()
+		end
+	end
+
+	task.delay(cleanupSeconds, cleanup)
+end
+
+local function createImpactHolder(position: Vector3): BasePart
+	local holder = Instance.new("Part")
+	holder.Name = "WindBombImpactVFX"
+	holder.Anchored = true
+	holder.CanCollide = false
+	holder.CanTouch = false
+	holder.CanQuery = false
+	holder.CastShadow = false
+	holder.Transparency = 1
+	holder.Size = Vector3.new(1, 1, 1)
+	holder.CFrame = CFrame.new(position)
+	holder.Parent = getVfxFolder()
+	return holder
+end
+
+local function playImpactEffect(payload: any)
+	local definition = AbilityConfig.GetDefinition("WindBomb")
+	local position = if typeof(payload) == "table" then payload.position else nil
+	if typeof(position) ~= "Vector3" then
+		return
+	end
+
+	local assetPath = if typeof(payload) == "table" and typeof(payload.assetPath) == "table"
+		then payload.assetPath
+		else if definition then definition.assetPath else nil
+	local template = getImpactTemplate(assetPath)
+	if not template then
+		return
+	end
+
+	local holder = createImpactHolder(position)
+	local impact = template:Clone()
+	impact.Parent = holder
+
+	local module = getEmitModule()
+	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
+		local ok, err = pcall(function()
+			module.emit(impact)
+		end)
+		if not ok then
+			warn("[WindBomb] Failed to emit impact VFX: " .. tostring(err))
+		end
+	end
+
+	cleanupVisualAfterDelay(holder, 3)
+end
+
 function WindBomb.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	local inputState = context.inputState
 	if inputState == nil or inputState == Enum.UserInputState.Begin then
@@ -157,7 +343,12 @@ function WindBomb.OnActivateRequested(context: ClientActivateRequestedContext): 
 	return true
 end
 
-function WindBomb.OnEffect(_context: ClientEffectContext)
+function WindBomb.OnEffect(context: ClientEffectContext)
+	if context.effectName ~= "WindBombImpact" or context.payload.abilityId ~= "WindBomb" then
+		return
+	end
+
+	playImpactEffect(context.payload)
 end
 
 return WindBomb

@@ -115,6 +115,8 @@ function GameStateNotificationController:_showForState(state: RoundState, isInit
 		self:_showOnce(roundId, "round-starting", "Round starting", "Gold", DEFAULT_DURATION)
 	elseif stateName == RoundStates.Active then
 		self:_showOnce(roundId, "active", "Battle started", "Green", DEFAULT_DURATION)
+	elseif stateName == RoundStates.PlayOfTheGame then
+		self:_showOnce(roundId, "potg", "Play of the Game", "Gold", DEFAULT_DURATION)
 	elseif stateName == RoundStates.RoundEnding then
 		local winnerTeam = state.winnerTeam
 		if typeof(winnerTeam) == "string" and winnerTeam ~= "" then

@@ -1,7 +1,6 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
@@ -10,17 +9,11 @@ local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
 type ServerActivateContext = AbilityTypes.ServerActivateContext
-type ServerHookContext = AbilityTypes.ServerHookContext
-
-type CraterRecord = {
-	player: Player,
-}
 
 local CraterBomb = {} :: AbilityTypes.ServerBehavior
 
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
-local PROJECTILES: { [string]: CraterRecord } = {}
 local projectileSerial = 0
 local bombProjectileService = nil
 
@@ -120,29 +113,25 @@ local function createProjectileId(player: Player): string
 	)
 end
 
-local function getTrackedProjectile(player: Player, context): CraterRecord?
-	if typeof(context) ~= "table" then
-		return nil
-	end
+local function getCraterExplosionOverride(definition: AbilityDefinition?)
+	local playerDamageMultiplier = math.max(getDefinitionNumber(definition, "playerDamageMultiplier", 0.5), 0)
+	local coreDamageMultiplier = math.max(getDefinitionNumber(definition, "coreDamageMultiplier", 0.5), 0)
 
-	local projectileId = context.projectileId
-	if typeof(projectileId) ~= "string" or projectileId == "" then
-		return nil
-	end
-
-	local record = PROJECTILES[projectileId]
-	if record and record.player == player then
-		return record
-	end
-	return nil
-end
-
-local function cleanupProjectileLater(projectileId: string, record: CraterRecord, delaySeconds: number)
-	task.delay(delaySeconds, function()
-		if PROJECTILES[projectileId] == record then
-			PROJECTILES[projectileId] = nil
-		end
-	end)
+	return {
+		abilityId = "CraterBomb",
+		terrainRadius = getDefinitionNumber(definition, "terrainRadius", 30),
+		explosionVisualScale = getDefinitionNumber(definition, "explosionVisualScale", 1.65),
+		playerDirectDamage = BombConfig.PlayerDirectDamage * playerDamageMultiplier,
+		playerNearDamageMax = BombConfig.PlayerNearDamageMax * playerDamageMultiplier,
+		playerNearDamageMin = BombConfig.PlayerNearDamageMin * playerDamageMultiplier,
+		playerOuterDamageMax = BombConfig.PlayerOuterDamageMax * playerDamageMultiplier,
+		playerOuterDamageMin = BombConfig.PlayerOuterDamageMin * playerDamageMultiplier,
+		anchorDirectDamage = BombConfig.AnchorDirectDamage * coreDamageMultiplier,
+		anchorNearDamageMax = BombConfig.AnchorNearDamageMax * coreDamageMultiplier,
+		anchorNearDamageMin = BombConfig.AnchorNearDamageMin * coreDamageMultiplier,
+		anchorOuterDamageMax = BombConfig.AnchorOuterDamageMax * coreDamageMultiplier,
+		anchorOuterDamageMin = BombConfig.AnchorOuterDamageMin * coreDamageMultiplier,
+	}
 end
 
 function CraterBomb.CanActivate(context: ServerActivateContext): boolean
@@ -187,17 +176,12 @@ function CraterBomb.OnActivate(context: ServerActivateContext): AbilityActivatio
 				directHitExplodes = false,
 				playerContactExplodes = false,
 			},
+			explosion = getCraterExplosionOverride(context.definition),
 		},
 	})
 	if not launched then
 		return false
 	end
-
-	local record = {
-		player = context.player,
-	}
-	PROJECTILES[projectileId] = record
-	cleanupProjectileLater(projectileId, record, remainingFuse + BombConfig.ProjectileLifetimePadding + 4)
 
 	local state = context.slotState.state
 	local cratersFired = if typeof(state) == "table" and typeof(state.cratersFired) == "number" then state.cratersFired else 0
@@ -207,40 +191,7 @@ function CraterBomb.OnActivate(context: ServerActivateContext): AbilityActivatio
 			cratersFired = cratersFired + 1,
 			lastActivatedAt = context.now,
 		},
-		effect = {
-			name = "CraterBombFired",
-			payload = {
-				projectileId = projectileId,
-			},
-		},
 	}
-end
-
-function CraterBomb.OnBeforeExplosion(context: ServerHookContext)
-	local payload = context.context
-	local record = getTrackedProjectile(context.player, payload)
-	if not record then
-		return AbilityResult.Continue()
-	end
-
-	local projectileId = payload.projectileId
-	PROJECTILES[projectileId] = nil
-
-	return {
-		kind = AbilityResult.Kind.ModifyDamage,
-		terrainRadius = getDefinitionNumber(context.definition, "terrainRadius", 30),
-		playerDamageMultiplier = getDefinitionNumber(context.definition, "playerDamageMultiplier", 0.5),
-		coreDamageMultiplier = getDefinitionNumber(context.definition, "coreDamageMultiplier", 0.5),
-		explosionVisualScale = getDefinitionNumber(context.definition, "explosionVisualScale", 1.65),
-	}
-end
-
-function CraterBomb.OnPlayerRemoving(player: Player)
-	for projectileId, record in pairs(PROJECTILES) do
-		if record.player == player then
-			PROJECTILES[projectileId] = nil
-		end
-	end
 end
 
 return CraterBomb

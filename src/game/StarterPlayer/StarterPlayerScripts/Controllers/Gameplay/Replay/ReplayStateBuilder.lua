@@ -5,6 +5,74 @@ local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local ReplayStateBuilder = {}
 
+local function getUserIdKey(deps, value: any): string?
+	if not deps.isFiniteNumber(value) then
+		return nil
+	end
+	return tostring(math.floor(value))
+end
+
+local function getPlayerVisualLimit(payload, deps): number
+	local defaultLimit = if payload.type == "POTGReplay" then 10 else 6
+	local configuredLimit = if payload.type == "POTGReplay"
+		then deps.maxPOTGReplayPlayerVisuals
+		else deps.maxKillReplayPlayerVisuals
+	if deps.isFiniteNumber(configuredLimit) then
+		return math.max(math.floor(configuredLimit), 1)
+	end
+	return defaultLimit
+end
+
+local function addPriorityKey(priorityKeys: { string }, prioritySet: { [string]: number }, key: string?)
+	if not key or prioritySet[key] then
+		return
+	end
+	prioritySet[key] = #priorityKeys + 1
+	table.insert(priorityKeys, key)
+end
+
+local function buildPlayerVisualEntries(playerMeta, payload, deps)
+	local priorityKeys = {}
+	local prioritySet = {}
+
+	addPriorityKey(priorityKeys, prioritySet, getUserIdKey(deps, payload.killerUserId))
+	addPriorityKey(priorityKeys, prioritySet, getUserIdKey(deps, payload.victimUserId))
+	addPriorityKey(priorityKeys, prioritySet, getUserIdKey(deps, payload.playerUserId))
+
+	local entries = {}
+	for key, meta in pairs(playerMeta) do
+		table.insert(entries, {
+			key = key,
+			meta = meta,
+			priority = prioritySet[key] or math.huge,
+			name = tostring((meta and (meta.displayName or meta.name)) or key),
+		})
+	end
+
+	table.sort(entries, function(left, right)
+		if left.priority ~= right.priority then
+			return left.priority < right.priority
+		end
+		if left.name ~= right.name then
+			return left.name < right.name
+		end
+		return tostring(left.key) < tostring(right.key)
+	end)
+
+	local limit = math.min(getPlayerVisualLimit(payload, deps), #entries)
+	local selectedEntries = {}
+	local selectedMeta = {}
+	for index = 1, limit do
+		local entry = entries[index]
+		table.insert(selectedEntries, entry)
+		selectedMeta[entry.key] = entry.meta
+	end
+
+	RuntimeProfiler.Count("Client/Replay/Death/StateBuilder/PlayerMetaCount", #entries)
+	RuntimeProfiler.Count("Client/Replay/Death/StateBuilder/PlayerVisualCount", #selectedEntries)
+	return selectedEntries, selectedMeta
+end
+
 function ReplayStateBuilder.Build(client, payload, deps)
 	local totalToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/Total")
 	local function finish(result)
@@ -100,7 +168,6 @@ function ReplayStateBuilder.Build(client, payload, deps)
 		then math.clamp(payload.primaryEventTime, startTime, endTime)
 		else deps.findKillTimestamp(events, victimUserId, startTime, endTime)
 	local impactPosition = deps.findImpactPosition(events, eventPositionsBySourceId, sourceId, victimUserId)
-	local hasRecordedCamera = deps.hasRecordedCameraForUser(frames, cameraUserId)
 
 	local state = {
 		scene = scene,
@@ -130,7 +197,7 @@ function ReplayStateBuilder.Build(client, payload, deps)
 		killerUserId = killerUserId,
 		victimUserId = victimUserId,
 		cameraUserId = cameraUserId,
-		hasRecordedCamera = hasRecordedCamera,
+		hasRecordedCamera = false,
 		playerVisuals = {},
 		bombVisuals = {},
 		explodedBombs = {},
@@ -140,26 +207,70 @@ function ReplayStateBuilder.Build(client, payload, deps)
 		objectCount = 0,
 		maxObjects = deps.maxReplayObjects,
 	}
-	client._activeReplay = state
 
 	local metaToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/CollectMeta")
 	local playerMeta = deps.collectPlayerMeta(frames)
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/CollectMeta", metaToken)
+	local visualEntriesToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/SelectPlayerVisuals")
+	local playerVisualEntries, selectedPlayerMeta = buildPlayerVisualEntries(playerMeta, payload, deps)
+	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/SelectPlayerVisuals", visualEntriesToken)
+	if #playerVisualEntries == 0 then
+		if overlay then
+			overlay:Destroy()
+		end
+		deps.ReplayMapSimulator.Destroy(mapContext)
+		scene:Destroy()
+		deps.warnReplayBuildSkipped("NoPlayerVisuals", payload)
+		return finish(nil)
+	end
+
+	local cameraUserKey = getUserIdKey(deps, state.cameraUserId)
+	if not (cameraUserKey and selectedPlayerMeta[cameraUserKey]) then
+		local fallbackMeta = playerVisualEntries[1] and playerVisualEntries[1].meta
+		if fallbackMeta and deps.isFiniteNumber(fallbackMeta.userId) then
+			state.cameraUserId = math.floor(fallbackMeta.userId)
+			if payload.type == "POTGReplay" then
+				state.playerUserId = state.cameraUserId
+			end
+			if not deps.isFiniteNumber(state.killerUserId) then
+				state.killerUserId = state.cameraUserId
+			end
+		end
+	end
+	state.hasRecordedCamera = deps.hasRecordedCameraForUser(frames, state.cameraUserId)
+	client._activeReplay = state
+
 	if deps.preloadAvatarTemplates then
 		local preloadToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/PreloadAvatars")
-		deps.preloadAvatarTemplates(playerMeta)
+		deps.preloadAvatarTemplates(selectedPlayerMeta)
 		RuntimeProfiler.End("Client/Replay/Death/StateBuilder/PreloadAvatars", preloadToken)
 	end
 
 	local playerVisualsToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/CreatePlayerVisuals")
-	for key, meta in pairs(playerMeta) do
+	local createdPlayerVisuals = 0
+	for _, entry in ipairs(playerVisualEntries) do
+		local key = entry.key
+		local meta = entry.meta
 		if not deps.reserveReplayObjects(24) then
 			break
 		end
-		state.playerVisuals[key] =
-			deps.makeCharacterVisual(scene, meta.userId, meta.teamName, meta.hasPose, meta.bombSkinId, meta.displayName)
+		local visual = deps.makeCharacterVisual(scene, meta.userId, meta.teamName, meta.hasPose, meta.bombSkinId, meta.displayName)
+		if visual then
+			state.playerVisuals[key] = visual
+			createdPlayerVisuals += 1
+		end
 	end
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/CreatePlayerVisuals", playerVisualsToken)
+	if createdPlayerVisuals == 0 then
+		client._activeReplay = nil
+		if overlay then
+			overlay:Destroy()
+		end
+		deps.ReplayMapSimulator.Destroy(mapContext)
+		scene:Destroy()
+		deps.warnReplayBuildSkipped("NoPlayerVisuals", payload)
+		return finish(nil)
+	end
 
 	local bombVisualsToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/CreateBombVisuals")
 	for key, meta in pairs(deps.collectBombMeta(frames)) do
@@ -170,7 +281,7 @@ function ReplayStateBuilder.Build(client, payload, deps)
 	end
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/CreateBombVisuals", bombVisualsToken)
 
-	if not hasRecordedCamera then
+	if not state.hasRecordedCamera then
 		local cameraControllerToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/CreateCameraController")
 		state.cameraController = deps.ReplayCameraController.new(state, deps.cameraControllerDeps)
 		RuntimeProfiler.End("Client/Replay/Death/StateBuilder/CreateCameraController", cameraControllerToken)

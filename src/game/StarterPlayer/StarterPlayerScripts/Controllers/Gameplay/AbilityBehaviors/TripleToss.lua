@@ -21,6 +21,7 @@ TripleToss.HandlesInputState = true
 local activeThrow: ThrowState? = nil
 local predictedCooldownEndsAt = 0
 local previewConnection: RBXScriptConnection? = nil
+local warnedPreviewFailure = false
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
 	local value = if definition then definition[key] else nil
@@ -100,7 +101,7 @@ local function updatePreview()
 	local spreadDegrees = getDefinitionNumber(definition, "spreadDegrees", 15)
 	local aimDirections = getSpreadDirections(BombController:GetThrowAimDirection(), bombCount, spreadDegrees)
 
-	BombController:ShowAbilityTrajectoryPreview({
+	local shown = BombController:ShowAbilityTrajectoryPreview({
 		aimDirections = aimDirections,
 		launchSpeed = speed,
 		upwardVelocity = upwardVelocity,
@@ -109,6 +110,12 @@ local function updatePreview()
 		maxPreviewTime = previewSeconds,
 		color = color,
 	})
+	if shown then
+		warnedPreviewFailure = false
+	elseif not warnedPreviewFailure then
+		warnedPreviewFailure = true
+		warn("[TripleToss] Failed to show trajectory preview")
+	end
 end
 
 local function startPreview()

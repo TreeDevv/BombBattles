@@ -8,8 +8,11 @@ local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 local REFRESH_TIME = 60 * 60
 local MAX_ENTRIES = 100
 local MAX_ADMIN_STAT_INCREMENT = 1000000
+local REMOTE_REQUEST_WINDOW_SECONDS = 10
+local REMOTE_MAX_REQUESTS_PER_WINDOW = 30
 local REMOTES_FOLDER_NAME = "Remotes"
 local GET_LEADERBOARD_REMOTE_NAME = "GetGlobalLeaderboard"
+local LEADERBOARD_UPDATED_REMOTE_NAME = "GlobalLeaderboardUpdated"
 local SCOPE = Globals.SCOPE
 
 local LIFETIME_KILLS_KEY = Schema.LifetimeKills and Schema.LifetimeKills.key or "lifetimeKills"
@@ -56,8 +59,10 @@ local BOARD_ORDER = { "kills", "wins", "destruction" }
 local usernameCache: { [number]: string } = {}
 local orderedStores: { [string]: any } = {}
 local cachedLeaderboards: { [string]: { [string]: any } } = {}
+local remoteRequestWindows: { [Player]: { startedAt: number, count: number } } = {}
 local started = false
 local getLeaderboardRemote: RemoteFunction? = nil
+local leaderboardUpdatedRemote: RemoteEvent? = nil
 
 local function roundNonNegative(value: any): number
 	local numberValue = tonumber(value) or 0
@@ -134,6 +139,23 @@ local function copyEntries(entries)
 	return copy
 end
 
+local function addUnique(list, seen, value: string)
+	if seen[value] then
+		return
+	end
+
+	seen[value] = true
+	table.insert(list, value)
+end
+
+local function copyArray(values)
+	local copy = {}
+	for index, value in ipairs(values or {}) do
+		copy[index] = value
+	end
+	return copy
+end
+
 local function getUsernameForUserId(userId: number): string
 	if usernameCache[userId] then
 		return usernameCache[userId]
@@ -177,6 +199,22 @@ local function ensureGetLeaderboardRemote(): RemoteFunction
 
 	local remote = Instance.new("RemoteFunction")
 	remote.Name = GET_LEADERBOARD_REMOTE_NAME
+	remote.Parent = folder
+	return remote
+end
+
+local function ensureLeaderboardUpdatedRemote(): RemoteEvent
+	local folder = ensureRemotesFolder()
+	local existing = folder:FindFirstChild(LEADERBOARD_UPDATED_REMOTE_NAME)
+	if existing and existing:IsA("RemoteEvent") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local remote = Instance.new("RemoteEvent")
+	remote.Name = LEADERBOARD_UPDATED_REMOTE_NAME
 	remote.Parent = folder
 	return remote
 end
@@ -256,29 +294,54 @@ local function setOrderedStoreValue(store, userId: number, value: number)
 	end
 end
 
-local function publishPlayerStatsForPeriod(dataService, player: Player, periodId: string, unixTime: number)
+local function removeOrderedStoreValue(store, userId: number)
+	if not store then
+		return
+	end
+
+	local success, err = pcall(function()
+		store:RemoveAsync(tostring(userId))
+	end)
+	if not success then
+		warn("[Leaderboards] Failed to remove ordered store value:", err)
+	end
+end
+
+local function publishPlayerStatsForPeriod(dataService, player: Player, periodId: string, unixTime: number, boardIds)
 	local periodKey = getPeriodKey(periodId, unixTime)
-	for _, boardId in ipairs(BOARD_ORDER) do
+	for _, boardId in ipairs(boardIds or BOARD_ORDER) do
 		local value = getProfileValueForBoard(dataService, player, boardId, periodId, unixTime)
 		local store = getOrderedStore(boardId, periodId, periodKey)
 		setOrderedStoreValue(store, player.UserId, value)
 	end
 end
 
-local function publishPlayerStats(dataService, player: Player)
+local function publishPlayerStats(dataService, player: Player, boardIds, periodIds, unixTime: number?)
 	if not (player and player.Parent == Players) then
 		return
 	end
 
-	local unixTime = getUnixTime()
-	for _, periodId in ipairs(PERIOD_ORDER) do
-		publishPlayerStatsForPeriod(dataService, player, periodId, unixTime)
+	local publishTime = unixTime or getUnixTime()
+	for _, periodId in ipairs(periodIds or PERIOD_ORDER) do
+		publishPlayerStatsForPeriod(dataService, player, periodId, publishTime, boardIds)
 	end
 end
 
-local function publishCurrentPlayerStats(dataService)
+local function publishCurrentPlayerStats(dataService, boardIds, periodIds, unixTime: number?)
 	for _, player in ipairs(Players:GetPlayers()) do
-		publishPlayerStats(dataService, player)
+		publishPlayerStats(dataService, player, boardIds, periodIds, unixTime)
+	end
+end
+
+local function removePlayerFromCurrentStores(userId: number)
+	local unixTime = getUnixTime()
+
+	for _, periodId in ipairs(PERIOD_ORDER) do
+		local periodKey = getPeriodKey(periodId, unixTime)
+		for _, boardId in ipairs(BOARD_ORDER) do
+			local store = getOrderedStore(boardId, periodId, periodKey)
+			removeOrderedStoreValue(store, userId)
+		end
 	end
 end
 
@@ -415,6 +478,38 @@ local function formatAdminIncrementMessage(player: Player, increments): string
 	return ("Added %s to %s's leaderboard data"):format(table.concat(parts, ", "), player.Name)
 end
 
+local function isRateLimited(player: Player): boolean
+	local now = os.clock()
+	local window = remoteRequestWindows[player]
+	if not window or now - window.startedAt >= REMOTE_REQUEST_WINDOW_SECONDS then
+		remoteRequestWindows[player] = {
+			startedAt = now,
+			count = 1,
+		}
+		return false
+	end
+
+	if window.count >= REMOTE_MAX_REQUESTS_PER_WINDOW then
+		return true
+	end
+
+	window.count += 1
+	return false
+end
+
+local function notifyLeaderboardUpdated(boardIds, periodIds, refreshTime: number)
+	local remote = leaderboardUpdatedRemote
+	if not remote then
+		return
+	end
+
+	remote:FireAllClients({
+		boards = copyArray(boardIds or BOARD_ORDER),
+		periods = copyArray(periodIds or PERIOD_ORDER),
+		refreshedAt = refreshTime,
+	})
+end
+
 local Leaderboards = {}
 
 function Leaderboards.RecordRoundResults(dataService, results)
@@ -423,6 +518,10 @@ function Leaderboards.RecordRoundResults(dataService, results)
 	end
 
 	local unixTime = getUnixTime()
+	local changedPlayers = {}
+	local changedUserIds = {}
+	local touchedBoards = {}
+	local touchedBoardIds = {}
 
 	for _, playerResult in ipairs(results.players) do
 		if typeof(playerResult) ~= "table" or typeof(playerResult.userId) ~= "number" then
@@ -451,7 +550,28 @@ function Leaderboards.RecordRoundResults(dataService, results)
 		end
 
 		applyLeaderboardIncrements(dataService, player, increments, unixTime)
+
+		if not changedUserIds[player.UserId] then
+			changedUserIds[player.UserId] = true
+			table.insert(changedPlayers, player)
+		end
+
+		for _, boardId in ipairs(BOARD_ORDER) do
+			if roundNonNegative(increments[boardId]) > 0 then
+				addUnique(touchedBoards, touchedBoardIds, boardId)
+			end
+		end
 	end
+
+	if #changedPlayers <= 0 or #touchedBoards <= 0 then
+		return
+	end
+
+	for _, player in ipairs(changedPlayers) do
+		publishPlayerStats(dataService, player, touchedBoards, PERIOD_ORDER, unixTime)
+	end
+
+	Leaderboards.refresh(dataService, false, touchedBoards, PERIOD_ORDER, unixTime)
 end
 
 function Leaderboards.AdminAddStats(dataService, player: Player, rawIncrements): (boolean, string?)
@@ -478,17 +598,21 @@ function Leaderboards.PublishPlayer(dataService, player: Player)
 	publishPlayerStats(dataService, player)
 end
 
-function Leaderboards.refresh(dataService, publishPlayers: boolean?)
-	local unixTime = getUnixTime()
-	local nextRefreshAt = unixTime + REFRESH_TIME
+function Leaderboards.RemovePlayer(userId: number)
+	removePlayerFromCurrentStores(userId)
+end
+
+function Leaderboards.refresh(dataService, publishPlayers: boolean?, boardIds, periodIds, unixTime: number?)
+	local refreshTime = unixTime or getUnixTime()
+	local nextRefreshAt = refreshTime + REFRESH_TIME
 
 	if publishPlayers ~= false then
-		publishCurrentPlayerStats(dataService)
+		publishCurrentPlayerStats(dataService, boardIds, periodIds, refreshTime)
 	end
 
-	for _, boardId in ipairs(BOARD_ORDER) do
-		for _, periodId in ipairs(PERIOD_ORDER) do
-			local periodKey = getPeriodKey(periodId, unixTime)
+	for _, boardId in ipairs(boardIds or BOARD_ORDER) do
+		for _, periodId in ipairs(periodIds or PERIOD_ORDER) do
+			local periodKey = getPeriodKey(periodId, refreshTime)
 			local entries = getOrderedStoreEntries(boardId, periodId, periodKey)
 
 			setCache(boardId, periodId, {
@@ -497,11 +621,13 @@ function Leaderboards.refresh(dataService, publishPlayers: boolean?)
 				periodKey = periodKey,
 				entries = entries,
 				nextRefreshAt = nextRefreshAt,
-				periodResetsAt = getPeriodResetsAt(periodId, unixTime),
-				refreshedAt = unixTime,
+				periodResetsAt = getPeriodResetsAt(periodId, refreshTime),
+				refreshedAt = refreshTime,
 			})
 		end
 	end
+
+	notifyLeaderboardUpdated(boardIds, periodIds, refreshTime)
 end
 
 function Leaderboards.start(dataService)
@@ -511,7 +637,15 @@ function Leaderboards.start(dataService)
 	started = true
 
 	getLeaderboardRemote = ensureGetLeaderboardRemote()
-	getLeaderboardRemote.OnServerInvoke = function(_, request)
+	leaderboardUpdatedRemote = ensureLeaderboardUpdatedRemote()
+	getLeaderboardRemote.OnServerInvoke = function(player, request)
+		if isRateLimited(player) then
+			return {
+				ok = false,
+				code = "RateLimited",
+			}
+		end
+
 		if typeof(request) ~= "table" then
 			return {
 				ok = false,
@@ -535,14 +669,20 @@ function Leaderboards.start(dataService)
 		end
 
 		local cache = getCache(boardId, periodId)
+		local now = getUnixTime()
+		local periodKey = getPeriodKey(periodId, now)
+		if cache and cache.periodKey ~= periodKey then
+			Leaderboards.refresh(dataService, false, { boardId }, { periodId }, now)
+			cache = getCache(boardId, periodId)
+		end
 		if not cache then
-			local now = getUnixTime()
 			return {
 				ok = true,
 				board = boardId,
 				period = periodId,
 				entries = {},
 				nextRefreshAt = now + REFRESH_TIME,
+				periodKey = periodKey,
 				periodResetsAt = getPeriodResetsAt(periodId, now),
 			}
 		end
@@ -558,6 +698,10 @@ function Leaderboards.start(dataService)
 			refreshedAt = cache.refreshedAt,
 		}
 	end
+
+	Players.PlayerRemoving:Connect(function(player)
+		remoteRequestWindows[player] = nil
+	end)
 
 	Leaderboards.refresh(dataService)
 	task.spawn(function()

@@ -8,7 +8,6 @@ local BombController = require(script.Parent.Parent:WaitForChild("BombController
 
 type AbilityDefinition = AbilityTypes.AbilityDefinition
 type ClientActivateRequestedContext = AbilityTypes.ClientActivateRequestedContext
-type ClientEffectContext = AbilityTypes.ClientEffectContext
 
 type ThrowState = {
 	slot: string,
@@ -155,9 +154,6 @@ function CraterBomb.OnActivateRequested(context: ClientActivateRequestedContext)
 	end
 
 	return true
-end
-
-function CraterBomb.OnEffect(_context: ClientEffectContext)
 end
 
 return CraterBomb

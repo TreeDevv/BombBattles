@@ -222,12 +222,17 @@ function TopHUDController:_getSlotState(slot: Slot): (boolean, number)
 		return false, 0
 	end
 
+	local respawnEndsAt = getNumberAttribute(player, ROUND_RESPAWN_ENDS_AT_ATTR, 0)
+	local respawnRemaining = math.max(respawnEndsAt - getServerTime(), 0)
+	if respawnRemaining > 0 then
+		return true, respawnRemaining
+	end
+
 	if player:GetAttribute(ROUND_ALIVE_ATTR) == false then
 		return false, 0
 	end
 
-	local respawnEndsAt = getNumberAttribute(player, ROUND_RESPAWN_ENDS_AT_ATTR, 0)
-	return true, math.max(respawnEndsAt - getServerTime(), 0)
+	return true, 0
 end
 
 function TopHUDController:_updateSlot(slot: Slot)

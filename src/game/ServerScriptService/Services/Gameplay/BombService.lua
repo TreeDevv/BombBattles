@@ -512,10 +512,14 @@ end
 local function resolveExplosionConfig(override)
 	override = if typeof(override) == "table" then override else {}
 	return {
+		abilityId = if typeof(override.abilityId) == "string" then override.abilityId else nil,
+		suppressDefaultExplosionVfx = override.suppressDefaultExplosionVfx == true,
+		explosionVfxAssetPath = if typeof(override.explosionVfxAssetPath) == "table" then override.explosionVfxAssetPath else nil,
 		innerRadius = readPositiveNumber(override.innerRadius, BombConfig.InnerRadius),
 		nearRadius = readPositiveNumber(override.nearRadius, BombConfig.NearRadius),
 		outerRadius = readPositiveNumber(override.outerRadius, BombConfig.OuterRadius),
 		terrainRadius = readPositiveNumber(override.terrainRadius, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius),
+		forceTerrainSubtract = override.forceTerrainSubtract == true,
 		playerDirectDamage = readNonNegativeNumber(override.playerDirectDamage, BombConfig.PlayerDirectDamage),
 		playerNearDamageMax = readNonNegativeNumber(override.playerNearDamageMax, BombConfig.PlayerNearDamageMax),
 		playerNearDamageMin = readNonNegativeNumber(override.playerNearDamageMin, BombConfig.PlayerNearDamageMin),
@@ -539,10 +543,22 @@ local function applyExplosionResult(config, result)
 		return config
 	end
 
+	if typeof(result.abilityId) == "string" then
+		config.abilityId = result.abilityId
+	end
+	if typeof(result.suppressDefaultExplosionVfx) == "boolean" then
+		config.suppressDefaultExplosionVfx = result.suppressDefaultExplosionVfx
+	end
+	if typeof(result.explosionVfxAssetPath) == "table" then
+		config.explosionVfxAssetPath = result.explosionVfxAssetPath
+	end
 	config.innerRadius = readPositiveNumber(result.innerRadius, config.innerRadius)
 	config.nearRadius = readPositiveNumber(result.nearRadius, config.nearRadius)
 	config.outerRadius = readPositiveNumber(result.outerRadius, config.outerRadius)
 	config.terrainRadius = readPositiveNumber(result.terrainRadius, config.terrainRadius)
+	if typeof(result.forceTerrainSubtract) == "boolean" then
+		config.forceTerrainSubtract = result.forceTerrainSubtract
+	end
 	config.playerDirectDamage = readNonNegativeNumber(result.playerDirectDamage, config.playerDirectDamage)
 	config.playerNearDamageMax = readNonNegativeNumber(result.playerNearDamageMax, config.playerNearDamageMax)
 	config.playerNearDamageMin = readNonNegativeNumber(result.playerNearDamageMin, config.playerNearDamageMin)
@@ -561,7 +577,7 @@ local function applyExplosionResult(config, result)
 	return config
 end
 
-local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConfig)
+local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConfig, sourceId: string?)
 	local character, humanoid, rootPart = getCharacterParts(owner)
 	if not (humanoid and rootPart and humanoid.Health > 0) then
 		return
@@ -571,6 +587,8 @@ local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConf
 	if distance <= explosionConfig.outerRadius then
 		local hookResult = AbilityService:RunHook("OnBeforeOwnerBombKnockback", {
 			owner = owner,
+			sourceId = sourceId,
+			projectileId = sourceId,
 			character = character,
 			humanoid = humanoid,
 			rootPart = rootPart,
@@ -603,6 +621,9 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 			continue
 		end
 		if ownerTeam and getTeamName(player) == ownerTeam then
+			continue
+		end
+		if not RoundService:IsPlayerActive(player) then
 			continue
 		end
 
@@ -876,10 +897,12 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 			bombId = projectileId,
 			ownerUserId = ownerUserId,
 			timestamp = impactTimestamp,
+		}, {
+			forceSubtract = explosionConfig.forceTerrainSubtract == true,
 		})
 		RuntimeProfiler.End("Server/BombService/ExplosionDestruction", destructionToken)
 		if isPlayerOwner(owner) then
-			applyOwnerKnockback(owner, position, explosionConfig)
+			applyOwnerKnockback(owner, position, explosionConfig, projectileId)
 		end
 		if not (isPlayerOwner(owner) and CombatEligibility.IsPracticeOnly(owner, RoundService)) then
 			local playerDamageToken = RuntimeProfiler.Begin("Server/BombService/DamagePlayers")
@@ -894,10 +917,13 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 
 	fireEffect("Explode", {
 		player = owner,
+		abilityId = explosionConfig.abilityId,
 		projectileId = projectileId,
 		bombSkinId = bombSkinId,
 		position = position,
 		source = source,
+		suppressDefaultExplosionVfx = explosionConfig.suppressDefaultExplosionVfx,
+		explosionVfxAssetPath = explosionConfig.explosionVfxAssetPath,
 		innerRadius = explosionConfig.innerRadius,
 		nearRadius = explosionConfig.nearRadius,
 		outerRadius = explosionConfig.outerRadius,
@@ -1876,6 +1902,22 @@ function BombService:RefillBombsForPractice(player: Player): boolean
 	end
 
 	setBombAttributes(player, BombConfig.MaxBombs, 0)
+	return true
+end
+
+function BombService:ExplodeAbility(owner: Player, position: Vector3, sourceId: string, bombSkinId: string?, explosionOverride): boolean
+	if not (owner and owner.Parent == Players and BombTrajectory.IsFiniteVector(position)) then
+		return false
+	end
+	if typeof(sourceId) ~= "string" or sourceId == "" then
+		return false
+	end
+
+	explosionOverride = if typeof(explosionOverride) == "table" then explosionOverride else {}
+	explosionOverride.abilityId = if typeof(explosionOverride.abilityId) == "string"
+		then explosionOverride.abilityId
+		else sourceId
+	explode(owner, position, "Ability", sourceId, bombSkinId, explosionOverride)
 	return true
 end
 

@@ -420,6 +420,8 @@ local function wipeProfileByUserId(userId: number): (boolean, string?)
 		return false, "WipeProfileAsync returned false"
 	end
 
+	Leaderboards.RemovePlayer(resolvedUserId)
+	Leaderboards.refresh(DataService, false)
 	return true, nil
 end
 

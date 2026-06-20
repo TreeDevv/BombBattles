@@ -738,6 +738,21 @@ local function fadeAndDestroyVisual(visual: GrappleVisual?, fadeSeconds: number?
 	end)
 end
 
+local function trackPendingVisual(sequence: number, visual: GrappleVisual, definition: AbilityDefinition)
+	pendingVisuals[sequence] = visual
+	local timeoutSeconds = math.max(getDefinitionNumber(definition, "pendingVisualTimeoutSeconds", 1.15), 0.2)
+	task.delay(timeoutSeconds, function()
+		if pendingVisuals[sequence] ~= visual then
+			return
+		end
+
+		pendingVisuals[sequence] = nil
+		tintVisual(visual, getDefinitionColor(definition, "failColor", Color3.fromRGB(255, 86, 86)), 0.75)
+		fadeAndDestroyVisual(visual, getDefinitionNumber(definition, "missVisualDurationSeconds", 0.16))
+		setClientStatus("Fail", "TimedOut")
+	end)
+end
+
 local function finishTravelAndTaut(
 	visual: GrappleVisual?,
 	anchorPosition: Vector3,
@@ -808,6 +823,13 @@ local function applyConfirmedTravelTime(visual: GrappleVisual?, payload)
 	if typeof(travelTime) == "number" and travelTime > 0 then
 		visual.travelDuration = math.max(travelTime, 0.04)
 	end
+end
+
+local function getRemainingServerPullDelay(payload): number?
+	if typeof(payload) ~= "table" or typeof(payload.pullStartAt) ~= "number" then
+		return nil
+	end
+	return payload.pullStartAt - workspace:GetServerTimeNow()
 end
 
 local function getPayloadNormal(payload): Vector3?
@@ -1030,6 +1052,7 @@ local function startPlayerPull(sessionId: number, anchorPosition: Vector3, paylo
 	local pullTargetPosition = getPullTargetPosition(anchorPosition, getPayloadNormal(payload), definition)
 	local startDistance = math.max((pullTargetPosition - rootPart.Position).Magnitude, 1)
 	local configuredPullSpeed = math.max(tonumber(payload.playerPullSpeed) or getDefinitionNumber(definition, "playerPullSpeed", 120), 1)
+	local pullDirection = pullTargetPosition - rootPart.Position
 
 	local active: ActivePlayerPull = {
 		sessionId = sessionId,
@@ -1062,6 +1085,16 @@ local function startPlayerPull(sessionId: number, anchorPosition: Vector3, paylo
 		connection = nil,
 		visual = visual,
 	}
+
+	if pullDirection.Magnitude > 0.05 then
+		local direction = pullDirection.Unit
+		local currentVelocity = rootPart.AssemblyLinearVelocity
+		local initialBoost = math.max(getDefinitionNumber(definition, "playerInitialPullBoost", 24), 0)
+		local radialDelta = math.max(initialBoost - currentVelocity:Dot(direction), 0)
+		if radialDelta > 0 then
+			rootPart:ApplyImpulse(direction * radialDelta * rootPart.AssemblyMass)
+		end
+	end
 
 	active.connection = RunService.Heartbeat:Connect(function()
 		stepPlayerPull(active)
@@ -1141,7 +1174,7 @@ function GrappleHook.OnActivateRequested(context: ClientActivateRequestedContext
 	fireDirection = fireDirection.Unit
 	local visual = createVisual(context.localPlayer, rootPart.Position, predictionEnd, context.definition, nil)
 	if visual then
-		pendingVisuals[sequence] = visual
+		trackPendingVisual(sequence, visual, context.definition)
 	end
 
 	playOptionalSound(SOUND_FIRE, rootPart)
@@ -1277,7 +1310,11 @@ function GrappleHook.OnEffect(context: ClientEffectContext)
 		activeServerSessionId = sessionId
 		activeServerSessionKind = "Wall"
 		setDebugAttribute("ActiveKind", "Wall")
-		finishTravelAndTaut(visual, anchorPosition, definition, function()
+		finishTravelAndTaut(visual, anchorPosition, definition, nil)
+
+		local remainingDelay = getRemainingServerPullDelay(payload)
+		local delaySeconds = if typeof(remainingDelay) == "number" then math.max(remainingDelay, 0) else 0
+		task.delay(delaySeconds, function()
 			if activeServerSessionId == sessionId then
 				activeServerSessionId = nil
 				activeServerSessionKind = nil

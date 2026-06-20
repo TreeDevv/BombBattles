@@ -7,6 +7,7 @@ local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 local StarterPlayerScripts = script.Parent
 local ControllersFolder = StarterPlayerScripts.Controllers
 local DISABLED_CLIENT_MODULES = {}
+local notifyConnection: RBXScriptConnection? = nil
 local playClientSoundConnection: RBXScriptConnection? = nil
 local loadedControllerInstances = {}
 
@@ -55,6 +56,26 @@ local function bindControllerHotLoad(loadedModules: { [string]: any })
 	end)
 end
 
+local function bindNotifyRemote()
+	local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
+	if not remotesFolder then
+		return
+	end
+
+	local remote = remotesFolder:WaitForChild("Notify", 10)
+	if not (remote and remote:IsA("RemoteEvent")) then
+		return
+	end
+
+	if notifyConnection then
+		notifyConnection:Disconnect()
+	end
+
+	notifyConnection = remote.OnClientEvent:Connect(function(payload)
+		Notify.Show(payload)
+	end)
+end
+
 local function bindPlayClientSoundRemote()
 	local remotesFolder = ReplicatedStorage:WaitForChild("Remotes", 10)
 	if not remotesFolder then
@@ -80,6 +101,7 @@ local loadedModules = Loader.LoadDescendants(ControllersFolder, shouldLoadContro
 markLoadedControllerInstances()
 Loader.SpawnAll(loadedModules, "OnStart")
 bindControllerHotLoad(loadedModules)
+task.spawn(bindNotifyRemote)
 task.spawn(bindPlayClientSoundRemote)
 
 return Notify

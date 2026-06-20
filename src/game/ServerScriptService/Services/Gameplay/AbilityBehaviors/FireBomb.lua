@@ -20,6 +20,9 @@ type FireRecord = {
 }
 
 local FireBomb = {} :: AbilityTypes.ServerBehavior
+FireBomb.AlwaysRunHooks = table.freeze({
+	OnBeforeExplosion = true,
+})
 
 local RESULT_KIND = AbilityResult.Kind
 local MIN_AIM_HORIZONTAL = 0.08

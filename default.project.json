@@ -86,6 +86,9 @@
         "BombSkinService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombSkinService.lua"
         },
+        "FinisherService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/FinisherService.lua"
+        },
         "CrateRollService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/CrateRollService.lua"
         },
@@ -115,6 +118,9 @@
         },
         "LikeGoalService": {
           "$path": "src/game/ServerScriptService/Services/Social/LikeGoalService.lua"
+        },
+        "LikeService": {
+          "$path": "src/game/ServerScriptService/Services/Social/LikeService.lua"
         },
         "DataService": {
           "$path": "src/game/ServerScriptService/Services/Core/DataService"
@@ -170,11 +176,17 @@
           "BombController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombController.lua"
           },
+          "BobController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BobController.lua"
+          },
           "BombTrajectoryClient": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombTrajectoryClient.lua"
           },
           "EmoteController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/EmoteController.lua"
+          },
+          "FinisherController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/FinisherController.lua"
           },
           "CameraController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/CameraController.lua"
@@ -235,9 +247,6 @@
           },
           "MapVoteController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/MapVoteController.lua"
-          },
-          "NotificationController": {
-            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/NotificationController.lua"
           },
           "ExpressivePromptsController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ExpressivePromptsController.lua"

@@ -271,9 +271,8 @@ local function addHighlight(wall: Instance): Highlight
 end
 
 local function tagWall(wall: Instance)
-	CollectionService:AddTag(wall, DestructionConfig.Tag)
-	for _, part in ipairs(getBaseParts(wall)) do
-		CollectionService:AddTag(part, DestructionConfig.Tag)
+	if not CollectionService:HasTag(wall, DestructionConfig.Tag) then
+		CollectionService:AddTag(wall, DestructionConfig.Tag)
 	end
 end
 

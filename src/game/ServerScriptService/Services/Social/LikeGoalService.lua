@@ -1,8 +1,9 @@
-local HttpService = game:GetService("HttpService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local TweenService = game:GetService("TweenService")
 local Workspace = game:GetService("Workspace")
 
+local LikeService = require(ServerScriptService.Services.LikeService)
 local LikeGoalConfig = require(ReplicatedStorage.Shared.Config.LikeGoalConfig)
 local NumberFormatter = require(ReplicatedStorage.Shared.Formatting.NumberFormatter)
 
@@ -167,58 +168,6 @@ local function renderLikes(likes: number, animate: boolean)
 	setBarWidth(currentWidgets.bar, widthScale, animate)
 end
 
-local function decodeVotePayload(responseBody: string): number?
-	local decoded = HttpService:JSONDecode(responseBody)
-	local payload = decoded
-
-	if typeof(decoded) == "table" and typeof(decoded.data) == "table" then
-		payload = decoded.data[1]
-	end
-
-	if typeof(payload) ~= "table" then
-		return nil
-	end
-
-	local upVotes = payload.upVotes
-	if tonumber(upVotes) == nil then
-		return nil
-	end
-
-	return sanitizeInteger(upVotes)
-end
-
-local function fetchLikes(): (number?, string?)
-	local universeId = sanitizeInteger(LikeGoalConfig.UniverseId)
-	if universeId <= 0 then
-		return nil, "UniverseId must be positive"
-	end
-
-	local endpointTemplate = tostring(LikeGoalConfig.EndpointTemplate or "")
-	if endpointTemplate == "" then
-		return nil, "EndpointTemplate is empty"
-	end
-
-	local url = endpointTemplate:format(universeId)
-	local success, responseBody = pcall(function()
-		return HttpService:GetAsync(url, true)
-	end)
-	if not success then
-		return nil, tostring(responseBody)
-	end
-
-	local decodeSuccess, likes = pcall(function()
-		return decodeVotePayload(responseBody)
-	end)
-	if not decodeSuccess then
-		return nil, tostring(likes)
-	end
-	if likes == nil then
-		return nil, "Response did not include upVotes"
-	end
-
-	return likes, nil
-end
-
 local LikeGoalService = {}
 
 function LikeGoalService:OnStart()
@@ -231,7 +180,7 @@ function LikeGoalService:OnStart()
 
 	task.spawn(function()
 		while true do
-			local likes, err = fetchLikes()
+			local likes, err = LikeService.FetchLikes()
 			if likes ~= nil then
 				renderLikes(likes, true)
 			else

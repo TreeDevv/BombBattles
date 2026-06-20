@@ -21,6 +21,7 @@ type ClientEffectContext = AbilityTypes.ClientEffectContext
 type FloorPlacement = {
 	position: Vector3,
 	facing: Vector3,
+	normal: Vector3,
 	floor: Instance,
 }
 type PreviewState = {
@@ -57,6 +58,8 @@ type BeamAttachments = {
 	beamEnd: Attachment?,
 	beamEffects: Attachment?,
 	lightningEffects: Attachment?,
+	directionalEffects: Attachment?,
+	beamHolder: Attachment?,
 }
 
 local Interceptor = {} :: AbilityTypes.ClientBehavior
@@ -66,6 +69,7 @@ local RENDER_STEP_NAME = "BombBattlesInterceptorPreview"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 3
 local COMMIT_ACTION_NAME = "BombBattlesInterceptorCommit"
 local COMMIT_ACTION_PRIORITY = Enum.ContextActionPriority.High.Value + 50
+local BEAM_ACTIVE_SECONDS = 0.4
 local ABILITIES_FOLDER_NAME = "Abilities"
 local INTERCEPTOR_FOLDER_NAME = "Interceptor"
 local HIGHLIGHT_STEP_SECONDS = 0.1
@@ -176,6 +180,46 @@ local function pivotTo(instance: Instance, cframe: CFrame)
 	end
 end
 
+local function getPartAxisExtents(part: BasePart, axis: Vector3, origin: Vector3): (number, number)
+	local halfSize = part.Size * 0.5
+	local minDistance = math.huge
+	local maxDistance = -math.huge
+
+	for _, xSign in ipairs({ -1, 1 }) do
+		for _, ySign in ipairs({ -1, 1 }) do
+			for _, zSign in ipairs({ -1, 1 }) do
+				local corner = part.CFrame:PointToWorldSpace(Vector3.new(
+					halfSize.X * xSign,
+					halfSize.Y * ySign,
+					halfSize.Z * zSign
+				))
+				local distance = (corner - origin):Dot(axis)
+				minDistance = math.min(minDistance, distance)
+				maxDistance = math.max(maxDistance, distance)
+			end
+		end
+	end
+
+	return minDistance, maxDistance
+end
+
+local function getInstanceAxisExtents(instance: Instance, axis: Vector3, origin: Vector3): (number, number)
+	local minDistance = math.huge
+	local maxDistance = -math.huge
+	local foundPart = false
+	for _, part in ipairs(getBaseParts(instance)) do
+		foundPart = true
+		local partMin, partMax = getPartAxisExtents(part, axis, origin)
+		minDistance = math.min(minDistance, partMin)
+		maxDistance = math.max(maxDistance, partMax)
+	end
+
+	if not foundPart then
+		return 0, 0
+	end
+	return minDistance, maxDistance
+end
+
 local function getPreviewFolder(): Folder
 	local existing = workspace:FindFirstChild(PREVIEW_FOLDER_NAME)
 	if existing and existing:IsA("Folder") then
@@ -266,17 +310,33 @@ local function findFloor(rootPart: BasePart, definition: AbilityDefinition): Flo
 	return {
 		position = hit.Position,
 		facing = facing,
+		normal = hit.Normal,
 		floor = hit.Instance,
 	}
 end
 
-local function alignGhostToFloor(ghost: Instance, floorPosition: Vector3, facing: Vector3): (CFrame, Vector3)
-	local pivot = CFrame.lookAt(floorPosition, floorPosition + facing)
+local function getFloorPivot(floorPosition: Vector3, facing: Vector3, normal: Vector3): CFrame
+	local up = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
+	local forward = facing - up * facing:Dot(up)
+	if forward.Magnitude < 0.05 then
+		forward = up:Cross(Vector3.xAxis)
+		if forward.Magnitude < 0.05 then
+			forward = up:Cross(Vector3.zAxis)
+		end
+	end
+
+	forward = forward.Unit
+	local right = up:Cross(forward).Unit
+	forward = right:Cross(up).Unit
+	return CFrame.fromMatrix(floorPosition, right, up, -forward)
+end
+
+local function alignGhostToFloor(ghost: Instance, floorPosition: Vector3, facing: Vector3, normal: Vector3): (CFrame, Vector3)
+	local pivot = getFloorPivot(floorPosition, facing, normal)
 	pivotTo(ghost, pivot)
 
-	local boundsCFrame, boundsSize = getBounds(ghost)
-	local bottomY = boundsCFrame.Position.Y - boundsSize.Y * 0.5
-	local finalPivot = pivot + Vector3.yAxis * (floorPosition.Y - bottomY)
+	local bottomOffset = getInstanceAxisExtents(ghost, pivot.UpVector, floorPosition)
+	local finalPivot = pivot - pivot.UpVector * bottomOffset
 	pivotTo(ghost, finalPivot)
 
 	return getBounds(ghost)
@@ -426,7 +486,7 @@ local function updatePreview()
 		return
 	end
 
-	local boundsCFrame, boundsSize = alignGhostToFloor(ghost, floor.position, floor.facing)
+	local boundsCFrame, boundsSize = alignGhostToFloor(ghost, floor.position, floor.facing, floor.normal)
 	local valid = isPlacementClear(boundsCFrame, boundsSize, floor.floor)
 	preview.valid = valid
 	preview.floorPosition = floor.position
@@ -739,6 +799,8 @@ local function ensureHighlightLoop()
 	end)
 end
 
+local setBeamPulseEnabled: (ActiveVisual, boolean) -> ()
+
 local function expireVisual(interceptorId: string)
 	local visual = ACTIVE_VISUALS[interceptorId]
 	ACTIVE_VISUALS[interceptorId] = nil
@@ -748,6 +810,7 @@ local function expireVisual(interceptorId: string)
 	end
 
 	local forceField = visual.forceField
+	setBeamPulseEnabled(visual, false)
 	if forceField and forceField.Parent then
 		local definition = AbilityConfig.GetDefinition("Interceptor")
 		local fadeOutSeconds = math.max(tonumber(definition and definition.fadeOutSeconds) or 0.25, 0.01)
@@ -783,11 +846,55 @@ end
 local function findBeamAttachments(centerPiece: Instance): BeamAttachments
 	local cylinder = centerPiece:FindFirstChild("Cylinder", true)
 	local blast = cylinder and cylinder:FindFirstChild("Blast")
+	if not (blast and blast:IsA("Attachment")) then
+		return {}
+	end
+
 	return {
 		beamEnd = getAttachment(blast, "Beam end"),
 		beamEffects = getAttachment(blast, "Beam effects 2"),
 		lightningEffects = getAttachment(blast, "Lightning effects 2"),
+		directionalEffects = getAttachment(blast, "Driectional effects"),
+		beamHolder = getAttachment(blast, "Beam holder"),
 	}
+end
+
+local function setEnabledBeamLikeVfx(root: Instance?, enabled: boolean)
+	if not root then
+		return
+	end
+
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("Beam") then
+			(descendant :: Beam).Enabled = enabled
+		elseif descendant:IsA("Trail") then
+			(descendant :: Trail).Enabled = enabled
+		elseif descendant:IsA("ParticleEmitter") then
+			(descendant :: ParticleEmitter).Enabled = enabled
+		end
+	end
+end
+
+setBeamPulseEnabled = function(visual: ActiveVisual, enabled: boolean)
+	local attachments = findBeamAttachments(visual.centerPiece)
+	setEnabledBeamLikeVfx(attachments.beamHolder, enabled)
+	setEnabledBeamLikeVfx(attachments.beamEffects, enabled)
+	setEnabledBeamLikeVfx(attachments.lightningEffects, enabled)
+	setEnabledBeamLikeVfx(attachments.directionalEffects, enabled)
+end
+
+local function pulseBeamLikeVfx(interceptorId: string, visual: ActiveVisual)
+	local pulseToken = os.clock()
+	visual.folder:SetAttribute("BeamPulseToken", pulseToken)
+	setBeamPulseEnabled(visual, true)
+
+	task.delay(BEAM_ACTIVE_SECONDS, function()
+		local currentVisual = ACTIVE_VISUALS[interceptorId]
+		if currentVisual ~= visual or visual.folder:GetAttribute("BeamPulseToken") ~= pulseToken then
+			return
+		end
+		setBeamPulseEnabled(visual, false)
+	end)
 end
 
 local function setAttachmentWorldCFrame(attachment: Attachment, cframe: CFrame)
@@ -861,6 +968,7 @@ local function playIntercept(interceptorId: string, position: Vector3)
 		if attachments.lightningEffects then
 			setAttachmentWorldCFrame(attachments.lightningEffects, beamEnd.WorldCFrame)
 		end
+		pulseBeamLikeVfx(interceptorId, visual)
 		emitBeamEnd(beamEnd)
 	end
 
@@ -906,7 +1014,7 @@ local function createVisual(interceptorId: string, owner: Player, data)
 	tweenForceFieldIn(forceField, definition, finalSize, finalTransparency, meshRecords)
 
 	local activeEndsAt = if typeof(data.activeEndsAt) == "number" then data.activeEndsAt else workspace:GetServerTimeNow() + 8
-	ACTIVE_VISUALS[interceptorId] = {
+	local visual: ActiveVisual = {
 		id = interceptorId,
 		owner = owner,
 		folder = folder,
@@ -916,6 +1024,8 @@ local function createVisual(interceptorId: string, owner: Player, data)
 		radius = if typeof(data.radius) == "number" then data.radius else getForceFieldRadius(finalSize),
 		activeEndsAt = activeEndsAt,
 	}
+	ACTIVE_VISUALS[interceptorId] = visual
+	setBeamPulseEnabled(visual, false)
 
 	ensureHighlightLoop()
 	flushPendingIntercepts(interceptorId)
@@ -1020,14 +1130,14 @@ end
 function Interceptor.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	if preview.active then
 		cancelPreview()
+		return true
 	end
 
 	if context.controller:GetCooldownRemaining(context.slot) > 0 then
 		return true
 	end
 
-	context.controller:SendMessage(context.slot, AbilityConfig.MessageTypes.Activate, nil)
-	return true
+	return startPreview(context)
 end
 
 function Interceptor.OnEffect(context: ClientEffectContext)

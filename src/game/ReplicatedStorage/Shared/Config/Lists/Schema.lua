@@ -72,6 +72,21 @@ return {
 		value = "Default",
 	},
 
+	OwnedFinishers = {
+		key = "ownedFinishers",
+		value = {},
+	},
+
+	FinisherCopies = {
+		key = "finisherCopies",
+		value = {},
+	},
+
+	EquippedFinisher = {
+		key = "equippedFinisher",
+		value = "",
+	},
+
 	CrateRollHistory = {
 		key = "crateRollHistory",
 		value = {

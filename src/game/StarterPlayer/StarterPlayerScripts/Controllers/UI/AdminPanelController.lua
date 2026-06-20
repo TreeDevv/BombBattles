@@ -4,6 +4,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
 local CrateRollController = require(script.Parent:WaitForChild("CrateRollController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -24,6 +25,7 @@ AdminPanelController._speedInput = nil :: TextBox?
 AdminPanelController._jumpInput = nil :: TextBox?
 AdminPanelController._damageInput = nil :: TextBox?
 AdminPanelController._bombSkinInput = nil :: TextBox?
+AdminPanelController._finisherInput = nil :: TextBox?
 AdminPanelController._leaderboardStatInput = nil :: TextBox?
 AdminPanelController._wipeInput = nil :: TextBox?
 AdminPanelController._players = {}
@@ -551,6 +553,12 @@ function AdminPanelController:_buildPanel()
 	self:_addButton(scroller, "Grant + Equip Bomb Skin", function()
 		self:_runCommand("player.setBombSkin", {
 			skinId = self._bombSkinInput and self._bombSkinInput.Text or BombSkinConfig.DefaultSkinId,
+		})
+	end)
+	self._finisherInput = self:_addInputRow(scroller, "Finisher", "Explosion")
+	self:_addButton(scroller, "Grant + Equip Finisher", function()
+		self:_runCommand("player.setFinisher", {
+			finisherId = self._finisherInput and self._finisherInput.Text or FinisherConfig.DefaultFinisherId,
 		})
 	end)
 	self:_addButton(scroller, "Test Crate Roll", function()

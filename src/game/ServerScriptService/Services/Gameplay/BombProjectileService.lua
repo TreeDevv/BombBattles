@@ -51,6 +51,7 @@ type ProjectileBurrowState = {
 type ProjectileState = {
 	id: string,
 	owner: any,
+	sourceType: string?,
 	bombType: string,
 	skinId: string,
 	rangeOrigin: Vector3,
@@ -79,6 +80,13 @@ type ProjectileState = {
 	frozenVelocity: Vector3?,
 	frozenPosition: Vector3?,
 	frozenBy: string?,
+	timeScale: number,
+	targetTimeScale: number,
+	timeScaleSource: string?,
+	targetTimeScaleSource: string?,
+	timeScaleEnterRate: number?,
+	timeScaleExitRate: number?,
+	timeScaleStrength: number,
 	burrow: ProjectileBurrowState?,
 }
 
@@ -743,6 +751,36 @@ local function getAcceleration(physics: ProjectilePhysics.PhysicsConfig, hasImpa
 	return Vector3.new(0, -ProjectilePhysics.GetGravity(physics, hasImpacted), 0)
 end
 
+local function resetProjectileTimeScaleTarget(state: ProjectileState)
+	state.targetTimeScale = 1
+	state.targetTimeScaleSource = nil
+end
+
+local function updateProjectileTimeScale(state: ProjectileState, fixedDt: number): number
+	local targetTimeScale = math.clamp(tonumber(state.targetTimeScale) or 1, 0.005, 1)
+	local currentTimeScale = math.clamp(tonumber(state.timeScale) or 1, 0.005, 1)
+	local rate = if targetTimeScale < currentTimeScale
+		then math.max(tonumber(state.timeScaleEnterRate) or 7.5, 0.1)
+		else math.max(tonumber(state.timeScaleExitRate) or 5.5, 0.1)
+	local alpha = 1 - math.exp(-rate * math.max(fixedDt, 0))
+	local nextTimeScale = currentTimeScale + (targetTimeScale - currentTimeScale) * math.clamp(alpha, 0, 1)
+
+	if math.abs(nextTimeScale - targetTimeScale) < 0.001 then
+		nextTimeScale = targetTimeScale
+	end
+
+	state.timeScale = math.clamp(nextTimeScale, 0.005, 1)
+	if targetTimeScale < 0.995 and typeof(state.targetTimeScaleSource) == "string" then
+		state.timeScaleSource = state.targetTimeScaleSource
+	elseif state.timeScale >= 0.995 then
+		state.timeScale = 1
+		state.timeScaleSource = nil
+	end
+	state.timeScaleStrength = if state.timeScaleSource then math.clamp(1 - state.timeScale, 0, 1) else 0
+
+	return fixedDt * state.timeScale
+end
+
 fireSnapshot = function(state: ProjectileState, currentTime: number, force: boolean?)
 	local interval = 1 / math.max(BombProjectileConfig.SnapshotHz, 1)
 	if not force and currentTime < state.nextSnapshotAt then
@@ -757,6 +795,7 @@ fireSnapshot = function(state: ProjectileState, currentTime: number, force: bool
 		player = state.owner,
 		projectileId = state.id,
 		customProjectile = true,
+		sourceType = state.sourceType,
 		bombSkinId = state.skinId,
 		position = state.position,
 		velocity = state.velocity,
@@ -774,6 +813,10 @@ fireSnapshot = function(state: ProjectileState, currentTime: number, force: bool
 		frozen = state.frozenUntil ~= nil and currentTime < state.frozenUntil,
 		frozenUntil = state.frozenUntil,
 		frozenBy = state.frozenBy,
+		timeScale = state.timeScale,
+		timeScaleSource = state.timeScaleSource,
+		infinitySlowed = state.timeScaleSource == "Infinity" and state.timeScale < 0.995,
+		infinityStrength = state.timeScaleSource == "Infinity" and state.timeScaleStrength or 0,
 		burrowing = state.burrow ~= nil,
 	})
 end
@@ -1267,6 +1310,9 @@ local function handleStepHook(state: ProjectileState, nextPosition: Vector3, cur
 	local stepResult = AbilityService:RunHook("OnProjectileStep", {
 		projectileId = state.id,
 		owner = state.owner,
+		sourceType = state.sourceType,
+		bombType = state.bombType,
+		bombSkinId = state.skinId,
 		position = state.position,
 		lastPosition = state.lastPosition,
 		nextPosition = nextPosition,
@@ -1310,6 +1356,29 @@ local function handleStepHook(state: ProjectileState, nextPosition: Vector3, cur
 	end
 	if stepResult.kind == RESULT_KIND.FreezeProjectile and applyFreezeResult(state, stepResult, currentTime) then
 		return false
+	end
+	if stepResult.kind == RESULT_KIND.ModifyProjectileTimeScale then
+		local targetTimeScale = math.clamp(tonumber(stepResult.timeScale) or 1, 0.005, 1)
+		state.targetTimeScale = math.min(state.targetTimeScale or 1, targetTimeScale)
+		if typeof(stepResult.timeScaleSource) == "string" then
+			state.targetTimeScaleSource = stepResult.timeScaleSource
+		end
+		if typeof(stepResult.timeScaleEnterRate) == "number" then
+			state.timeScaleEnterRate = math.max(stepResult.timeScaleEnterRate, 0.1)
+		end
+		if typeof(stepResult.timeScaleExitRate) == "number" then
+			state.timeScaleExitRate = math.max(stepResult.timeScaleExitRate, 0.1)
+		end
+		if state.physicalProjectile and state.physicalProjectile.Parent and targetTimeScale < 0.995 then
+			state.position = getPhysicalPosition(state)
+			state.lastPosition = state.position
+			state.velocity = getPhysicalVelocity(state)
+			if state.velocity.Magnitude > 0.05 then
+				state.settled = false
+				state.grounded = false
+			end
+			destroyPhysicalProjectile(state)
+		end
 	end
 	if stepResult.kind == RESULT_KIND.ModifyProjectileVelocity then
 		local velocity = readFiniteVector(stepResult.velocity, state.velocity)
@@ -1380,6 +1449,8 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		return
 	end
 
+	resetProjectileTimeScaleTarget(state)
+
 	if state.attached then
 		state.position = getAttachedPosition(state)
 		state.velocity = Vector3.zero
@@ -1387,6 +1458,7 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
+		updateProjectileTimeScale(state, fixedDt)
 		if not state.destroyed then
 			fireSnapshot(state, currentTime, false)
 		end
@@ -1406,7 +1478,11 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
+		updateProjectileTimeScale(state, fixedDt)
 		if state.destroyed or not state.physicalProjectile then
+			if not state.destroyed then
+				fireSnapshot(state, currentTime, true)
+			end
 			RuntimeProfiler.End("Server/BombProjectile/StepProjectile", token)
 			return
 		end
@@ -1436,6 +1512,17 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 		return
 	end
 
+	local motionDt = updateProjectileTimeScale(state, fixedDt)
+	if not state.settled then
+		predictedPosition, predictedVelocity = ProjectilePhysics.Integrate(
+			state.position,
+			state.velocity,
+			motionDt,
+			state.physics,
+			state.hasImpacted
+		)
+	end
+
 	local playerContact = findSweptPlayerContact(state, predictedPosition)
 	if playerContact then
 		if state.collision.playerContactImpacts == true then
@@ -1463,7 +1550,7 @@ local function stepProjectile(state: ProjectileState, fixedDt: number, currentTi
 	state.lastPosition = state.position
 	if not state.settled then
 		local physicsToken = RuntimeProfiler.Begin("Server/BombProjectile/ProjectilePhysicsStep")
-		local result = ProjectilePhysics.Step(state, fixedDt, state.physics, createRaycastParams(state))
+		local result = ProjectilePhysics.Step(state, motionDt, state.physics, createRaycastParams(state))
 		RuntimeProfiler.End("Server/BombProjectile/ProjectilePhysicsStep", physicsToken)
 		state.position = result.position
 		state.velocity = result.velocity
@@ -1620,6 +1707,7 @@ function BombProjectileService:Launch(request): boolean
 	end
 
 	local bombType = if typeof(request.bombType) == "string" and request.bombType ~= "" then request.bombType else BombProjectileConfig.BombType.Normal
+	local sourceType = if typeof(request.sourceType) == "string" and request.sourceType ~= "" then request.sourceType else nil
 	local skinId = BombSkinConfig.NormalizeSkinId(request.skinId)
 	if skinId == "" then
 		skinId = BombSkinConfig.DefaultSkinId
@@ -1634,6 +1722,7 @@ function BombProjectileService:Launch(request): boolean
 	local launchResult = AbilityService:RunHook("OnBeforeProjectileLaunch", {
 		owner = owner,
 		projectileId = projectileId,
+		sourceType = sourceType,
 		bombType = bombType,
 		bombSkinId = skinId,
 		origin = origin,
@@ -1681,6 +1770,7 @@ function BombProjectileService:Launch(request): boolean
 	local state: ProjectileState = {
 		id = projectileId,
 		owner = owner,
+		sourceType = sourceType,
 		bombType = bombType,
 		skinId = skinId,
 		rangeOrigin = origin,
@@ -1709,6 +1799,13 @@ function BombProjectileService:Launch(request): boolean
 		frozenVelocity = nil,
 		frozenPosition = nil,
 		frozenBy = nil,
+		timeScale = 1,
+		targetTimeScale = 1,
+		timeScaleSource = nil,
+		targetTimeScaleSource = nil,
+		timeScaleEnterRate = nil,
+		timeScaleExitRate = nil,
+		timeScaleStrength = 0,
 		burrow = nil,
 	}
 
@@ -1718,6 +1815,7 @@ function BombProjectileService:Launch(request): boolean
 		player = owner,
 		projectileId = projectileId,
 		customProjectile = true,
+		sourceType = sourceType,
 		bombType = bombType,
 		bombSkinId = skinId,
 		origin = origin,
@@ -1762,10 +1860,21 @@ function BombProjectileService:DestroyProjectile(projectileId: string, reason: s
 	state.destroyed = true
 	state.position = if state.attached then getAttachedPosition(state) else getPhysicalPosition(state)
 	destroyPhysicalProjectile(state)
+	AbilityService:RunHook("OnProjectileDestroyed", {
+		owner = state.owner,
+		projectileId = state.id,
+		sourceType = state.sourceType,
+		bombType = state.bombType,
+		bombSkinId = state.skinId,
+		position = state.position,
+		reason = reason or "Destroyed",
+		customProjectile = true,
+	})
 	fireEffect("ProjectileDestroy", {
 		player = state.owner,
 		projectileId = state.id,
 		customProjectile = true,
+		sourceType = state.sourceType,
 		bombSkinId = state.skinId,
 		reason = reason or "Destroyed",
 		position = state.position,

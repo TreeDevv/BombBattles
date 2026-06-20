@@ -16,6 +16,7 @@ type ServerHookContext = AbilityTypes.ServerHookContext
 type FloorPlacement = {
 	position: Vector3,
 	facing: Vector3,
+	normal: Vector3,
 	floor: Instance,
 }
 type InterceptorRecord = {
@@ -115,6 +116,46 @@ local function pivotTo(instance: Instance, cframe: CFrame)
 	end
 end
 
+local function getPartAxisExtents(part: BasePart, axis: Vector3, origin: Vector3): (number, number)
+	local halfSize = part.Size * 0.5
+	local minDistance = math.huge
+	local maxDistance = -math.huge
+
+	for _, xSign in ipairs({ -1, 1 }) do
+		for _, ySign in ipairs({ -1, 1 }) do
+			for _, zSign in ipairs({ -1, 1 }) do
+				local corner = part.CFrame:PointToWorldSpace(Vector3.new(
+					halfSize.X * xSign,
+					halfSize.Y * ySign,
+					halfSize.Z * zSign
+				))
+				local distance = (corner - origin):Dot(axis)
+				minDistance = math.min(minDistance, distance)
+				maxDistance = math.max(maxDistance, distance)
+			end
+		end
+	end
+
+	return minDistance, maxDistance
+end
+
+local function getInstanceAxisExtents(instance: Instance, axis: Vector3, origin: Vector3): (number, number)
+	local minDistance = math.huge
+	local maxDistance = -math.huge
+	local foundPart = false
+	for _, part in ipairs(getBaseParts(instance)) do
+		foundPart = true
+		local partMin, partMax = getPartAxisExtents(part, axis, origin)
+		minDistance = math.min(minDistance, partMin)
+		maxDistance = math.max(maxDistance, partMax)
+	end
+
+	if not foundPart then
+		return 0, 0
+	end
+	return minDistance, maxDistance
+end
+
 local function getActiveMap(): Instance?
 	local map = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	return if map and map:IsA("Model") then map else nil
@@ -180,12 +221,35 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
+local function isFiniteVector(value: any): boolean
+	return typeof(value) == "Vector3" and value.X == value.X and value.Y == value.Y and value.Z == value.Z
+end
+
+local function getRequestedPlacement(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): (Vector3?, Vector3?)
+	if typeof(payload) ~= "table" or not isFiniteVector(payload.floorPosition) then
+		return nil, nil
+	end
+
+	local floorPosition = payload.floorPosition
+	local maxDistance = math.max(tonumber(definition.placementDistance) or 8, 0) + 4
+	if (floorPosition - rootPart.Position).Magnitude > maxDistance then
+		return nil, nil
+	end
+
+	local facing = flattenDirection(if isFiniteVector(payload.facing) then payload.facing else rootPart.CFrame.LookVector)
+	return floorPosition, facing
+end
+
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
 	local distance = definition.placementDistance or 8
 	local rayUp = definition.floorRaycastUp or 8
 	local rayDown = definition.floorRaycastDown or 32
-	local facing = flattenDirection(rootPart.CFrame.LookVector)
-	local target = rootPart.Position + facing * distance
+	local requestedPosition, requestedFacing = getRequestedPlacement(player, rootPart, definition, payload)
+	if not requestedPosition then
+		return nil
+	end
+	local facing = requestedFacing or flattenDirection(rootPart.CFrame.LookVector)
+	local target = requestedPosition or (rootPart.Position + facing * distance)
 	local rayOrigin = target + Vector3.yAxis * rayUp
 	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
 	local hit = workspace:Raycast(rayOrigin, rayDirection)
@@ -207,17 +271,33 @@ local function findFloor(player: Player, rootPart: BasePart, definition: Ability
 	return {
 		position = hit.Position,
 		facing = facing,
+		normal = hit.Normal,
 		floor = hit.Instance,
 	}
 end
 
-local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing: Vector3): (CFrame, Vector3)
-	local pivot = CFrame.lookAt(floorPosition, floorPosition + facing)
+local function getFloorPivot(floorPosition: Vector3, facing: Vector3, normal: Vector3): CFrame
+	local up = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
+	local forward = facing - up * facing:Dot(up)
+	if forward.Magnitude < 0.05 then
+		forward = up:Cross(Vector3.xAxis)
+		if forward.Magnitude < 0.05 then
+			forward = up:Cross(Vector3.zAxis)
+		end
+	end
+
+	forward = forward.Unit
+	local right = up:Cross(forward).Unit
+	forward = right:Cross(up).Unit
+	return CFrame.fromMatrix(floorPosition, right, up, -forward)
+end
+
+local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing: Vector3, normal: Vector3): (CFrame, Vector3)
+	local pivot = getFloorPivot(floorPosition, facing, normal)
 	pivotTo(clone, pivot)
 
-	local boundsCFrame, boundsSize = getBounds(clone)
-	local bottomY = boundsCFrame.Position.Y - boundsSize.Y * 0.5
-	local finalPivot = pivot + Vector3.yAxis * (floorPosition.Y - bottomY)
+	local bottomOffset = getInstanceAxisExtents(clone, pivot.UpVector, floorPosition)
+	local finalPivot = pivot - pivot.UpVector * bottomOffset
 	pivotTo(clone, finalPivot)
 
 	return getBounds(clone)
@@ -272,19 +352,19 @@ local function isPlacementClear(boundsCFrame: CFrame, boundsSize: Vector3, floor
 	return true
 end
 
-local function validatePlacement(player: Player, definition: AbilityDefinition, centerTemplate: Instance): FloorPlacement?
+local function validatePlacement(player: Player, definition: AbilityDefinition, centerTemplate: Instance, payload: any): FloorPlacement?
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil
 	end
 
-	local floor = findFloor(player, rootPart, definition)
+	local floor = findFloor(player, rootPart, definition, payload)
 	if not floor then
 		return nil
 	end
 
 	local clone = centerTemplate:Clone()
-	local boundsCFrame, boundsSize = alignCloneToFloor(clone, floor.position, floor.facing)
+	local boundsCFrame, boundsSize = alignCloneToFloor(clone, floor.position, floor.facing, floor.normal)
 	clone:Destroy()
 
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
@@ -447,8 +527,8 @@ function Interceptor.OnActivate(context: ServerActivateContext): AbilityActivati
 		return false
 	end
 
-	local rootPart = getCharacterRoot(context.player)
-	if not rootPart then
+	local placement = validatePlacement(context.player, context.definition, centerTemplate, context.payload)
+	if not placement then
 		return false
 	end
 
@@ -464,7 +544,7 @@ function Interceptor.OnActivate(context: ServerActivateContext): AbilityActivati
 	centerPiece:SetAttribute(ID_ATTR, interceptorId)
 	centerPiece:SetAttribute(OWNER_ATTR, context.player.UserId)
 	centerPiece:SetAttribute("AbilityId", context.abilityId)
-	local _boundsCFrame, boundsSize = alignCloneToRootPosition(centerPiece, rootPart)
+	local _boundsCFrame, boundsSize = alignCloneToFloor(centerPiece, placement.position, placement.facing, placement.normal)
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
 		folder:Destroy()
 		return false

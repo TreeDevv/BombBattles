@@ -430,7 +430,10 @@ local function findPlacement(player: Player, rootPart: BasePart, definition: Abi
 	end
 
 	if getBoolean(definition, "allowEmergencyFallbackPlacement", true) then
-		return buildCandidatePlacement(player, rootPart, definition, Vector3.zero)
+		local placement = buildCandidatePlacement(player, rootPart, definition, Vector3.zero)
+		if isPlacementClear(player, platformFolder, placement.cframe, placement.size, definition) then
+			return placement
+		end
 	end
 
 	return nil

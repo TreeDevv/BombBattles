@@ -23,6 +23,7 @@ local AIR_CONTROL_LAUNCHED_AT_ATTR = "AirControl_LaunchedAt"
 local GRAVITY_BOOTS_ACTIVE_UNTIL_ATTR = "GravityBoots_ActiveUntil"
 local FREEZE_BOMB_SLOW_UNTIL_ATTR = "FreezeBomb_SlowUntil"
 local FREEZE_BOMB_SLOW_MULTIPLIER_ATTR = "FreezeBomb_SlowMultiplier"
+local GRAPPLE_HOOK_STUNNED_UNTIL_ATTR = "GrappleHook_StunnedUntil"
 local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 1
 local CONTROLLER_LOOKUP_TIMEOUT = 0.75
 local CONTROLLER_BIND_RETRY_TIMEOUT = 20
@@ -309,6 +310,23 @@ local function getFreezeBombSlowMultiplier(character: Model?): number
 
 	local multiplier = character:GetAttribute(FREEZE_BOMB_SLOW_MULTIPLIER_ATTR)
 	return if typeof(multiplier) == "number" then math.clamp(multiplier, 0.05, 1) else 1
+end
+
+local function getGrappleHookStunnedUntil(character: Model?): number
+	local playerValue = LocalPlayer:GetAttribute(GRAPPLE_HOOK_STUNNED_UNTIL_ATTR)
+	if typeof(playerValue) == "number" then
+		return playerValue
+	end
+	if not character then
+		return NEVER
+	end
+
+	local characterValue = character:GetAttribute(GRAPPLE_HOOK_STUNNED_UNTIL_ATTR)
+	return if typeof(characterValue) == "number" then characterValue else NEVER
+end
+
+local function isGrappleHookStunned(character: Model?): boolean
+	return getGrappleHookStunnedUntil(character) > workspace:GetServerTimeNow()
 end
 
 local exponentialAlpha = MovementMath.ExponentialAlpha
@@ -1814,6 +1832,11 @@ end
 
 function MovementController:_recordJumpRequest()
 	local now = os.clock()
+	if isGrappleHookStunned(self._character) then
+		self:_consumeJumpRequest()
+		return
+	end
+
 	if self:_resolveGrounded(now, self:_isCurrentlyGrounded()) then
 		self:_requestGroundJump(now)
 		return
@@ -1981,14 +2004,9 @@ function MovementController:_updateLandingState(now: number, isGrounded: boolean
 	end
 end
 
-function MovementController:_applyAirFacingYaw(isGrounded: boolean): boolean
-	if isGrounded then
-		return false
-	end
-
+function MovementController:_snapRootYawToFacingDirection(facingDirection: Vector3): boolean
 	local rootPart = self._rootPart
 	local humanoid = self._humanoid
-	local facingDirection = self._smoothedFacingDirection
 	if not (
 		rootPart
 		and rootPart.Parent
@@ -2018,6 +2036,14 @@ function MovementController:_applyAirFacingYaw(isGrounded: boolean): boolean
 	rootPart.AssemblyLinearVelocity = linearVelocity
 	rootPart.AssemblyAngularVelocity = angularVelocity
 	return true
+end
+
+function MovementController:_applyAirFacingYaw(isGrounded: boolean): boolean
+	if isGrounded then
+		return false
+	end
+
+	return self:_snapRootYawToFacingDirection(self._smoothedFacingDirection)
 end
 
 function MovementController:_applyAirUprightStabilization(isGrounded: boolean): (number, Vector3, boolean)
@@ -2297,14 +2323,26 @@ function MovementController:_step(dt: number)
 	local inCoyoteTime = not isGrounded and now - self._lastGroundedTime <= MovementConfig.CoyoteTime
 	local jumpBuffered = now - self._lastJumpRequestTime <= MovementConfig.JumpBufferTime
 	local landingSettling = isGrounded and now - self._lastLandedTime <= MovementConfig.LandingSettleTime
+	local grappleStunned = isGrappleHookStunned(self._character)
+	if grappleStunned then
+		self:_consumeJumpRequest()
+		self:_clearSlidePhase()
+		self._slideRequestPending = false
+		jumpBuffered = false
+	end
 
-	self:_tryReplayJump(now, isGrounded, inCoyoteTime)
+	if not grappleStunned then
+		self:_tryReplayJump(now, isGrounded, inCoyoteTime)
+	end
 
 	local inputMoveDirection = getCameraRelativeDirection(getMoveVectorWithDeadzone(controls:GetMoveVector()))
+	if grappleStunned then
+		inputMoveDirection = Vector3.zero
+	end
 	local hasInputMove = inputMoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
-	local sprintIntent = isGrounded and self._sprintHeld and hasInputMove
+	local sprintIntent = isGrounded and not grappleStunned and self._sprintHeld and hasInputMove
 
-	if self._slideRequestPending then
+	if self._slideRequestPending and not grappleStunned then
 		if self:_isGroundRunout() then
 			self:_stopGroundRunout()
 		end
@@ -2342,6 +2380,7 @@ function MovementController:_step(dt: number)
 		and not self._crouchPressConsumedBySlide
 		and not isSliding
 		and not isGroundRunout
+		and not grappleStunned
 	self._isCrouching = isCrouching
 
 	local targetMoveDirection = inputMoveDirection
@@ -2418,26 +2457,34 @@ function MovementController:_step(dt: number)
 	controllerManager.MovingDirection = cclMoveDirection
 
 	local shiftLocked = readCameraShiftLocked(self._character)
-	local targetFacingDirection = if MovementConfig.FaceCameraDirection and shiftLocked
-		then getCameraFacingDirection()
-		else if hasMoveInput then targetMoveDirection.Unit else Vector3.zero
-
-	local targetFacingYaw = directionToYaw(targetFacingDirection)
-	if targetFacingYaw then
-		local smoothedFacingYaw = self._smoothedFacingYaw
-		if smoothedFacingYaw == nil then
-			local currentFacingDirection = flattenDirection(controllerManager.FacingDirection)
-			if currentFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and self._rootPart then
-				currentFacingDirection = flattenDirection(self._rootPart.CFrame.LookVector)
-			end
-			smoothedFacingYaw = directionToYaw(currentFacingDirection) or targetFacingYaw
+	if MovementConfig.FaceCameraDirection and shiftLocked then
+		local cameraFacingDirection = getCameraFacingDirection()
+		local cameraFacingYaw = directionToYaw(cameraFacingDirection)
+		if cameraFacingYaw then
+			self._smoothedFacingYaw = cameraFacingYaw
+			self._smoothedFacingDirection = cameraFacingDirection
+			controllerManager.FacingDirection = cameraFacingDirection
+			self:_snapRootYawToFacingDirection(cameraFacingDirection)
 		end
+	else
+		local targetFacingDirection = if hasMoveInput then targetMoveDirection.Unit else Vector3.zero
+		local targetFacingYaw = directionToYaw(targetFacingDirection)
+		if targetFacingYaw then
+			local smoothedFacingYaw = self._smoothedFacingYaw
+			if smoothedFacingYaw == nil then
+				local currentFacingDirection = flattenDirection(controllerManager.FacingDirection)
+				if currentFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and self._rootPart then
+					currentFacingDirection = flattenDirection(self._rootPart.CFrame.LookVector)
+				end
+				smoothedFacingYaw = directionToYaw(currentFacingDirection) or targetFacingYaw
+			end
 
-		smoothedFacingYaw = smoothYaw(smoothedFacingYaw, targetFacingYaw, MovementConfig.FacingResponsiveness, dt)
-		local smoothedFacingDirection = yawToDirection(smoothedFacingYaw)
-		self._smoothedFacingYaw = smoothedFacingYaw
-		self._smoothedFacingDirection = smoothedFacingDirection
-		controllerManager.FacingDirection = smoothedFacingDirection
+			smoothedFacingYaw = smoothYaw(smoothedFacingYaw, targetFacingYaw, MovementConfig.FacingResponsiveness, dt)
+			local smoothedFacingDirection = yawToDirection(smoothedFacingYaw)
+			self._smoothedFacingYaw = smoothedFacingYaw
+			self._smoothedFacingDirection = smoothedFacingDirection
+			controllerManager.FacingDirection = smoothedFacingDirection
+		end
 	end
 
 	self:_applyAirFacingYaw(isGrounded)

@@ -601,13 +601,15 @@ local function collectHookCandidates(hookName: string, currentTime: number): { H
 			if typeof(slotState) ~= "table" or typeof(slotState.abilityId) ~= "string" or slotState.abilityId == "" then
 				continue
 			end
-			if typeof(slotState.activeEndsAt) ~= "number" or slotState.activeEndsAt <= currentTime then
-				continue
-			end
 
 			local definition = AbilityConfig.GetDefinition(slotState.abilityId)
 			local behavior = getBehavior(slotState.abilityId, definition)
 			if not (behavior and type(behavior[hookName]) == "function") then
+				continue
+			end
+			local alwaysRunHooks = behavior.AlwaysRunHooks
+			local alwaysRunHook = typeof(alwaysRunHooks) == "table" and alwaysRunHooks[hookName] == true
+			if not alwaysRunHook and (typeof(slotState.activeEndsAt) ~= "number" or slotState.activeEndsAt <= currentTime) then
 				continue
 			end
 

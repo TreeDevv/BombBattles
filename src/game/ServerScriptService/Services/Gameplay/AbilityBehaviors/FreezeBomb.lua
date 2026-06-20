@@ -21,6 +21,10 @@ type FreezeRecord = {
 }
 
 local FreezeBomb = {} :: AbilityTypes.ServerBehavior
+FreezeBomb.AlwaysRunHooks = table.freeze({
+	OnBeforeExplosion = true,
+	OnBeforePlayerBombDamage = true,
+})
 
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5

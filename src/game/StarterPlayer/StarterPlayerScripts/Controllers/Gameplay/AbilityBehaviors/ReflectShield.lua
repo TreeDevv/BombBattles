@@ -619,14 +619,10 @@ end
 function ReflectShield.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	if preview.active then
 		cancelPreview()
-	end
-
-	if context.controller:GetCooldownRemaining(context.slot) > 0 then
 		return true
 	end
 
-	context.controller:SendMessage(context.slot, AbilityConfig.MessageTypes.Activate, nil)
-	return true
+	return startPreview(context)
 end
 
 function ReflectShield.OnEffect(context: ClientEffectContext)

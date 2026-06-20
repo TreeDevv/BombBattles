@@ -63,6 +63,8 @@ local PROJECTILE_PHYSICAL_HANDOFF_MAX_SECONDS = 0.28
 local FROZEN_BOMB_COLOR = Color3.fromRGB(91, 226, 255)
 local FROZEN_BOMB_FILL_TRANSPARENCY = 0.18
 local FROZEN_BOMB_OUTLINE_TRANSPARENCY = 0.02
+local PROJECTILE_TIME_SCALE_ENTER_RATE = 7.5
+local PROJECTILE_TIME_SCALE_EXIT_RATE = 5.5
 local BEAM_CURVE_EPSILON = 1e-4
 local ATTR = BombConfig.Attributes
 
@@ -183,9 +185,14 @@ BombController._projectileVisuals = {} :: {
 		fuseEndsAt: number?,
 		abilityVisualOverlay: Instance?,
 		visuals: { [string]: any }?,
+		visualScale: number?,
 		burrowing: boolean?,
+		timeScale: number?,
+		targetTimeScale: number?,
 	},
 }
+
+local replacementTransparencyByPart = setmetatable({}, { __mode = "k" }) :: { [BasePart]: number }
 
 local function getRemote(name: string): RemoteEvent?
 	local remotes = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, 10)
@@ -506,6 +513,63 @@ local function setVisualLocalTransparencyExcept(instance: Instance?, alpha: numb
 	end
 end
 
+local function setReplacementPartHidden(part: BasePart, hidden: boolean)
+	if hidden then
+		if replacementTransparencyByPart[part] == nil then
+			replacementTransparencyByPart[part] = part.Transparency
+		end
+		part.LocalTransparencyModifier = 1
+		part.Transparency = 1
+		return
+	end
+
+	local originalTransparency = replacementTransparencyByPart[part]
+	if originalTransparency ~= nil then
+		part.Transparency = originalTransparency
+		replacementTransparencyByPart[part] = nil
+	end
+	part.LocalTransparencyModifier = 0
+end
+
+local function setVisualReplacementHiddenExcept(instance: Instance?, hidden: boolean, excluded: Instance?)
+	if not instance then
+		return
+	end
+
+	if instance:IsA("BasePart") and not isSelfOrDescendantOfInstance(instance, excluded) then
+		setReplacementPartHidden(instance, hidden)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") and not isSelfOrDescendantOfInstance(descendant, excluded) then
+			setReplacementPartHidden(descendant, hidden)
+		end
+	end
+end
+
+local function setVisualEffectsEnabledExcept(instance: Instance?, enabled: boolean, excluded: Instance?)
+	if not instance then
+		return
+	end
+
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if isSelfOrDescendantOfInstance(descendant, excluded) then
+			continue
+		end
+
+		if descendant:IsA("ParticleEmitter")
+			or descendant:IsA("Trail")
+			or descendant:IsA("Beam")
+			or descendant:IsA("PointLight")
+			or descendant:IsA("SpotLight")
+			or descendant:IsA("SurfaceLight")
+		then
+			descendant.Enabled = enabled
+		elseif descendant:IsA("Sound") and not enabled then
+			descendant:Stop()
+		end
+	end
+end
+
 function BombController:_destroyAbilityVisualOverlay(visual)
 	if visual and visual.abilityVisualOverlay then
 		if visual.abilityVisualOverlay.Parent then
@@ -587,11 +651,17 @@ function BombController:_syncProjectileBaseVisual(visual)
 	local visuals = visual and visual.visuals
 	local hideBase = typeof(visuals) == "table"
 		and visuals.hideBaseVisual == true
-		and visual.abilityVisualOverlay
-		and visual.abilityVisualOverlay.Parent
+	local overlay = if visual then visual.abilityVisualOverlay else nil
 	if hideBase then
-		setVisualLocalTransparencyExcept(visual.instance, 1, visual.abilityVisualOverlay)
+		if overlay and overlay.Parent then
+			setVisualReplacementHiddenExcept(visual.instance, true, overlay)
+			setVisualEffectsEnabledExcept(visual.instance, false, overlay)
+		else
+			setVisualReplacementHiddenExcept(visual.instance, true, nil)
+			setVisualEffectsEnabledExcept(visual.instance, false, nil)
+		end
 	else
+		setVisualReplacementHiddenExcept(visual.instance, false, nil)
 		setVisualLocalTransparency(visual.instance, 0)
 	end
 	if visual.highlight then
@@ -603,11 +673,17 @@ function BombController:_syncHeldBaseVisual(held)
 	local replaceBase = typeof(self._localAbilityHeldVisualOptions) == "table"
 		and self._localAbilityHeldVisualOptions.replaceBaseVisual == true
 		and held
-		and held.abilityVisualOverlay
-		and held.abilityVisualOverlay.Parent
+	local overlay = if held then held.abilityVisualOverlay else nil
 	if replaceBase then
-		setVisualLocalTransparencyExcept(held.instance, 1, held.abilityVisualOverlay)
+		if overlay and overlay.Parent then
+			setVisualReplacementHiddenExcept(held.instance, true, overlay)
+			setVisualEffectsEnabledExcept(held.instance, false, overlay)
+		else
+			setVisualReplacementHiddenExcept(held.instance, true, nil)
+			setVisualEffectsEnabledExcept(held.instance, false, nil)
+		end
 	else
+		setVisualReplacementHiddenExcept(held and held.instance or nil, false, nil)
 		setVisualLocalTransparency(held and held.instance or nil, 0)
 	end
 	if held and held.highlight then
@@ -2212,6 +2288,28 @@ local function getProjectileSpinSpeed(visual): number
 	return getVisualNumber(visual, "spinRadiansPerSecond", fallback)
 end
 
+local function getProjectileVisualTimeScale(visual): number
+	local timeScale = if visual and typeof(visual.timeScale) == "number" then visual.timeScale else 1
+	return math.clamp(timeScale, 0.005, 1)
+end
+
+local function updateProjectileVisualTimeScale(visual, deltaTime: number): number
+	local currentTimeScale = getProjectileVisualTimeScale(visual)
+	local targetTimeScale = math.clamp(
+		if visual and typeof(visual.targetTimeScale) == "number" then visual.targetTimeScale else 1,
+		0.005,
+		1
+	)
+	local rate = if targetTimeScale < currentTimeScale then PROJECTILE_TIME_SCALE_ENTER_RATE else PROJECTILE_TIME_SCALE_EXIT_RATE
+	local alpha = 1 - math.exp(-rate * math.max(deltaTime, 0))
+	local nextTimeScale = currentTimeScale + (targetTimeScale - currentTimeScale) * math.clamp(alpha, 0, 1)
+	if math.abs(nextTimeScale - targetTimeScale) < 0.001 then
+		nextTimeScale = targetTimeScale
+	end
+	visual.timeScale = math.clamp(nextTimeScale, 0.005, 1)
+	return visual.timeScale
+end
+
 function BombController:_getBombPulseProgress(visual): (number, number)
 	local fuseStartedAt = visual.fuseStartedAt or getServerTime()
 	local fuseEndsAt = visual.fuseEndsAt or (fuseStartedAt + BombConfig.FuseSeconds)
@@ -2448,16 +2546,17 @@ function BombController:_retryTransferProjectilePulseToPhysical(projectileId: st
 	end)
 end
 
-function BombController:_createProjectileVisual(projectileId: string, skinId: any)
+function BombController:_createProjectileVisual(projectileId: string, skinId: any, visualScale: number?)
 	local resolvedSkinId = BombSkinConfig.NormalizeSkinId(skinId)
 	if resolvedSkinId == "" then
 		resolvedSkinId = BombSkinConfig.DefaultSkinId
 	end
+	local resolvedVisualScale = math.max(tonumber(visualScale) or BombConfig.ProjectileVisualScale, 0.05)
 	local instance, rootPart = createBombVisualInstance(resolvedSkinId, "BombProjectile_" .. projectileId, {
 		vfx = true,
 		fuseSpark = true,
 		trail = true,
-	}, BombConfig.ProjectileVisualScale)
+	}, resolvedVisualScale)
 
 	if not rootPart then
 		instance:Destroy()
@@ -2511,7 +2610,10 @@ function BombController:_createProjectileVisual(projectileId: string, skinId: an
 		frozen = false,
 		frozenUntil = nil,
 		visuals = nil,
+		visualScale = resolvedVisualScale,
 		burrowing = false,
+		timeScale = 1,
+		targetTimeScale = 1,
 	}
 end
 
@@ -2571,7 +2673,7 @@ function BombController:_playThrowEffect(payload)
 		and visual.handoffConnection == nil
 	if not reusePredictedVisual then
 		self:_destroyProjectileVisual(projectileId)
-		visual = self:_createProjectileVisual(projectileId, payload.bombSkinId)
+		visual = self:_createProjectileVisual(projectileId, payload.bombSkinId, payload.visualScale)
 		if not visual then
 			return
 		end
@@ -2583,6 +2685,7 @@ function BombController:_playThrowEffect(payload)
 	visual.path = path
 	visual.customProjectile = customProjectile
 	visual.visuals = if typeof(payload.visuals) == "table" then payload.visuals else nil
+	visual.visualScale = if typeof(payload.visualScale) == "number" then math.max(payload.visualScale, 0.05) else visual.visualScale
 	self:_syncAbilityVisualOverlay(visual)
 	self:_syncProjectileBaseVisual(visual)
 	if customProjectile then
@@ -2616,8 +2719,9 @@ function BombController:_playThrowEffect(payload)
 
 	visual.connection = RunService.RenderStepped:Connect(function(deltaTime)
 		local token = RuntimeProfiler.Begin("Client/BombController/ProjectileVisual")
+		local visualTimeScale = updateProjectileVisualTimeScale(visual, deltaTime)
 		if not visual.spinLocked then
-			visual.spin += deltaTime * getProjectileSpinSpeed(visual)
+			visual.spin += deltaTime * getProjectileSpinSpeed(visual) * visualTimeScale
 		end
 		if visual.customProjectile then
 			local position = visual.position or visual.targetPosition or rootPart.Position
@@ -2627,11 +2731,13 @@ function BombController:_playThrowEffect(payload)
 				velocity = Vector3.zero
 			else
 				local acceleration = visual.acceleration or Vector3.zero
-				velocity += acceleration * deltaTime
-				position += velocity * deltaTime
+				local motionDt = deltaTime * visualTimeScale
+				velocity += acceleration * motionDt
+				position += velocity * motionDt
 
-				local positionAlpha = 1 - math.exp(-18 * deltaTime)
-				local velocityAlpha = 1 - math.exp(-14 * deltaTime)
+				local correctionScale = math.clamp(0.15 + visualTimeScale * 0.85, 0.15, 1)
+				local positionAlpha = 1 - math.exp(-18 * deltaTime * correctionScale)
+				local velocityAlpha = 1 - math.exp(-14 * deltaTime * correctionScale)
 				if typeof(visual.targetPosition) == "Vector3" then
 					position = position:Lerp(visual.targetPosition, positionAlpha)
 				end
@@ -2792,9 +2898,11 @@ function BombController:_handleProjectileSnapshot(payload)
 	end
 	local wasFrozen = visual.frozen == true
 	local frozen = payload.frozen == true
+	local timeScale = math.clamp(if typeof(payload.timeScale) == "number" then payload.timeScale else 1, 0.005, 1)
 	visual.burrowing = payload.burrowing == true
 	visual.frozen = frozen
 	visual.frozenUntil = if typeof(payload.frozenUntil) == "number" then payload.frozenUntil else nil
+	visual.targetTimeScale = timeScale
 	visual.targetPosition = payload.position
 	visual.targetVelocity = if frozen then Vector3.zero elseif typeof(payload.velocity) == "Vector3" then payload.velocity else Vector3.zero
 	if payload.attached == true then

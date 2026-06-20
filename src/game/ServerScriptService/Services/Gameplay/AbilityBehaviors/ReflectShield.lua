@@ -28,6 +28,7 @@ type ShieldRecord = {
 	activeEndsAt: number,
 	serial: number,
 	reflectedAt: { [string]: number },
+	deathConnection: RBXScriptConnection?,
 }
 
 local ReflectShield = {} :: AbilityTypes.ServerBehavior
@@ -168,12 +169,35 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
+local function isFiniteVector(value: any): boolean
+	return typeof(value) == "Vector3" and value.X == value.X and value.Y == value.Y and value.Z == value.Z
+end
+
+local function getRequestedPlacement(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): (Vector3?, Vector3?)
+	if typeof(payload) ~= "table" or not isFiniteVector(payload.floorPosition) then
+		return nil, nil
+	end
+
+	local floorPosition = payload.floorPosition
+	local maxDistance = math.max(tonumber(definition.placementDistance) or 8, 0) + 4
+	if (floorPosition - rootPart.Position).Magnitude > maxDistance then
+		return nil, nil
+	end
+
+	local facing = flattenDirection(if isFiniteVector(payload.facing) then payload.facing else rootPart.CFrame.LookVector)
+	return floorPosition, facing
+end
+
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
 	local distance = definition.placementDistance or 8
 	local rayUp = definition.floorRaycastUp or 8
 	local rayDown = definition.floorRaycastDown or 32
-	local facing = flattenDirection(rootPart.CFrame.LookVector)
-	local target = rootPart.Position + facing * distance
+	local requestedPosition, requestedFacing = getRequestedPlacement(player, rootPart, definition, payload)
+	if not requestedPosition then
+		return nil
+	end
+	local facing = requestedFacing or flattenDirection(rootPart.CFrame.LookVector)
+	local target = requestedPosition or (rootPart.Position + facing * distance)
 	local rayOrigin = target + Vector3.yAxis * rayUp
 	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
 	local hit = workspace:Raycast(rayOrigin, rayDirection)
@@ -268,13 +292,13 @@ local function isPlacementClear(boundsCFrame: CFrame, boundsSize: Vector3, floor
 	return true
 end
 
-local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance): (FloorPlacement?, CFrame?, Vector3?)
+local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance, payload: any): (FloorPlacement?, CFrame?, Vector3?)
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil, nil, nil
 	end
 
-	local floor = findFloor(player, rootPart, definition)
+	local floor = findFloor(player, rootPart, definition, payload)
 	if not floor then
 		return nil, nil, nil
 	end
@@ -336,6 +360,10 @@ local function expireShield(player: Player, shieldId: string)
 	end
 
 	local service = abilityService
+	if record.deathConnection then
+		record.deathConnection:Disconnect()
+		record.deathConnection = nil
+	end
 	if service then
 		service:FireEffect("ReflectShieldExpired", {
 			player = player,
@@ -457,8 +485,8 @@ function ReflectShield.OnActivate(context: ServerActivateContext): AbilityActiva
 		return false
 	end
 
-	local rootPart = getCharacterRoot(context.player)
-	if not rootPart then
+	local floor, boundsCFrame, boundsSize = validatePlacement(context.player, definition, template, context.payload)
+	if not (floor and boundsCFrame and boundsSize) then
 		return false
 	end
 
@@ -468,7 +496,7 @@ function ReflectShield.OnActivate(context: ServerActivateContext): AbilityActiva
 	shield:SetAttribute(ID_ATTR, shieldId)
 	shield:SetAttribute(OWNER_ATTR, context.player.UserId)
 	shield:SetAttribute("AbilityId", context.abilityId)
-	local boundsCFrame, boundsSize = alignCloneInFrontOfRoot(shield, rootPart, definition)
+	alignCloneToFloor(shield, floor.position, floor.facing)
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
 		shield:Destroy()
 		return false
@@ -488,6 +516,7 @@ function ReflectShield.OnActivate(context: ServerActivateContext): AbilityActiva
 		activeEndsAt = activeEndsAt,
 		serial = serial,
 		reflectedAt = {},
+		deathConnection = nil,
 	}
 
 	local records = ACTIVE_SHIELDS[context.player]
@@ -496,6 +525,14 @@ function ReflectShield.OnActivate(context: ServerActivateContext): AbilityActiva
 		ACTIVE_SHIELDS[context.player] = records
 	end
 	table.insert(records, record)
+
+	local character = context.player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		record.deathConnection = humanoid.Died:Connect(function()
+			expireShield(context.player, shieldId)
+		end)
+	end
 
 	task.delay(durationSeconds + 0.05, function()
 		local currentRecords = ACTIVE_SHIELDS[context.player]
@@ -540,6 +577,12 @@ function ReflectShield.OnProjectileStep(context: ServerHookContext): AbilityHook
 
 	local records = ACTIVE_SHIELDS[context.player]
 	if not records then
+		return AbilityResult.Continue()
+	end
+	if not getCharacterRoot(context.player) then
+		for index = #records, 1, -1 do
+			expireShield(context.player, records[index].id)
+		end
 		return AbilityResult.Continue()
 	end
 
@@ -607,6 +650,10 @@ function ReflectShield.OnPlayerRemoving(player: Player)
 	end
 
 	for _, record in ipairs(records) do
+		if record.deathConnection then
+			record.deathConnection:Disconnect()
+			record.deathConnection = nil
+		end
 		if record.shield.Parent then
 			record.shield:Destroy()
 		end

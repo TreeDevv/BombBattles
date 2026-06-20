@@ -77,6 +77,7 @@ Expected shape for discrete gameplay events:
 	source: string?,
 	bombId: string?,
 	bombType: string?,
+	finisherId: string?,
 	position: Vector3?,
 	innerRadius: number?,
 	outerRadius: number?,

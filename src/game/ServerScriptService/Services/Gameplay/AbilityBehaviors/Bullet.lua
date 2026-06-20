@@ -14,6 +14,9 @@ type ServerClientMessageContext = AbilityTypes.ServerClientMessageContext
 
 type ChargeRecord = {
 	startedAt: number,
+	slot: string,
+	abilityId: string,
+	character: Model,
 }
 
 local Bullet = {} :: AbilityTypes.ServerBehavior
@@ -111,10 +114,20 @@ local function getAimDirectionFromPayload(payload: any, fallbackDirection: Vecto
 	return sanitizeAimDirection(fallbackDirection, Vector3.zAxis)
 end
 
-local function getChargeAlpha(player: Player, definition: AbilityDefinition, currentTime: number): number
+local function getChargeAlpha(
+	player: Player,
+	definition: AbilityDefinition,
+	currentTime: number,
+	slot: string,
+	abilityId: string,
+	character: Model
+): number
 	local record = CHARGE_RECORDS[player]
 	CHARGE_RECORDS[player] = nil
 	if not record then
+		return 0
+	end
+	if record.slot ~= slot or record.abilityId ~= abilityId or record.character ~= character then
 		return 0
 	end
 
@@ -142,7 +155,10 @@ function Bullet.OnActivate(context: ServerActivateContext): AbilityActivationRes
 		return false
 	end
 
-	local chargeAlpha = getChargeAlpha(context.player, context.definition, context.now)
+	local character = rootPart:FindFirstAncestorOfClass("Model")
+	local chargeAlpha = if character
+		then getChargeAlpha(context.player, context.definition, context.now, context.slot, context.abilityId, character)
+		else 0
 	local launchSpeed = lerpNumber(
 		getDefinitionNumber(context.definition, "minLaunchSpeed", 150),
 		getDefinitionNumber(context.definition, "maxLaunchSpeed", 320),
@@ -221,10 +237,22 @@ function Bullet.OnClientMessage(context: ServerClientMessageContext)
 
 	local phase = payload.phase
 	if phase == "BeginCharge" then
-		if getCharacterRoot(context.player) then
+		if typeof(context.slotState.cooldownEndsAt) == "number" and context.slotState.cooldownEndsAt > context.now then
+			CHARGE_RECORDS[context.player] = nil
+			return
+		end
+
+		local rootPart = getCharacterRoot(context.player)
+		local character = rootPart and rootPart:FindFirstAncestorOfClass("Model")
+		if rootPart and character then
 			CHARGE_RECORDS[context.player] = {
 				startedAt = context.now,
+				slot = context.slot,
+				abilityId = context.abilityId,
+				character = character,
 			}
+		else
+			CHARGE_RECORDS[context.player] = nil
 		end
 	elseif phase == "CancelCharge" then
 		CHARGE_RECORDS[context.player] = nil

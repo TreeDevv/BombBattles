@@ -1,11 +1,15 @@
 local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RoundService = require(ServerScriptService.Services.RoundService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -19,12 +23,28 @@ type GrowthRecord = {
 	finalSize: Vector3,
 	finalCFrame: CFrame,
 }
+type DoorController = {
+	fort: Instance,
+	door: Model,
+	closedPivot: CFrame,
+	openPivot: CFrame,
+	desiredOpen: boolean,
+	active: boolean,
+	cleaned: boolean,
+	cframeValue: CFrameValue,
+	cframeConnection: RBXScriptConnection?,
+	tween: Tween?,
+	tweenConnection: RBXScriptConnection?,
+	destroyingConnection: RBXScriptConnection?,
+	closedCollision: { [BasePart]: boolean },
+}
 
 local EmergencyFort = {} :: AbilityTypes.ServerBehavior
 
 local FOLDER_NAME = "AbilityObjects"
 local FORT_FOLDER_NAME = "EmergencyFort"
 local OWNER_ATTR = "EmergencyFortOwnerUserId"
+local FADING_ATTR = "EmergencyFortFading"
 local ACTIVE_FORTS: { [Player]: { Instance } } = {}
 
 local UNSAFE_TAGS = {
@@ -67,6 +87,22 @@ local function getBaseParts(root: Instance): { BasePart }
 		if descendant:IsA("BasePart") then
 			table.insert(parts, descendant)
 		end
+	end
+	return parts
+end
+
+local function getDoorModel(fort: Instance): Model?
+	local door = fort:FindFirstChild("Door", true)
+	return if door and door:IsA("Model") then door else nil
+end
+
+local function getDestructibleParts(fort: Instance, door: Model?): { BasePart }
+	local parts = {}
+	for _, part in ipairs(getBaseParts(fort)) do
+		if door and part:IsDescendantOf(door) then
+			continue
+		end
+		table.insert(parts, part)
 	end
 	return parts
 end
@@ -199,14 +235,32 @@ local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing
 	return getBounds(clone)
 end
 
-local function overlapsUnsafeTagged(boundsCFrame: CFrame, boundsSize: Vector3): boolean
+local function isBlockingPlacementPart(part: BasePart): boolean
+	if hasUnsafeTaggedAncestor(part) then
+		return true
+	end
+
+	local model = part:FindFirstAncestorOfClass("Model")
+	if model and model:FindFirstChildOfClass("Humanoid") then
+		return true
+	end
+
+	return part.CanCollide and part.Transparency < 1
+end
+
+local function overlapsBlockingPlacement(boundsCFrame: CFrame, boundsSize: Vector3, player: Player): boolean
 	local params = OverlapParams.new()
 	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = {}
-	params.RespectCanCollide = false
+	params.FilterDescendantsInstances = if player.Character then { player.Character } else {}
+	params.RespectCanCollide = true
 
-	for _, part in ipairs(workspace:GetPartBoundsInBox(boundsCFrame, boundsSize, params)) do
-		if hasUnsafeTaggedAncestor(part) then
+	local overlapSize = Vector3.new(
+		math.max(boundsSize.X * 0.92, 0.1),
+		math.max(boundsSize.Y - 0.2, 0.1),
+		math.max(boundsSize.Z * 0.92, 0.1)
+	)
+	for _, part in ipairs(workspace:GetPartBoundsInBox(boundsCFrame + boundsCFrame.UpVector * 0.12, overlapSize, params)) do
+		if isBlockingPlacementPart(part) then
 			return true
 		end
 	end
@@ -214,8 +268,8 @@ local function overlapsUnsafeTagged(boundsCFrame: CFrame, boundsSize: Vector3): 
 end
 
 local function tagFort(fort: Instance)
-	CollectionService:AddTag(fort, DestructionConfig.Tag)
-	for _, part in ipairs(getBaseParts(fort)) do
+	local door = getDoorModel(fort)
+	for _, part in ipairs(getDestructibleParts(fort, door)) do
 		CollectionService:AddTag(part, DestructionConfig.Tag)
 	end
 end
@@ -234,7 +288,8 @@ end
 local function applyFortHealth(fort: Instance, definition: AbilityDefinition)
 	local fortHealth = math.max(tonumber(definition.fortHealth) or 300, 1)
 	fort:SetAttribute(DestructionConfig.TerrainHealthAttribute, fortHealth)
-	for _, part in ipairs(getBaseParts(fort)) do
+	local door = getDoorModel(fort)
+	for _, part in ipairs(getDestructibleParts(fort, door)) do
 		part:SetAttribute(DestructionConfig.TerrainHealthAttribute, fortHealth)
 	end
 end
@@ -246,6 +301,199 @@ local function tweenPart(part: BasePart, info: TweenInfo, goal)
 
 	local tween = TweenService:Create(part, info, goal)
 	tween:Play()
+end
+
+local function getDefinitionNumber(definition: AbilityDefinition, key: string, fallback: number, minimum: number?): number
+	local value = definition[key]
+	if typeof(value) ~= "number" or value ~= value then
+		value = fallback
+	end
+	if minimum ~= nil then
+		value = math.max(value, minimum)
+	end
+	return value
+end
+
+local function playDoorSound(door: Model, soundName: string?)
+	if typeof(soundName) ~= "string" or soundName == "" then
+		return
+	end
+
+	local sound = door:FindFirstChild(soundName, true)
+	if sound and sound:IsA("Sound") then
+		sound:Play()
+	end
+end
+
+local function setDoorCollision(controller: DoorController, canCollide: boolean)
+	for part, closedCanCollide in pairs(controller.closedCollision) do
+		if part.Parent then
+			part.CanCollide = if canCollide then closedCanCollide else false
+		end
+	end
+end
+
+local function cleanupDoorController(controller: DoorController)
+	if controller.cleaned then
+		return
+	end
+	controller.cleaned = true
+	controller.active = false
+
+	if controller.tween then
+		controller.tween:Cancel()
+		controller.tween = nil
+	end
+	if controller.tweenConnection then
+		controller.tweenConnection:Disconnect()
+		controller.tweenConnection = nil
+	end
+	if controller.cframeConnection then
+		controller.cframeConnection:Disconnect()
+		controller.cframeConnection = nil
+	end
+	if controller.destroyingConnection then
+		controller.destroyingConnection:Disconnect()
+		controller.destroyingConnection = nil
+	end
+	if controller.cframeValue.Parent then
+		controller.cframeValue:Destroy()
+	end
+end
+
+local function tweenDoor(controller: DoorController, definition: AbilityDefinition, open: boolean)
+	if controller.cleaned or not controller.active or not controller.door.Parent then
+		return
+	end
+	if controller.desiredOpen == open then
+		return
+	end
+
+	controller.desiredOpen = open
+	if controller.tween then
+		controller.tween:Cancel()
+		controller.tween = nil
+	end
+	if controller.tweenConnection then
+		controller.tweenConnection:Disconnect()
+		controller.tweenConnection = nil
+	end
+
+	setDoorCollision(controller, false)
+	playDoorSound(
+		controller.door,
+		if open then definition.doorOpenSoundName else definition.doorCloseSoundName
+	)
+
+	controller.cframeValue.Value = controller.door:GetPivot()
+	local tweenInfo = TweenInfo.new(
+		getDefinitionNumber(definition, "doorTweenSeconds", 0.22, 0.03),
+		Enum.EasingStyle.Quad,
+		if open then Enum.EasingDirection.Out else Enum.EasingDirection.In
+	)
+	local targetPivot = if open then controller.openPivot else controller.closedPivot
+	local tween = TweenService:Create(controller.cframeValue, tweenInfo, { Value = targetPivot })
+	controller.tween = tween
+	controller.tweenConnection = tween.Completed:Connect(function()
+		if controller.tween == tween then
+			controller.tween = nil
+		end
+		if not controller.desiredOpen and not controller.cleaned then
+			setDoorCollision(controller, true)
+		end
+	end)
+	tween:Play()
+end
+
+local function isLivePlayerPart(part: BasePart): boolean
+	local character = part:FindFirstAncestorOfClass("Model")
+	if not character then
+		return false
+	end
+
+	local player = Players:GetPlayerFromCharacter(character)
+	if not player then
+		return false
+	end
+
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return humanoid ~= nil and humanoid.Health > 0 and CombatEligibility.IsCombatActive(player, RoundService)
+end
+
+local function shouldOpenDoor(controller: DoorController, radius: number): boolean
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { controller.fort }
+	params.RespectCanCollide = false
+
+	for _, part in ipairs(workspace:GetPartBoundsInRadius(controller.closedPivot.Position, radius, params)) do
+		if part:IsA("BasePart") and isLivePlayerPart(part) then
+			return true
+		end
+	end
+	return false
+end
+
+local function startDoorController(fort: Instance, definition: AbilityDefinition)
+	local door = getDoorModel(fort)
+	if not door then
+		return
+	end
+
+	local doorParts = getBaseParts(door)
+	if #doorParts == 0 then
+		return
+	end
+
+	local closedCollision = {}
+	for _, part in ipairs(doorParts) do
+		part.Anchored = true
+		closedCollision[part] = part.CanCollide
+	end
+
+	local _, doorSize = door:GetBoundingBox()
+	local closedPivot = door:GetPivot()
+	local openOffset = getDefinitionNumber(definition, "doorOpenOffset", math.max(doorSize.Y, 1), 0)
+	local cframeValue = Instance.new("CFrameValue")
+	cframeValue.Name = "EmergencyFortDoorTweenCFrame"
+	cframeValue.Value = closedPivot
+	cframeValue.Parent = door
+
+	local controller: DoorController = {
+		fort = fort,
+		door = door,
+		closedPivot = closedPivot,
+		openPivot = closedPivot + Vector3.yAxis * openOffset,
+		desiredOpen = false,
+		active = true,
+		cleaned = false,
+		cframeValue = cframeValue,
+		cframeConnection = nil,
+		tween = nil,
+		tweenConnection = nil,
+		destroyingConnection = nil,
+		closedCollision = closedCollision,
+	}
+
+	controller.cframeConnection = cframeValue:GetPropertyChangedSignal("Value"):Connect(function()
+		if controller.active and door.Parent then
+			door:PivotTo(cframeValue.Value)
+		end
+	end)
+	controller.destroyingConnection = fort.Destroying:Connect(function()
+		cleanupDoorController(controller)
+	end)
+
+	local radius = getDefinitionNumber(definition, "doorTriggerRadius", 8, 1)
+	local checkSeconds = getDefinitionNumber(definition, "doorCheckSeconds", 0.12, 0.05)
+
+	task.spawn(function()
+		while controller.active and fort.Parent and door.Parent do
+			tweenDoor(controller, definition, shouldOpenDoor(controller, radius))
+			task.wait(checkSeconds)
+		end
+		cleanupDoorController(controller)
+	end)
 end
 
 local function bounceFort(records: { GrowthRecord }, definition: AbilityDefinition)
@@ -276,6 +524,10 @@ local function fadeAndDestroy(fort: Instance, definition: AbilityDefinition)
 	if not fort.Parent then
 		return
 	end
+	if fort:GetAttribute(FADING_ATTR) == true then
+		return
+	end
+	fort:SetAttribute(FADING_ATTR, true)
 
 	untagFort(fort)
 	local fadeInfo = TweenInfo.new(definition.fadeSeconds or 0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -292,6 +544,79 @@ local function fadeAndDestroy(fort: Instance, definition: AbilityDefinition)
 			fort:Destroy()
 		end
 	end)
+end
+
+local function clearExistingForts(player: Player, definition: AbilityDefinition)
+	local forts = ACTIVE_FORTS[player]
+	if not forts then
+		return
+	end
+
+	for index = #forts, 1, -1 do
+		local fort = forts[index]
+		table.remove(forts, index)
+		if fort.Parent then
+			fadeAndDestroy(fort, definition)
+		end
+	end
+
+	if #forts == 0 then
+		ACTIVE_FORTS[player] = nil
+	end
+end
+
+local function startShellCleanupWatcher(fort: Instance, definition: AbilityDefinition)
+	local door = getDoorModel(fort)
+	local shellParts = getDestructibleParts(fort, door)
+	if #shellParts == 0 then
+		return
+	end
+
+	local connections = {}
+	local checkQueued = false
+
+	local function disconnectAll()
+		for _, connection in ipairs(connections) do
+			connection:Disconnect()
+		end
+		table.clear(connections)
+	end
+
+	local function shellPartCount(): number
+		local count = 0
+		for _, part in ipairs(shellParts) do
+			if part.Parent and part:IsDescendantOf(fort) then
+				count += 1
+			end
+		end
+		return count
+	end
+
+	local function queueCheck()
+		if checkQueued then
+			return
+		end
+		checkQueued = true
+		task.defer(function()
+			checkQueued = false
+			if not fort.Parent then
+				disconnectAll()
+				return
+			end
+			if shellPartCount() > 0 then
+				return
+			end
+
+			disconnectAll()
+			fadeAndDestroy(fort, definition)
+		end)
+	end
+
+	table.insert(connections, fort.Destroying:Connect(disconnectAll))
+	for _, part in ipairs(shellParts) do
+		table.insert(connections, part.AncestryChanged:Connect(queueCheck))
+		table.insert(connections, part.Destroying:Connect(queueCheck))
+	end
 end
 
 local function prepareGrowth(fort: Instance, definition: AbilityDefinition): { GrowthRecord }
@@ -369,7 +694,7 @@ function EmergencyFort.OnActivate(context: ServerActivateContext): AbilityActiva
 	local definition = context.definition
 	local template = getTemplate(definition)
 	if not template then
-		warn("[EmergencyFort] Missing ReplicatedStorage.Assets.Abilities.EmergencyFort.Emergency Fort")
+		warn("[EmergencyFort] Missing ReplicatedStorage.Assets.Abilities.EmergencyFort.EmergencyFort")
 		return false
 	end
 
@@ -389,17 +714,29 @@ function EmergencyFort.OnActivate(context: ServerActivateContext): AbilityActiva
 	fort:SetAttribute("AbilityId", context.abilityId)
 	local boundsCFrame, boundsSize = alignCloneToFloor(fort, placement.position, placement.facing)
 
-	if overlapsUnsafeTagged(boundsCFrame, boundsSize) then
+	if overlapsBlockingPlacement(boundsCFrame, boundsSize, context.player) then
 		fort:Destroy()
 		return false
 	end
+
+	clearExistingForts(context.player, definition)
 
 	local records = prepareGrowth(fort, definition)
 	applyFortHealth(fort, definition)
 	tagFort(fort)
 	fort.Parent = getFortFolder(context.player)
 	trackFort(context.player, fort)
+	startShellCleanupWatcher(fort, definition)
 	growFort(records, definition)
+
+	local doorStartDelay = getDefinitionNumber(definition, "growthSeconds", 0.16, 0)
+		+ getDefinitionNumber(definition, "bounceOutSeconds", 0.08, 0)
+		+ 0.03
+	task.delay(doorStartDelay, function()
+		if fort.Parent then
+			startDoorController(fort, definition)
+		end
+	end)
 
 	task.delay(definition.lifetimeSeconds or 12, function()
 		fadeAndDestroy(fort, definition)

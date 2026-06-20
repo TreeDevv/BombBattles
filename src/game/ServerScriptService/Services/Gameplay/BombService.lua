@@ -59,6 +59,10 @@ type ProjectileState = {
 	position: Vector3,
 	lastPosition: Vector3,
 	landed: boolean,
+	sweepRadius: number,
+	visualScale: number,
+	visuals: { [string]: any }?,
+	explosionOverride: { [string]: any }?,
 	physicalProjectile: Instance?,
 	physicalRoot: BasePart?,
 	nextSnapshotAt: number,
@@ -642,6 +646,8 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 		local hookResult = AbilityService:RunHook("OnBeforePlayerBombDamage", {
 			owner = owner,
 			target = player,
+			sourceId = sourceId,
+			projectileId = sourceId,
 			character = character,
 			humanoid = humanoid,
 			rootPart = rootPart,
@@ -1089,15 +1095,16 @@ local function getSurfaceNormal(owner: Player, position: Vector3): Vector3
 	return Vector3.yAxis
 end
 
-local function sweepProjectile(owner: Player, fromPosition: Vector3, toPosition: Vector3): RaycastResult?
+local function sweepProjectile(owner: Player, fromPosition: Vector3, toPosition: Vector3, radius: number?): RaycastResult?
 	local direction = toPosition - fromPosition
 	if direction.Magnitude <= 0.001 then
 		return nil
 	end
 
 	local params = createSweepParams(owner)
+	local sweepRadius = math.max(tonumber(radius) or BombConfig.SweepRadius, 0.05)
 	local spherecastOk, spherecastResult = pcall(function()
-		return workspace:Spherecast(fromPosition, BombConfig.SweepRadius, direction, params)
+		return workspace:Spherecast(fromPosition, sweepRadius, direction, params)
 	end)
 	if spherecastOk then
 		return spherecastResult
@@ -1285,6 +1292,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		BombProjectileService:Launch({
 			owner = player,
 			projectileId = projectileId,
+			sourceType = "Bomb",
 			bombType = BombProjectileConfig.BombType.Normal,
 			skinId = skinId,
 			origin = origin,
@@ -1301,6 +1309,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 	local trajectory = calculateTrajectory(origin, aimDirection)
 	local launchResult = AbilityService:RunHook("OnBeforeProjectileLaunch", {
 		owner = player,
+		sourceType = "Bomb",
 		origin = origin,
 		aimDirection = aimDirection,
 		trajectory = trajectory,
@@ -1311,9 +1320,30 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		RuntimeProfiler.End("Server/BombService/ThrowBomb", token)
 		return
 	end
+	if typeof(launchResult.origin) == "Vector3" then
+		origin = launchResult.origin
+	end
+	if typeof(launchResult.aimDirection) == "Vector3" then
+		aimDirection = launchResult.aimDirection
+	end
+	if typeof(launchResult.remainingFuse) == "number" then
+		remainingFuse = readPositiveNumber(launchResult.remainingFuse, remainingFuse)
+	end
+	if typeof(launchResult.origin) == "Vector3" or typeof(launchResult.aimDirection) == "Vector3" then
+		trajectory = calculateTrajectory(origin, aimDirection)
+	end
 	local projectileId = getClientProjectileId(player, targetPayload) or createProjectileId(player)
 	local launchTime = now()
 	local explodeAt = launchTime + remainingFuse
+	local visuals = if typeof(launchResult.visuals) == "table" then launchResult.visuals else nil
+	local physics = if typeof(launchResult.physics) == "table" then launchResult.physics else nil
+	local explosionOverride = if typeof(launchResult.explosion) == "table" then launchResult.explosion else nil
+	local visualScale = if visuals and typeof(visuals.visualScale) == "number"
+		then math.max(visuals.visualScale, 0.05)
+		else BombConfig.ProjectileVisualScale
+	local sweepRadius = if physics and typeof(physics.radius) == "number"
+		then math.max(physics.radius, 0.05)
+		else BombConfig.SweepRadius
 	local state: ProjectileState = {
 		id = projectileId,
 		owner = player,
@@ -1325,6 +1355,10 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		position = origin,
 		lastPosition = origin,
 		landed = false,
+		sweepRadius = sweepRadius,
+		visualScale = visualScale,
+		visuals = visuals,
+		explosionOverride = explosionOverride,
 		physicalProjectile = nil,
 		physicalRoot = nil,
 		nextSnapshotAt = launchTime,
@@ -1347,6 +1381,8 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		startedAt = launchTime,
 		fuseStartedAt = startedAt,
 		remainingFuse = remainingFuse,
+		visuals = visuals,
+		visualScale = visualScale,
 	})
 	recordReplayEvent("BombThrown", {
 		bombId = projectileId,
@@ -1411,6 +1447,8 @@ local function redirectProjectile(state: ProjectileState, result, currentTime: n
 		startedAt = currentTime,
 		fuseStartedAt = state.fuseStartedAt,
 		remainingFuse = remainingFuse,
+		visuals = state.visuals,
+		visualScale = state.visualScale,
 	})
 
 	return true
@@ -1484,8 +1522,9 @@ local function fireProjectileSnapshot(state: ProjectileState, currentTime: numbe
 		remainingFuse = math.max(state.explodeAt - currentTime, 0),
 		settled = state.landed,
 		grounded = state.landed,
-		radius = BombConfig.SweepRadius,
-		visualScale = BombConfig.ProjectileVisualScale,
+		radius = state.sweepRadius,
+		visuals = state.visuals,
+		visualScale = state.visualScale,
 		frozen = state.frozenUntil ~= nil and currentTime < state.frozenUntil,
 		frozenUntil = state.frozenUntil,
 		frozenBy = state.frozenBy,
@@ -1639,14 +1678,29 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 			currentTime = currentTime,
 			explodeAt = state.explodeAt,
 			remainingFuse = math.max(state.explodeAt - currentTime, 0),
-			sweepRadius = BombConfig.SweepRadius,
+			sweepRadius = state.sweepRadius,
 			deltaTime = deltaTime,
 			attached = false,
 		})
-		if stepResult.kind == RESULT_KIND.DestroyProjectile then
+		if stepResult.kind == RESULT_KIND.DestroyProjectile or stepResult.kind == RESULT_KIND.Absorb then
 			destroyPhysicalProjectile(state)
 			activeProjectiles[projectileId] = nil
 			continue
+		end
+		if stepResult.kind == RESULT_KIND.ModifyProjectileTimeScale then
+			local timeScale = math.clamp(tonumber(stepResult.timeScale) or 1, 0, 1)
+			if timeScale < 1 then
+				state.explodeAt += deltaTime * (1 - timeScale)
+				if state.landed then
+					if state.physicalRoot then
+						state.physicalRoot.AssemblyLinearVelocity *= timeScale
+					end
+				else
+					nextPosition = state.position:Lerp(nextPosition, timeScale)
+					currentVelocity *= timeScale
+				end
+				expired = currentTime >= state.explodeAt
+			end
 		end
 		if stepResult.kind == RESULT_KIND.DeferProjectile and typeof(stepResult.deferSeconds) == "number" then
 			state.explodeAt += math.clamp(stepResult.deferSeconds, 0, BombConfig.FuseSeconds)
@@ -1675,7 +1729,7 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 				state.lastPosition = state.position
 			end
 
-			explode(state.owner, state.position, "Projectile", projectileId, state.skinId)
+			explode(state.owner, state.position, "Projectile", projectileId, state.skinId, state.explosionOverride)
 			continue
 		end
 		if state.landed then
@@ -1685,7 +1739,7 @@ local function updateProjectileStates(currentTime: number, deltaTime: number)
 			continue
 		end
 
-		local hit = sweepProjectile(state.owner, state.lastPosition, nextPosition)
+		local hit = sweepProjectile(state.owner, state.lastPosition, nextPosition, state.sweepRadius)
 		if hit then
 			fireProjectileImpact(state, hit.Position, hit.Normal, currentVelocity)
 		elseif alpha >= 1 then
@@ -1971,6 +2025,10 @@ function BombService:LaunchStudioAIBomb(request): boolean
 		position = origin,
 		lastPosition = origin,
 		landed = false,
+		sweepRadius = BombConfig.SweepRadius,
+		visualScale = BombConfig.ProjectileVisualScale,
+		visuals = nil,
+		explosionOverride = nil,
 		physicalProjectile = nil,
 		physicalRoot = nil,
 		nextSnapshotAt = currentTime,

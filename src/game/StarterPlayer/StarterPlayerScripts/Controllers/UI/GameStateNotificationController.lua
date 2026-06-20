@@ -89,6 +89,7 @@ function GameStateNotificationController:_showOnce(roundId: number, key: string,
 	Notify.Show(text, {
 		color = color,
 		duration = duration or DEFAULT_DURATION,
+		mergeKey = eventKey,
 	})
 end
 

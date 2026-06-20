@@ -29,6 +29,11 @@ type FlareRecord = {
 }
 
 local FatBomb = {} :: AbilityTypes.ServerBehavior
+FatBomb.AlwaysRunHooks = table.freeze({
+	OnBeforeExplosion = true,
+	OnBeforeProjectileImpact = true,
+	OnProjectileDestroyed = true,
+})
 
 local EFFECT_FLARE_LANDED = "FatBombFlareLanded"
 local EFFECT_IMPACT = "FatBombImpact"
@@ -402,6 +407,48 @@ function FatBomb.OnBeforeProjectileImpact(context: ServerHookContext): AbilityHo
 			else nil,
 		targetKind = "FatBombFlare",
 	}
+end
+
+function FatBomb.OnBeforeExplosion(context: ServerHookContext): AbilityHookResult
+	local payload = context.context
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
+		return AbilityResult.Continue()
+	end
+
+	local record = activeFlares[payload.projectileId]
+	if not record or record.player ~= payload.owner then
+		return AbilityResult.Continue()
+	end
+	if record.impactStarted then
+		activeFlares[payload.projectileId] = nil
+		return AbilityResult.Continue()
+	end
+
+	if not record.landed then
+		local position = if typeof(payload.position) == "Vector3" then payload.position else nil
+		if position then
+			activateFlare(record, position, Vector3.yAxis, context.now)
+		else
+			activeFlares[payload.projectileId] = nil
+		end
+	end
+
+	return {
+		kind = AbilityResult.Kind.Block,
+	}
+end
+
+function FatBomb.OnProjectileDestroyed(context: ServerHookContext): AbilityHookResult
+	local payload = context.context
+	if typeof(payload) ~= "table" or typeof(payload.projectileId) ~= "string" then
+		return AbilityResult.Continue()
+	end
+
+	local record = activeFlares[payload.projectileId]
+	if record and not record.impactStarted then
+		activeFlares[payload.projectileId] = nil
+	end
+	return AbilityResult.Continue()
 end
 
 function FatBomb.OnPlayerRemoving(player: Player)

@@ -33,6 +33,11 @@ type KnockbackGroupRecord = {
 }
 
 local Cluster = {} :: AbilityTypes.ServerBehavior
+Cluster.AlwaysRunHooks = table.freeze({
+	OnBeforeExplosion = true,
+	OnBeforeOwnerBombKnockback = true,
+	OnBeforePlayerBombDamage = true,
+})
 
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5

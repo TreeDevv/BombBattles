@@ -167,12 +167,35 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
+local function isFiniteVector(value: any): boolean
+	return typeof(value) == "Vector3" and value.X == value.X and value.Y == value.Y and value.Z == value.Z
+end
+
+local function getRequestedPlacement(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): (Vector3?, Vector3?)
+	if typeof(payload) ~= "table" or not isFiniteVector(payload.floorPosition) then
+		return nil, nil
+	end
+
+	local floorPosition = payload.floorPosition
+	local maxDistance = math.max(tonumber(definition.placementDistance) or 8, 0) + 4
+	if (floorPosition - rootPart.Position).Magnitude > maxDistance then
+		return nil, nil
+	end
+
+	local facing = flattenDirection(if isFiniteVector(payload.facing) then payload.facing else rootPart.CFrame.LookVector)
+	return floorPosition, facing
+end
+
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
 	local distance = definition.placementDistance or 8
 	local rayUp = definition.floorRaycastUp or 8
 	local rayDown = definition.floorRaycastDown or 32
-	local facing = flattenDirection(rootPart.CFrame.LookVector)
-	local target = rootPart.Position + facing * distance
+	local requestedPosition, requestedFacing = getRequestedPlacement(player, rootPart, definition, payload)
+	if not requestedPosition then
+		return nil
+	end
+	local facing = requestedFacing or flattenDirection(rootPart.CFrame.LookVector)
+	local target = requestedPosition or (rootPart.Position + facing * distance)
 	local rayOrigin = target + Vector3.yAxis * rayUp
 	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
 	local hit = workspace:Raycast(rayOrigin, rayDirection)
@@ -221,13 +244,13 @@ local function alignCloneToRootPosition(clone: Instance, rootPart: BasePart): (C
 	return getBounds(clone)
 end
 
-local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance): (FloorPlacement?, CFrame?, Vector3?)
+local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance, payload: any): (FloorPlacement?, CFrame?, Vector3?)
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil, nil, nil
 	end
 
-	local floor = findFloor(player, rootPart, definition)
+	local floor = findFloor(player, rootPart, definition, payload)
 	if not floor then
 		return nil, nil, nil
 	end
@@ -365,8 +388,8 @@ function GravityField.OnActivate(context: ServerActivateContext): AbilityActivat
 		return false
 	end
 
-	local rootPart = getCharacterRoot(context.player)
-	if not rootPart then
+	local floor, boundsCFrame, boundsSize = validatePlacement(context.player, definition, template, context.payload)
+	if not (floor and boundsCFrame and boundsSize) then
 		return false
 	end
 
@@ -376,7 +399,7 @@ function GravityField.OnActivate(context: ServerActivateContext): AbilityActivat
 	field:SetAttribute(ID_ATTR, fieldId)
 	field:SetAttribute(OWNER_ATTR, context.player.UserId)
 	field:SetAttribute("AbilityId", context.abilityId)
-	local boundsCFrame, boundsSize = alignCloneToRootPosition(field, rootPart)
+	alignCloneToFloor(field, floor.position, floor.facing)
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
 		field:Destroy()
 		return false

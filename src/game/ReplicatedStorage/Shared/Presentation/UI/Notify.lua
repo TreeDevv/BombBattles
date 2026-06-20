@@ -1,36 +1,101 @@
+local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local StarterGui = game:GetService("StarterGui")
+local TweenService = game:GetService("TweenService")
 
 local REMOTES_FOLDER_NAME = "Remotes"
 local REMOTE_NAME = "Notify"
-local MIN_DURATION = 0.5
-local MAX_DURATION = 12
-local RENDERER_WAIT_SECONDS = 6
+local PLAYER_GUI_WAIT_SECONDS = 15
+local GUI_NAME = "ToastNotifications"
+local CONTAINER_NAME = "ToastContainer"
+local TOAST_HEIGHT = 34
+local TOAST_GAP = 4
+local FALLBACK_TOP_PADDING = 96
+local TOP_HUD_MARGIN = 10
+local SIDE_PADDING = 32
+local MAX_CONTAINER_WIDTH = 620
+local ENTRY_OFFSET = 12
+local EXIT_OFFSET = 16
+local SHAKE_OFFSET = 5
+local EXIT_FALLBACK_PADDING = 0.08
+local DEFAULT_DURATION = 2.25
+local DEFAULT_MAX_VISIBLE = 3
+local MIN_DURATION = 0.75
+local MAX_DURATION = 8
 
-local COLOR_NAMES = {
-	Blue = Color3.fromRGB(75, 160, 255),
-	Gold = Color3.fromRGB(255, 196, 64),
+local DEFAULT_COLORS = {
+	Info = Color3.fromRGB(255, 255, 255),
+	Success = Color3.fromRGB(85, 255, 110),
+	Reward = Color3.fromRGB(255, 226, 64),
+	Warning = Color3.fromRGB(255, 184, 46),
+	Error = Color3.fromRGB(255, 76, 76),
+}
+
+local COLOR_ALIASES = {
+	Blue = Color3.fromRGB(125, 196, 255),
+	Gold = DEFAULT_COLORS.Reward,
 	Gray = Color3.fromRGB(170, 180, 190),
-	Green = Color3.fromRGB(80, 220, 120),
+	Green = DEFAULT_COLORS.Success,
 	Neutral = Color3.fromRGB(235, 240, 245),
-	Orange = Color3.fromRGB(255, 150, 70),
-	Purple = Color3.fromRGB(170, 115, 255),
-	Red = Color3.fromRGB(255, 90, 90),
-	White = Color3.fromRGB(255, 255, 255),
-	Yellow = Color3.fromRGB(255, 230, 90),
+	Orange = DEFAULT_COLORS.Warning,
+	Purple = Color3.fromRGB(204, 150, 255),
+	Red = DEFAULT_COLORS.Error,
+	White = DEFAULT_COLORS.Info,
+	Yellow = DEFAULT_COLORS.Reward,
+}
+
+local ANIMATION = {
+	Enter = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	Settle = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	Layout = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	Exit = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
+	Shake = TweenInfo.new(0.04, Enum.EasingStyle.Linear, Enum.EasingDirection.Out),
+}
+
+type NotifyPayload = {
+	Type: string,
+	Title: string,
+	Body: string,
+	Duration: number,
+	TextColor: Color3,
+	MergeKey: string,
+}
+
+type ToastRecord = {
+	id: number,
+	key: string,
+	payload: NotifyPayload,
+	count: number,
+	state: string,
+	timerToken: number,
+	expiresAt: number,
+	slotY: number?,
+	toast: Frame?,
+	background: Frame?,
+	scale: UIScale?,
+	textLabel: TextLabel?,
+	shadowLabel: TextLabel?,
+	layoutTween: Tween?,
+	finalized: boolean?,
 }
 
 local Notify = {}
 
 Notify.Defaults = {
 	title = "Notice",
-	duration = 4,
+	duration = DEFAULT_DURATION,
+	maxVisible = DEFAULT_MAX_VISIBLE,
 }
 
-local clientRenderer = nil :: ((payload: { [string]: any }) -> boolean?)?
-local pendingPayloads = {} :: { { [string]: any } }
-local rendererSerial = 0
+local screenGui: ScreenGui? = nil
+local container: Frame? = nil
+local containerUpdateConnection: RBXScriptConnection? = nil
+local expiryConnection: RBXScriptConnection? = nil
+local visibleToasts = {} :: { ToastRecord }
+local queuedToasts = {} :: { ToastRecord }
+local visibleByKey = {} :: { [string]: ToastRecord }
+local queuedByKey = {} :: { [string]: ToastRecord }
+local nextToastId = 0
 
 local function ensureRemote(): RemoteEvent
 	local remotesFolder = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
@@ -59,121 +124,686 @@ local function ensureRemote(): RemoteEvent
 		return remote
 	end
 
-	local safeRemotes = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME)
-	return safeRemotes:WaitForChild(REMOTE_NAME) :: RemoteEvent
+	while true do
+		local safeRemotes = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
+		if safeRemotes and safeRemotes:IsA("Folder") then
+			local remote = safeRemotes:FindFirstChild(REMOTE_NAME)
+			if remote and remote:IsA("RemoteEvent") then
+				return remote
+			end
+		end
+
+		task.wait(0.25)
+	end
 end
 
-local function normalizeDuration(value: any): number
-	local duration = tonumber(value) or Notify.Defaults.duration
-	return math.clamp(duration, MIN_DURATION, MAX_DURATION)
-end
+local function readOption(payload: any, opts: any, pascalName: string, camelName: string, legacyName: string?)
+	if typeof(payload) == "table" then
+		local value = payload[pascalName]
+		if value ~= nil then
+			return value
+		end
 
-local function normalizeColor(value: any): Color3?
-	if typeof(value) == "Color3" then
-		return value
+		value = payload[camelName]
+		if value ~= nil then
+			return value
+		end
+
+		if legacyName then
+			value = payload[legacyName]
+			if value ~= nil then
+				return value
+			end
+		end
 	end
 
-	if typeof(value) ~= "string" then
+	if typeof(opts) == "table" then
+		local value = opts[pascalName]
+		if value ~= nil then
+			return value
+		end
+
+		value = opts[camelName]
+		if value ~= nil then
+			return value
+		end
+
+		if legacyName then
+			value = opts[legacyName]
+			if value ~= nil then
+				return value
+			end
+		end
+	end
+
+	return nil
+end
+
+local function parseHexColor(value: string): Color3?
+	local hex = value:gsub("#", "")
+	if #hex ~= 6 or not hex:match("^[%da-fA-F]+$") then
 		return nil
 	end
 
-	local key = value:gsub("^%l", string.upper)
-	return COLOR_NAMES[key]
+	return Color3.fromRGB(
+		tonumber(hex:sub(1, 2), 16) or 255,
+		tonumber(hex:sub(3, 4), 16) or 255,
+		tonumber(hex:sub(5, 6), 16) or 255
+	)
 end
 
-local function normalizePayload(text: any, opts)
+local function resolveTextColor(notificationType: string, colorOption: any): Color3
+	if typeof(colorOption) == "Color3" then
+		return colorOption
+	end
+
+	if typeof(colorOption) == "string" then
+		local alias = COLOR_ALIASES[colorOption]
+		if alias then
+			return alias
+		end
+
+		local hex = parseHexColor(colorOption)
+		if hex then
+			return hex
+		end
+	end
+
+	return DEFAULT_COLORS[notificationType] or DEFAULT_COLORS.Info
+end
+
+local function normalizePayload(text: any, opts: any): NotifyPayload
 	opts = opts or {}
+	local source = if typeof(text) == "table" then text else nil
+	local notificationType = tostring(readOption(source, opts, "Type", "type") or "Info")
+	local title = readOption(source, opts, "Title", "title")
+	local body = readOption(source, opts, "Body", "body", "text")
+	local duration = tonumber(readOption(source, opts, "Duration", "duration"))
+	local color = readOption(source, opts, "TextColor", "textColor", "color")
+	local mergeKey = readOption(source, opts, "MergeKey", "mergeKey")
+
+	if body == nil and source then
+		body = source.Text or source.text
+	end
+	if body == nil then
+		body = text
+	end
+
+	title = tostring(title or Notify.Defaults.title)
+	body = tostring(body or "")
+	duration = math.clamp(duration or Notify.Defaults.duration or DEFAULT_DURATION, MIN_DURATION, MAX_DURATION)
+
 	return {
-		title = tostring(opts.title or Notify.Defaults.title),
-		text = tostring(text),
-		duration = normalizeDuration(opts.duration),
-		color = normalizeColor(opts.color),
+		Type = notificationType,
+		Title = title,
+		Body = body,
+		Duration = duration,
+		TextColor = resolveTextColor(notificationType, color),
+		MergeKey = tostring(mergeKey or string.format("%s|%s|%s", notificationType, title, body)),
 	}
 end
 
-local function showCorePayload(payload)
-	return pcall(function()
-		StarterGui:SetCore("SendNotification", {
-			Title = payload.title,
-			Text = payload.text,
-			Duration = payload.duration,
-		})
-	end)
+local function getTopHudBottom(playerGui: PlayerGui): number?
+	local hud = playerGui:FindFirstChild("HUD")
+	if not hud then
+		return nil
+	end
+
+	local bestBottom = nil
+	for _, descendant in ipairs(hud:GetDescendants()) do
+		if descendant:IsA("GuiObject") and descendant.Visible then
+			local size = descendant.AbsoluteSize
+			if size.X > 0 and size.Y > 0 then
+				local bottom = descendant.AbsolutePosition.Y + size.Y
+				if bottom <= FALLBACK_TOP_PADDING + 48 and (not bestBottom or bottom > bestBottom) then
+					bestBottom = bottom
+				end
+			end
+		end
+	end
+
+	return bestBottom
 end
 
-local function flushPendingPayloads()
-	if not clientRenderer then
+local function updateContainerPosition(playerGui: PlayerGui)
+	if not container then
 		return
 	end
 
-	local pending = pendingPayloads
-	pendingPayloads = {}
-	for _, payload in ipairs(pending) do
-		local ok, handled = pcall(clientRenderer, payload)
-		if not ok or handled == false then
-			showCorePayload(payload)
-		end
-	end
+	local topPadding = (getTopHudBottom(playerGui) or FALLBACK_TOP_PADDING) + TOP_HUD_MARGIN
+	container.Position = UDim2.new(0.5, 0, 0, topPadding)
 end
 
-local function dispatchClientPayload(payload)
-	if clientRenderer then
-		local ok, handled = pcall(clientRenderer, payload)
-		if ok and handled ~= false then
-			return true
-		end
-
-		if not ok then
-			warn("[Notify] Custom notification renderer failed: " .. tostring(handled))
-		end
-		return showCorePayload(payload)
+local function bindContainerPositionUpdates(playerGui: PlayerGui)
+	updateContainerPosition(playerGui)
+	if containerUpdateConnection then
+		containerUpdateConnection:Disconnect()
 	end
 
-	table.insert(pendingPayloads, payload)
-	rendererSerial += 1
-	local serial = rendererSerial
-	task.delay(RENDERER_WAIT_SECONDS, function()
-		if clientRenderer or serial ~= rendererSerial then
+	containerUpdateConnection = RunService.RenderStepped:Connect(function()
+		if not (container and container.Parent) then
+			if containerUpdateConnection then
+				containerUpdateConnection:Disconnect()
+				containerUpdateConnection = nil
+			end
 			return
 		end
 
-		local pending = pendingPayloads
-		pendingPayloads = {}
-		for _, pendingPayload in ipairs(pending) do
-			showCorePayload(pendingPayload)
+		updateContainerPosition(playerGui)
+	end)
+end
+
+local function ensureGui(): Frame?
+	if not RunService:IsClient() then
+		return nil
+	end
+
+	if container and container.Parent then
+		return container
+	end
+
+	local localPlayer = Players.LocalPlayer
+	if not localPlayer then
+		return nil
+	end
+
+	local playerGui = localPlayer:WaitForChild("PlayerGui", PLAYER_GUI_WAIT_SECONDS)
+	if not playerGui then
+		warn("[Notify] PlayerGui was not ready; notification was skipped.")
+		return nil
+	end
+
+	local existingGui = playerGui:FindFirstChild(GUI_NAME)
+	if existingGui and existingGui:IsA("ScreenGui") then
+		screenGui = existingGui
+	else
+		if existingGui then
+			existingGui:Destroy()
+		end
+
+		screenGui = Instance.new("ScreenGui")
+		screenGui.Name = GUI_NAME
+		screenGui.ResetOnSpawn = false
+		screenGui.IgnoreGuiInset = false
+		screenGui.DisplayOrder = 10000
+		screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		screenGui.Parent = playerGui
+	end
+
+	local existingContainer = screenGui:FindFirstChild(CONTAINER_NAME)
+	if existingContainer and existingContainer:IsA("Frame") then
+		container = existingContainer
+		bindContainerPositionUpdates(playerGui)
+		return container
+	end
+
+	if existingContainer then
+		existingContainer:Destroy()
+	end
+
+	container = Instance.new("Frame")
+	container.Name = CONTAINER_NAME
+	container.AnchorPoint = Vector2.new(0.5, 0)
+	container.BackgroundTransparency = 1
+	container.Position = UDim2.new(0.5, 0, 0, FALLBACK_TOP_PADDING)
+	container.Size = UDim2.new(1, -SIDE_PADDING, 0, 160)
+	container.Parent = screenGui
+
+	local sizeConstraint = Instance.new("UISizeConstraint")
+	sizeConstraint.MaxSize = Vector2.new(MAX_CONTAINER_WIDTH, 10000)
+	sizeConstraint.MinSize = Vector2.new(260, 0)
+	sizeConstraint.Parent = container
+
+	bindContainerPositionUpdates(playerGui)
+
+	return container
+end
+
+local function tween(instance: Instance, tweenInfo: TweenInfo, properties: { [string]: any }): Tween
+	local createdTween = TweenService:Create(instance, tweenInfo, properties)
+	createdTween:Play()
+	return createdTween
+end
+
+local function getSlotY(index: number): number
+	return (index - 1) * (TOAST_HEIGHT + TOAST_GAP)
+end
+
+local function composeToastText(payload: NotifyPayload): string
+	local body = tostring(payload.Body or "")
+	if body ~= "" then
+		return body
+	end
+
+	return tostring(payload.Title or "")
+end
+
+local function setToastText(record: ToastRecord)
+	local text = composeToastText(record.payload)
+	if record.count > 1 then
+		text = string.format("%s x%d", text, record.count)
+	end
+
+	if record.textLabel then
+		record.textLabel.Text = text
+		record.textLabel.TextColor3 = record.payload.TextColor
+	end
+	if record.shadowLabel then
+		record.shadowLabel.Text = text
+	end
+end
+
+local function createToast(record: ToastRecord): Frame?
+	local parent = ensureGui()
+	if not parent then
+		return nil
+	end
+
+	local toast = Instance.new("Frame")
+	toast.Name = "GameplayNotification"
+	toast.AnchorPoint = Vector2.new(0.5, 0)
+	toast.BackgroundTransparency = 1
+	toast.BorderSizePixel = 0
+	toast.Position = UDim2.new(0.5, 0, 0, -ENTRY_OFFSET)
+	toast.Size = UDim2.new(1, 0, 0, TOAST_HEIGHT)
+	toast.ZIndex = 100
+	toast.Parent = parent
+
+	local background = Instance.new("Frame")
+	background.Name = "GradientBackground"
+	background.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	background.BackgroundTransparency = 1
+	background.BorderSizePixel = 0
+	background.Size = UDim2.fromScale(1, 1)
+	background.ZIndex = 100
+	background.Parent = toast
+
+	local gradient = Instance.new("UIGradient")
+	gradient.Rotation = 0
+	gradient.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(0.16, 0.84),
+		NumberSequenceKeypoint.new(0.5, 0.52),
+		NumberSequenceKeypoint.new(0.84, 0.84),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	gradient.Parent = background
+
+	local scale = Instance.new("UIScale")
+	scale.Scale = 0.9
+	scale.Parent = toast
+
+	local shadow = Instance.new("TextLabel")
+	shadow.Name = "Shadow"
+	shadow.BackgroundTransparency = 1
+	shadow.Font = Enum.Font.FredokaOne
+	shadow.Position = UDim2.fromOffset(2, 3)
+	shadow.Size = UDim2.new(1, -4, 1, 0)
+	shadow.TextColor3 = Color3.fromRGB(0, 0, 0)
+	shadow.TextSize = 22
+	shadow.TextTransparency = 1
+	shadow.TextTruncate = Enum.TextTruncate.AtEnd
+	shadow.TextWrapped = false
+	shadow.TextXAlignment = Enum.TextXAlignment.Center
+	shadow.TextYAlignment = Enum.TextYAlignment.Center
+	shadow.ZIndex = 101
+	shadow.Parent = toast
+
+	local label = Instance.new("TextLabel")
+	label.Name = "Text"
+	label.BackgroundTransparency = 1
+	label.Font = Enum.Font.FredokaOne
+	label.Position = UDim2.fromOffset(0, 0)
+	label.Size = UDim2.fromScale(1, 1)
+	label.TextColor3 = record.payload.TextColor
+	label.TextSize = 22
+	label.TextTransparency = 1
+	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	label.TextStrokeTransparency = 1
+	label.TextTruncate = Enum.TextTruncate.AtEnd
+	label.TextWrapped = false
+	label.TextXAlignment = Enum.TextXAlignment.Center
+	label.TextYAlignment = Enum.TextYAlignment.Center
+	label.ZIndex = 102
+	label.Parent = toast
+
+	record.toast = toast
+	record.background = background
+	record.scale = scale
+	record.textLabel = label
+	record.shadowLabel = shadow
+	setToastText(record)
+
+	return toast
+end
+
+local function layoutVisible(skipRecord: ToastRecord?)
+	for index, record in ipairs(visibleToasts) do
+		record.slotY = getSlotY(index)
+		if record ~= skipRecord and record.toast and record.toast.Parent and record.state ~= "exiting" then
+			if record.layoutTween then
+				record.layoutTween:Cancel()
+			end
+
+			record.layoutTween = tween(record.toast, ANIMATION.Layout, {
+				Position = UDim2.new(0.5, 0, 0, record.slotY),
+			})
+		end
+	end
+end
+
+local function playShake(record: ToastRecord)
+	if record.finalized or not (record.toast and record.toast.Parent) then
+		return
+	end
+
+	local y = record.slotY or 0
+	local basePosition = UDim2.new(0.5, 0, 0, y)
+	tween(record.toast, ANIMATION.Shake, { Position = UDim2.new(0.5, -SHAKE_OFFSET, 0, y) }).Completed:Connect(function()
+		if record.finalized or record.state == "exiting" or not (record.toast and record.toast.Parent) then
+			return
+		end
+
+		tween(record.toast, ANIMATION.Shake, { Position = UDim2.new(0.5, SHAKE_OFFSET, 0, y) }).Completed:Connect(function()
+			if not record.finalized and record.state ~= "exiting" and record.toast and record.toast.Parent then
+				tween(record.toast, ANIMATION.Shake, { Position = basePosition })
+			end
+		end)
+	end)
+end
+
+local showQueuedIfPossible: () -> ()
+local beginExit: (ToastRecord) -> ()
+
+local function getNow(): number
+	return os.clock()
+end
+
+local function ensureExpiryWatcher()
+	if expiryConnection then
+		return
+	end
+
+	expiryConnection = RunService.RenderStepped:Connect(function()
+		local now = getNow()
+		for _, record in ipairs(table.clone(visibleToasts)) do
+			if not record.finalized and record.state == "visible" and record.expiresAt > 0 and now >= record.expiresAt then
+				beginExit(record)
+			end
+		end
+
+		local parent = container
+		if not (parent and parent.Parent) then
+			return
+		end
+
+		for _, child in ipairs(parent:GetChildren()) do
+			if child.Name == "GameplayNotification" then
+				local owned = false
+				for _, record in ipairs(visibleToasts) do
+					if record.toast == child then
+						owned = true
+						break
+					end
+				end
+				if not owned then
+					child:Destroy()
+				end
+			end
 		end
 	end)
+end
+
+local function startTimer(record: ToastRecord)
+	record.timerToken = (record.timerToken or 0) + 1
+	local token = record.timerToken
+	record.expiresAt = getNow() + record.payload.Duration
+	ensureExpiryWatcher()
+
+	task.delay(record.payload.Duration, function()
+		if record.timerToken ~= token or record.state == "exiting" or record.finalized then
+			return
+		end
+
+		beginExit(record)
+	end)
+end
+
+local function refreshRecord(record: ToastRecord, payload: NotifyPayload)
+	record.count += 1
+	record.payload = payload
+	setToastText(record)
+
+	if record.state ~= "queued" then
+		startTimer(record)
+		if record.scale then
+			tween(record.scale, ANIMATION.Enter, { Scale = 1.05 }).Completed:Connect(function()
+				if record.state ~= "exiting" and record.scale then
+					tween(record.scale, ANIMATION.Settle, { Scale = 1 })
+				end
+			end)
+		end
+	end
+end
+
+local function findRecordIndex(list: { ToastRecord }, record: ToastRecord): number?
+	for index, item in ipairs(list) do
+		if item == record then
+			return index
+		end
+	end
+
+	return nil
+end
+
+local function removeRecordReferences(record: ToastRecord)
+	if visibleByKey[record.key] == record then
+		visibleByKey[record.key] = nil
+	end
+	if queuedByKey[record.key] == record then
+		queuedByKey[record.key] = nil
+	end
+
+	local visibleIndex = findRecordIndex(visibleToasts, record)
+	if visibleIndex then
+		table.remove(visibleToasts, visibleIndex)
+	end
+
+	local queuedIndex = findRecordIndex(queuedToasts, record)
+	if queuedIndex then
+		table.remove(queuedToasts, queuedIndex)
+	end
+
+	if record.layoutTween then
+		record.layoutTween:Cancel()
+		record.layoutTween = nil
+	end
+end
+
+local function finalizeRecord(record: ToastRecord, advanceQueue: boolean)
+	if record.finalized then
+		return
+	end
+
+	record.finalized = true
+	removeRecordReferences(record)
+
+	if record.toast then
+		record.toast:Destroy()
+		record.toast = nil
+	end
+
+	if advanceQueue then
+		showQueuedIfPossible()
+	end
+end
+
+showQueuedIfPossible = function()
+	local maxVisible = math.max(1, tonumber(Notify.Defaults.maxVisible) or DEFAULT_MAX_VISIBLE)
+	if #visibleToasts >= maxVisible or #queuedToasts == 0 then
+		return
+	end
+
+	local record = table.remove(queuedToasts, 1)
+	queuedByKey[record.key] = nil
+	record.state = "visible"
+	visibleByKey[record.key] = record
+	table.insert(visibleToasts, record)
+
+	if not createToast(record) then
+		finalizeRecord(record, true)
+		return
+	end
+
+	if not record.toast then
+		return
+	end
+
+	record.slotY = getSlotY(#visibleToasts)
+	record.toast.Position = UDim2.new(0.5, 0, 0, record.slotY - ENTRY_OFFSET)
+	layoutVisible(record)
+
+	local enterTween = tween(record.toast, ANIMATION.Enter, {
+		Position = UDim2.new(0.5, 0, 0, record.slotY),
+	})
+	if record.background then
+		tween(record.background, ANIMATION.Enter, { BackgroundTransparency = 0 })
+	end
+	if record.textLabel then
+		tween(record.textLabel, ANIMATION.Enter, {
+			TextTransparency = 0,
+			TextStrokeTransparency = 0,
+		})
+	end
+	if record.shadowLabel then
+		tween(record.shadowLabel, ANIMATION.Enter, { TextTransparency = 0.32 })
+	end
+	if record.scale then
+		tween(record.scale, ANIMATION.Enter, { Scale = 1.05 })
+	end
+
+	startTimer(record)
+
+	enterTween.Completed:Connect(function(playbackState)
+		if playbackState ~= Enum.PlaybackState.Completed or record.state == "exiting" or record.finalized then
+			return
+		end
+
+		if record.scale then
+			tween(record.scale, ANIMATION.Settle, { Scale = 1 })
+		end
+		if record.payload.Type == "Error" then
+			task.delay(0.04, function()
+				playShake(record)
+			end)
+		end
+	end)
+end
+
+beginExit = function(record: ToastRecord)
+	if record.state == "exiting" or record.finalized then
+		return
+	end
+
+	record.state = "exiting"
+	record.timerToken = (record.timerToken or 0) + 1
+
+	removeRecordReferences(record)
+	layoutVisible(nil)
+
+	if not (record.toast and record.toast.Parent) then
+		finalizeRecord(record, true)
+		return
+	end
+
+	local currentY = record.slotY or 0
+	local exitTween = tween(record.toast, ANIMATION.Exit, {
+		Position = UDim2.new(0.5, 0, 0, currentY - EXIT_OFFSET),
+	})
+	if record.background then
+		tween(record.background, ANIMATION.Exit, { BackgroundTransparency = 1 })
+	end
+	if record.textLabel then
+		tween(record.textLabel, ANIMATION.Exit, {
+			TextTransparency = 1,
+			TextStrokeTransparency = 1,
+		})
+	end
+	if record.shadowLabel then
+		tween(record.shadowLabel, ANIMATION.Exit, { TextTransparency = 1 })
+	end
+	if record.scale then
+		tween(record.scale, ANIMATION.Exit, { Scale = 0.96 })
+	end
+
+	exitTween.Completed:Connect(function()
+		finalizeRecord(record, true)
+	end)
+
+	task.delay(ANIMATION.Exit.Time + EXIT_FALLBACK_PADDING, function()
+		finalizeRecord(record, true)
+	end)
+end
+
+local function createRecord(payload: NotifyPayload): ToastRecord
+	nextToastId += 1
+	return {
+		id = nextToastId,
+		key = payload.MergeKey,
+		payload = payload,
+		count = 1,
+		state = "queued",
+		timerToken = 0,
+		expiresAt = 0,
+		finalized = false,
+	}
+end
+
+local function enqueueRecord(record: ToastRecord)
+	record.state = "queued"
+	queuedByKey[record.key] = record
+	table.insert(queuedToasts, record)
+end
+
+local function showPayload(payload: NotifyPayload): boolean
+	local visibleRecord = visibleByKey[payload.MergeKey]
+	if visibleRecord then
+		refreshRecord(visibleRecord, payload)
+		return true
+	end
+
+	local queuedRecord = queuedByKey[payload.MergeKey]
+	if queuedRecord then
+		refreshRecord(queuedRecord, payload)
+		return true
+	end
+
+	local record = createRecord(payload)
+	local maxVisible = math.max(1, tonumber(Notify.Defaults.maxVisible) or DEFAULT_MAX_VISIBLE)
+	if #visibleToasts >= maxVisible then
+		enqueueRecord(record)
+		return true
+	end
+
+	enqueueRecord(record)
+	showQueuedIfPossible()
 	return true
 end
 
-function Notify.ShowCore(payloadOrText, opts)
-	local payload = if typeof(payloadOrText) == "table" then payloadOrText else normalizePayload(payloadOrText, opts)
-	return showCorePayload(payload)
+function Notify.ShowCore(payloadOrText: any, opts: any): boolean
+	return Notify.Show(payloadOrText, opts)
 end
 
-function Notify.SetRenderer(renderer)
-	if RunService:IsClient() and type(renderer) == "function" then
-		clientRenderer = renderer
-		flushPendingPayloads()
-	end
-end
-
-function Notify.ClearRenderer(renderer)
-	if clientRenderer == renderer then
-		clientRenderer = nil
-	end
-end
-
-function Notify.Show(text, opts)
+function Notify.Show(text: any, opts: any): boolean
 	local payload = normalizePayload(text, opts)
-	if RunService:IsClient() then
-		return dispatchClientPayload(payload)
+	if RunService:IsServer() then
+		return false
 	end
 
-	return showCorePayload(payload)
+	return showPayload(payload)
 end
 
-function Notify.Send(target, text, opts)
+function Notify.Send(target: any, text: any, opts: any)
 	if RunService:IsServer() then
 		local payload = normalizePayload(text, opts)
 		local remote = ensureRemote()
@@ -198,4 +828,8 @@ if RunService:IsServer() then
 	ensureRemote()
 end
 
-return Notify
+return setmetatable(Notify, {
+	__call = function(_, payload)
+		return Notify.Show(payload)
+	end,
+})

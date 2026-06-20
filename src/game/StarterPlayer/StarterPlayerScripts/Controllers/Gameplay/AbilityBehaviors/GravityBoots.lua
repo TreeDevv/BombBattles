@@ -9,6 +9,13 @@ type AbilityDefinition = AbilityTypes.AbilityDefinition
 type ClientActivateRequestedContext = AbilityTypes.ClientActivateRequestedContext
 type ClientEffectContext = AbilityTypes.ClientEffectContext
 
+type BootSideConfig = {
+	bootName: string,
+	legCandidates: { string },
+	referenceLegName: string,
+	referenceMotorName: string,
+}
+
 type VisualRecord = {
 	model: Model,
 	serial: number,
@@ -18,6 +25,22 @@ local GravityBoots = {} :: AbilityTypes.ClientBehavior
 
 local ACTIVE_UNTIL_ATTR = "GravityBoots_ActiveUntil"
 local VISUAL_FOLDER_NAME = "GravityBootsVisuals"
+local DEFAULT_ASSET_PATH = table.freeze({ "Assets", "Abilities", "GravityBoots", "GravityBoots" })
+local BOOT_SIDES: { BootSideConfig } = table.freeze({
+	{
+		bootName = "LeftBoot",
+		legCandidates = { "Left Leg", "LeftLowerLeg", "LeftFoot" },
+		referenceLegName = "Left Leg",
+		referenceMotorName = "LeftBoot",
+	},
+	{
+		bootName = "RightBoot",
+		legCandidates = { "Right Leg", "RightLowerLeg", "RightFoot" },
+		referenceLegName = "Right Leg",
+		referenceMotorName = "LeftBoot",
+	},
+})
+
 local LocalPlayer = Players.LocalPlayer
 local predictedCooldownEndsAt = 0
 local activeVisuals: { [Player]: VisualRecord } = {}
@@ -26,11 +49,6 @@ local visualSerial = 0
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
 	local value = if definition then definition[key] else nil
 	return if typeof(value) == "number" then value else fallback
-end
-
-local function getDefinitionColor(definition: AbilityDefinition?, key: string, fallback: Color3): Color3
-	local value = if definition then definition[key] else nil
-	return if typeof(value) == "Color3" then value else fallback
 end
 
 local function getVisualFolder(): Folder
@@ -48,25 +66,35 @@ local function getVisualFolder(): Folder
 	return folder
 end
 
-local function getCharacterRoot(player: Player): (Model?, BasePart?)
-	local character = player.Character
-	if not character then
-		return nil, nil
+local function findChildPath(root: Instance, path: { any }): Instance?
+	local current: Instance? = root
+	for _, rawName in ipairs(path) do
+		if typeof(rawName) ~= "string" or rawName == "" or not current then
+			return nil
+		end
+		current = current:FindFirstChild(rawName)
 	end
 
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	if rootPart and rootPart:IsA("BasePart") then
-		return character, rootPart
-	end
-	return character, nil
+	return current
 end
 
-local function findFoot(character: Model, side: string): BasePart?
-	local candidates = if side == "Left"
-		then { "LeftFoot", "LeftLowerLeg", "Left Leg" }
-		else { "RightFoot", "RightLowerLeg", "Right Leg" }
+local function getAssetPath(definition: AbilityDefinition?): { any }
+	local path = definition and definition.assetPath
+	return if typeof(path) == "table" then path else DEFAULT_ASSET_PATH
+end
 
-	for _, name in ipairs(candidates) do
+local function getBootAsset(definition: AbilityDefinition?): Model?
+	local asset = findChildPath(ReplicatedStorage, getAssetPath(definition))
+	if asset and asset:IsA("Model") then
+		return asset
+	end
+
+	warn("[GravityBoots] Missing ReplicatedStorage.Assets.Abilities.GravityBoots.GravityBoots")
+	return nil
+end
+
+local function findLeg(character: Model, sideConfig: BootSideConfig): BasePart?
+	for _, name in ipairs(sideConfig.legCandidates) do
 		local part = character:FindFirstChild(name)
 		if part and part:IsA("BasePart") then
 			return part
@@ -76,26 +104,69 @@ local function findFoot(character: Model, side: string): BasePart?
 	return nil
 end
 
-local function makeCosmeticPart(name: string, color: Color3, transparency: number): Part
-	local part = Instance.new("Part")
-	part.Name = name
-	part.Anchored = false
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.CastShadow = false
-	part.Massless = true
-	part.Material = Enum.Material.Neon
-	part.Color = color
-	part.Transparency = transparency
-	return part
+local function findReferenceMotor(assetModel: Model, sideConfig: BootSideConfig): Motor6D?
+	local rig = assetModel:FindFirstChild("Rig")
+	local referenceLeg = rig and rig:FindFirstChild(sideConfig.referenceLegName)
+	if not referenceLeg then
+		return nil
+	end
+
+	local namedMotor = referenceLeg:FindFirstChild(sideConfig.referenceMotorName)
+	if namedMotor and namedMotor:IsA("Motor6D") then
+		return namedMotor
+	end
+
+	for _, child in ipairs(referenceLeg:GetChildren()) do
+		if child:IsA("Motor6D") and child.Part1 and child.Part1.Name == sideConfig.bootName then
+			return child
+		end
+	end
+
+	return nil
 end
 
-local function weldTo(part: BasePart, target: BasePart)
-	local weld = Instance.new("WeldConstraint")
-	weld.Part0 = target
-	weld.Part1 = part
-	weld.Parent = part
+local function prepareBootPart(boot: BasePart)
+	boot.Anchored = false
+	boot.CanCollide = false
+	boot.CanQuery = false
+	boot.CanTouch = false
+	boot.Massless = true
+
+	for _, descendant in ipairs(boot:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = false
+			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.CanTouch = false
+			descendant.Massless = true
+		end
+	end
+end
+
+local function cloneBoot(model: Model, character: Model, assetModel: Model, sideConfig: BootSideConfig): boolean
+	local leg = findLeg(character, sideConfig)
+	local template = assetModel:FindFirstChild(sideConfig.bootName)
+	local referenceMotor = findReferenceMotor(assetModel, sideConfig)
+	if not (leg and template and template:IsA("BasePart") and referenceMotor) then
+		warn("[GravityBoots] Missing boot attachment data for " .. sideConfig.bootName)
+		return false
+	end
+
+	local boot = template:Clone()
+	boot.Name = sideConfig.bootName
+	prepareBootPart(boot)
+	boot.CFrame = leg.CFrame * referenceMotor.C0 * referenceMotor.C1:Inverse()
+	boot.Parent = model
+
+	local motor = Instance.new("Motor6D")
+	motor.Name = sideConfig.bootName .. "Motor"
+	motor.Part0 = leg
+	motor.Part1 = boot
+	motor.C0 = referenceMotor.C0
+	motor.C1 = referenceMotor.C1
+	motor.Parent = boot
+
+	return true
 end
 
 local function destroyVisual(player: Player, fadeSeconds: number?)
@@ -126,22 +197,10 @@ local function destroyVisual(player: Player, fadeSeconds: number?)
 	end)
 end
 
-local function addFootPad(model: Model, character: Model, side: string, color: Color3, transparency: number)
-	local foot = findFoot(character, side)
-	if not foot then
-		return
-	end
-
-	local pad = makeCosmeticPart(side .. "GravityBootPad", color, transparency)
-	pad.Size = Vector3.new(0.72, 0.16, 0.96)
-	pad.CFrame = foot.CFrame
-	pad.Parent = model
-	weldTo(pad, foot)
-end
-
 local function playVisual(player: Player, definition: AbilityDefinition?, activeEndsAt: number)
-	local character, rootPart = getCharacterRoot(player)
-	if not (character and rootPart) then
+	local character = player.Character
+	local assetModel = getBootAsset(definition)
+	if not (character and assetModel) then
 		return
 	end
 
@@ -150,21 +209,18 @@ local function playVisual(player: Player, definition: AbilityDefinition?, active
 
 	visualSerial += 1
 	local serial = visualSerial
-	local color = getDefinitionColor(definition, "visualColor", Color3.fromRGB(90, 190, 255))
-	local transparency = math.clamp(getDefinitionNumber(definition, "visualTransparency", 0.18), 0, 1)
 
 	local model = Instance.new("Model")
 	model.Name = "GravityBoots_" .. tostring(player.UserId)
 
-	local ring = makeCosmeticPart("GravityBootsAura", color, math.clamp(transparency + 0.18, 0, 1))
-	ring.Shape = Enum.PartType.Cylinder
-	ring.Size = Vector3.new(4.2, 0.08, 4.2)
-	ring.CFrame = rootPart.CFrame * CFrame.new(0, -2.65, 0)
-	ring.Parent = model
-	weldTo(ring, rootPart)
-
-	addFootPad(model, character, "Left", color, transparency)
-	addFootPad(model, character, "Right", color, transparency)
+	local attachedAny = false
+	for _, sideConfig in ipairs(BOOT_SIDES) do
+		attachedAny = cloneBoot(model, character, assetModel, sideConfig) or attachedAny
+	end
+	if not attachedAny then
+		model:Destroy()
+		return
+	end
 
 	model.Parent = getVisualFolder()
 	activeVisuals[player] = {

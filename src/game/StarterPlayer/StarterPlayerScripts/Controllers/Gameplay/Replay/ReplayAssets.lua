@@ -69,6 +69,7 @@ function ReplayAssets.PrewarmContent(folderName: string?)
 
 		local assetsFolder = ReplayAssets.GetAssetsFolder()
 		appendPreloadRoot(preloadRoots, assetsFolder and assetsFolder:FindFirstChild("Bombs"))
+		appendPreloadRoot(preloadRoots, assetsFolder and assetsFolder:FindFirstChild("Finishers"))
 		appendPreloadRoot(preloadRoots, assetsFolder and assetsFolder:FindFirstChild("Replay"))
 
 		local ok, err = true, nil

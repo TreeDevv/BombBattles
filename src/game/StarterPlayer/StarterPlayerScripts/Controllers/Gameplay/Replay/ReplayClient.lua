@@ -7,6 +7,7 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
+local FinisherVFX = require(ReplicatedStorage.Shared.Effects.FinisherVFX)
 local HipBombVisual = require(ReplicatedStorage.Shared.Effects.HipBombVisual)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
@@ -1647,6 +1648,12 @@ local function PlayKillEvent(event)
 	end
 	if not reserveReplayObjects(5) then
 		return
+	end
+
+	if typeof(event.finisherId) == "string" and event.finisherId ~= "" then
+		FinisherVFX.PlayAt(event.finisherId, position, {
+			parent = parent,
+		})
 	end
 
 	createPulseSphere(parent, position + Vector3.new(0, 1.2, 0), 3.2, Color3.fromRGB(255, 48, 72), 0.45)

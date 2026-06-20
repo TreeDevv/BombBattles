@@ -32,6 +32,10 @@ local targetPartGridCells: { [BasePart]: { string } } = {}
 local spatialGridCellCount = 0
 local cachedRootCount = 0
 local destructionListeners: { (any) -> () } = {}
+local unsafeRefreshQueued = false
+local bulkUpdateDepth = 0
+local targetCacheDirty = false
+local targetCacheDirtyReason: string? = nil
 
 local function getReplayService()
 	if replayService then
@@ -358,6 +362,10 @@ end
 local unregisterTaggedRoot
 
 local function registerTaggedRoot(root: Instance)
+	if not root:IsDescendantOf(workspace) then
+		return
+	end
+
 	local existing = taggedRootRecords[root]
 	if existing then
 		refreshRootRecord(existing)
@@ -413,8 +421,37 @@ local function refreshUnsafeState()
 	RuntimeProfiler.End("Server/Destruction/RefreshUnsafeState", token)
 end
 
+local function markTargetCacheDirty(reason: string?)
+	targetCacheDirty = true
+	if typeof(reason) == "string" and reason ~= "" then
+		targetCacheDirtyReason = reason
+	end
+end
+
+local function queueUnsafeRefresh()
+	if bulkUpdateDepth > 0 then
+		markTargetCacheDirty("UnsafeTagChanged")
+		return
+	end
+	if unsafeRefreshQueued then
+		return
+	end
+
+	unsafeRefreshQueued = true
+	task.defer(function()
+		unsafeRefreshQueued = false
+		if bulkUpdateDepth > 0 then
+			markTargetCacheDirty("UnsafeTagChanged")
+			return
+		end
+		refreshUnsafeState()
+	end)
+end
+
 local function rebuildTargetCache(reason: string?)
 	local token = RuntimeProfiler.Begin("Server/Destruction/RebuildTargetCache")
+	targetCacheDirty = false
+	targetCacheDirtyReason = nil
 
 	local roots = {}
 	for root in pairs(taggedRootRecords) do
@@ -443,21 +480,43 @@ local function rebuildTargetCache(reason: string?)
 	RuntimeProfiler.End("Server/Destruction/RebuildTargetCache", token)
 end
 
-local function startTargetCache()
+local function handleTaggedRootAdded(root: Instance)
+	if bulkUpdateDepth > 0 then
+		markTargetCacheDirty("DestructibleAdded")
+		return
+	end
+
+	registerTaggedRoot(root)
+end
+
+local function handleTaggedRootRemoved(root: Instance)
+	if bulkUpdateDepth > 0 then
+		markTargetCacheDirty("DestructibleRemoved")
+		return
+	end
+
+	unregisterTaggedRoot(root)
+end
+
+local function startTargetCache(deferInitialRebuild: boolean?)
 	if targetCacheStarted then
 		return
 	end
 	targetCacheStarted = true
 
-	destructibleAddedConnection = CollectionService:GetInstanceAddedSignal(DestructionConfig.Tag):Connect(registerTaggedRoot)
-	destructibleRemovedConnection = CollectionService:GetInstanceRemovedSignal(DestructionConfig.Tag):Connect(unregisterTaggedRoot)
+	destructibleAddedConnection = CollectionService:GetInstanceAddedSignal(DestructionConfig.Tag):Connect(handleTaggedRootAdded)
+	destructibleRemovedConnection = CollectionService:GetInstanceRemovedSignal(DestructionConfig.Tag):Connect(handleTaggedRootRemoved)
 
 	for _, tagName in ipairs(UNSAFE_TAGS) do
-		table.insert(unsafeTagConnections, CollectionService:GetInstanceAddedSignal(tagName):Connect(refreshUnsafeState))
-		table.insert(unsafeTagConnections, CollectionService:GetInstanceRemovedSignal(tagName):Connect(refreshUnsafeState))
+		table.insert(unsafeTagConnections, CollectionService:GetInstanceAddedSignal(tagName):Connect(queueUnsafeRefresh))
+		table.insert(unsafeTagConnections, CollectionService:GetInstanceRemovedSignal(tagName):Connect(queueUnsafeRefresh))
 	end
 
-	rebuildTargetCache("Start")
+	if deferInitialRebuild then
+		markTargetCacheDirty("Start")
+	else
+		rebuildTargetCache("Start")
+	end
 end
 
 local function getDestructibleTargets(): { BasePart }
@@ -715,7 +774,37 @@ function DestructionService:SetScoreRecorder(recorder)
 	scoreRecorder = if type(recorder) == "function" then recorder else nil
 end
 
+function DestructionService:BeginBulkUpdate(reason: string?)
+	bulkUpdateDepth += 1
+	if typeof(reason) == "string" and reason ~= "" then
+		targetCacheDirtyReason = reason
+	end
+end
+
+function DestructionService:EndBulkUpdate(reason: string?)
+	if bulkUpdateDepth <= 0 then
+		return
+	end
+
+	if typeof(reason) == "string" and reason ~= "" then
+		targetCacheDirtyReason = reason
+	end
+	bulkUpdateDepth -= 1
+
+	if bulkUpdateDepth == 0 and targetCacheDirty then
+		self:RebuildTargetCache(targetCacheDirtyReason or "BulkUpdate")
+	end
+end
+
 function DestructionService:RebuildTargetCache(reason: string?)
+	if bulkUpdateDepth > 0 then
+		if not targetCacheStarted then
+			startTargetCache(true)
+		end
+		markTargetCacheDirty(reason or "Manual")
+		return
+	end
+
 	if not targetCacheStarted then
 		startTargetCache()
 		return

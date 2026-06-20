@@ -68,12 +68,6 @@ local function tagDestructibleTree(root: Instance)
 	if not CollectionService:HasTag(root, DestructionConfig.Tag) then
 		CollectionService:AddTag(root, DestructionConfig.Tag)
 	end
-
-	for _, descendant in ipairs(root:GetDescendants()) do
-		if descendant:IsA("BasePart") and not CollectionService:HasTag(descendant, DestructionConfig.Tag) then
-			CollectionService:AddTag(descendant, DestructionConfig.Tag)
-		end
-	end
 end
 
 local function cacheHouseSnapshots(range: Model)

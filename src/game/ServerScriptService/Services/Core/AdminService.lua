@@ -11,6 +11,7 @@ local BombProjectileService = require(ServerScriptService.Services.BombProjectil
 local BombService = require(ServerScriptService.Services.BombService)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local DataService = require(ServerScriptService.Services.DataService)
+local FinisherService = require(ServerScriptService.Services.FinisherService)
 local ReplayService = require(ServerScriptService.Services.ReplayService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
@@ -429,6 +430,10 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 	elseif command == "player.setBombSkin" then
 		local skinId = if typeof(payload) == "table" then payload.skinId else nil
 		local ok, message = BombSkinService:AdminGrantAndEquipSkin(targetPlayer, skinId)
+		return result(ok, message or "", getStatePayload())
+	elseif command == "player.setFinisher" then
+		local finisherId = if typeof(payload) == "table" then payload.finisherId else nil
+		local ok, message = FinisherService:AdminGrantAndEquipFinisher(targetPlayer, finisherId)
 		return result(ok, message or "", getStatePayload())
 	elseif command == "data.wipe" then
 		local confirmation = if typeof(payload) == "table" then payload.confirmation else nil

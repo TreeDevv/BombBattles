@@ -3,6 +3,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
+local ServerStorage = game:GetService("ServerStorage")
 local Teams = game:GetService("Teams")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
@@ -23,6 +24,7 @@ local SET_AFK_REMOTE_NAME = "SetAFK"
 local REPORT_PREFERRED_INPUT_REMOTE_NAME = "ReportPreferredInput"
 local KILL_FEED_REMOTE_NAME = "KillFeed"
 local DESTRUCTION_SCORE_REMOTE_NAME = "DestructionScore"
+local PREPARED_MAPS_FOLDER_NAME = "_PreparedRoundMaps"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
@@ -101,6 +103,9 @@ local scoreboardPlatforms: { [string]: string } = {}
 local rewardedRoundIds: { [number]: boolean } = {}
 local recentDamageContributors: { [string]: { [string]: { damagedAt: number, teamName: string?, sourceType: string?, sourceId: string? } } } =
 	{}
+local preparedMapClones: { [string]: Model } = {}
+local preparingMapClones: { [string]: boolean } = {}
+local mapPreparationGeneration = 0
 local rng = Random.new()
 local RespawnFlow = {}
 local RoundFlow = {}
@@ -722,6 +727,13 @@ local function creditScoreboardDeath(victim: Player)
 	local botEliminator = if not eliminatorPlayer and eliminatorKey
 		then StudioAICombatants.GetOwnerIdentity({ studioAIBot = true, UserId = tonumber(eliminatorKey) })
 		else nil
+	local deathPosition = getPlayerRootPosition(victim)
+	local finisherId = ""
+	local finisherService = nil
+	if eliminatorPlayer and deathPosition then
+		finisherService = require(ServerScriptService.Services.FinisherService)
+		finisherId = finisherService:GetEquippedFinisherId(eliminatorPlayer)
+	end
 	local playerKilledPayload = {
 		timestamp = currentTime,
 		roundId = roundId,
@@ -737,12 +749,23 @@ local function creditScoreboardDeath(victim: Player)
 		sourceType = if eliminatorContributor then eliminatorContributor.sourceType else nil,
 		sourceId = if eliminatorContributor then eliminatorContributor.sourceId else nil,
 	}
-	local deathPosition = getPlayerRootPosition(victim)
 	if deathPosition then
 		playerKilledPayload.position = deathPosition
 	end
+	if finisherId ~= "" then
+		playerKilledPayload.finisherId = finisherId
+	end
 	debugDeathFlow("PlayerKilled payload built", playerKilledPayload)
 	recordReplayEvent("PlayerKilled", playerKilledPayload)
+	if finisherId ~= "" then
+		finisherService:FireFinisherPlayed({
+			roundId = roundId,
+			killerUserId = playerKilledPayload.killerUserId,
+			victimUserId = playerKilledPayload.victimUserId,
+			finisherId = finisherId,
+			position = deathPosition,
+		})
+	end
 	sendWorldText("PlayerKilled", eliminatorPlayer, victim, deathPosition, {
 		roundId = roundId,
 		killerUserId = playerKilledPayload.killerUserId,
@@ -825,6 +848,100 @@ local function getMapTemplate(mapId: string): Model?
 	return template
 end
 
+local function getPreparedMapsFolder(): Folder
+	local existing = ServerStorage:FindFirstChild(PREPARED_MAPS_FOLDER_NAME)
+	if existing and existing:IsA("Folder") then
+		return existing
+	end
+	if existing then
+		existing:Destroy()
+	end
+
+	local folder = Instance.new("Folder")
+	folder.Name = PREPARED_MAPS_FOLDER_NAME
+	folder.Parent = ServerStorage
+	return folder
+end
+
+local function destroyPreparedMapClone(mapId: string)
+	local clone = preparedMapClones[mapId]
+	preparedMapClones[mapId] = nil
+	preparingMapClones[mapId] = nil
+	if clone and clone.Parent then
+		clone:Destroy()
+	end
+end
+
+local function clearPreparedMapClones(exceptMapId: string?)
+	if not exceptMapId then
+		mapPreparationGeneration += 1
+	end
+	for mapId in pairs(preparedMapClones) do
+		if mapId ~= exceptMapId then
+			destroyPreparedMapClone(mapId)
+		end
+	end
+end
+
+local function prepareMapClone(mapId: string, generation: number)
+	if generation ~= mapPreparationGeneration then
+		return
+	end
+	if preparedMapClones[mapId] and preparedMapClones[mapId].Parent then
+		return
+	end
+	if preparingMapClones[mapId] then
+		return
+	end
+
+	local template = getMapTemplate(mapId)
+	if not template then
+		return
+	end
+
+	preparingMapClones[mapId] = true
+	local cloneToken = RuntimeProfiler.Begin("Server/Round/Map/PrepareClone")
+	local clone = template:Clone()
+	RuntimeProfiler.End("Server/Round/Map/PrepareClone", cloneToken)
+	if generation ~= mapPreparationGeneration then
+		clone:Destroy()
+		preparingMapClones[mapId] = nil
+		return
+	end
+	clone.Name = mapId
+	clone.Parent = getPreparedMapsFolder()
+	preparedMapClones[mapId] = clone
+	preparingMapClones[mapId] = nil
+end
+
+local function prepareVoteMapClones(choices: { VoteChoice })
+	mapPreparationGeneration += 1
+	local generation = mapPreparationGeneration
+	local mapIds = {}
+	for _, choice in ipairs(choices) do
+		mapIds[choice.mapId] = true
+	end
+
+	task.spawn(function()
+		for mapId in pairs(mapIds) do
+			prepareMapClone(mapId, generation)
+			task.wait()
+		end
+	end)
+end
+
+local function takePreparedMapClone(mapId: string): Model?
+	local clone = preparedMapClones[mapId]
+	preparedMapClones[mapId] = nil
+	preparingMapClones[mapId] = nil
+	mapPreparationGeneration += 1
+	clearPreparedMapClones(mapId)
+	if clone and clone.Parent then
+		return clone
+	end
+	return nil
+end
+
 getConfiguredMap = function(mapId: string): MapConfig?
 	for _, mapConfig in ipairs(RoundConfig.Maps) do
 		if mapConfig.id == mapId then
@@ -874,8 +991,10 @@ end
 local function clearActiveMap()
 	local active = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	if active then
+		local token = RuntimeProfiler.Begin("Server/Round/Map/ClearActiveMap")
 		active:Destroy()
 		DestructionService:InvalidateTargetCache("MapCleared")
+		RuntimeProfiler.End("Server/Round/Map/ClearActiveMap", token)
 	end
 end
 
@@ -887,10 +1006,24 @@ local function spawnActiveMap(mapId: string): Model?
 
 	clearActiveMap()
 
-	local clone = template:Clone()
+	local clone = takePreparedMapClone(mapId)
+	if clone then
+		RuntimeProfiler.Count("Server/Round/Map/PreparedCloneHits")
+	else
+		RuntimeProfiler.Count("Server/Round/Map/PreparedCloneMisses")
+		local cloneToken = RuntimeProfiler.Begin("Server/Round/Map/CloneTemplate")
+		clone = template:Clone()
+		RuntimeProfiler.End("Server/Round/Map/CloneTemplate", cloneToken)
+	end
+
 	clone.Name = RoundConfig.ActiveMapName
+	local parentToken = RuntimeProfiler.Begin("Server/Round/Map/ParentActiveMap")
 	clone.Parent = workspace
+	RuntimeProfiler.End("Server/Round/Map/ParentActiveMap", parentToken)
+
+	local cacheToken = RuntimeProfiler.Begin("Server/Round/Map/RebuildDestructionCache")
 	DestructionService:RebuildTargetCache("MapSpawned")
+	RuntimeProfiler.End("Server/Round/Map/RebuildDestructionCache", cacheToken)
 	return clone
 end
 
@@ -947,11 +1080,11 @@ local function movePlayerToLobby(player: Player)
 	moveCharacterToSpawn(player, lobbySpawns[rng:NextInteger(1, #lobbySpawns)])
 end
 
-local function isPlayerAFK(player: Player): boolean
+function RoundService.IsPlayerAFK(player: Player): boolean
 	return player:GetAttribute(AFK_ATTR) == true
 end
 
-local function getAFKTemplate(): Instance?
+function RoundService.GetAFKTemplate(): Instance?
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
 	local ui = assets and assets:FindFirstChild("UI")
 	local template = ui and ui:FindFirstChild(AFK_MARKER_NAME)
@@ -966,7 +1099,7 @@ local function getAFKTemplate(): Instance?
 	return nil
 end
 
-local function removeAFKMarker(player: Player)
+function RoundService.RemoveAFKMarker(player: Player)
 	local character = player.Character
 	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
 	if not rootPart then
@@ -980,10 +1113,10 @@ local function removeAFKMarker(player: Player)
 	end
 end
 
-local function syncPlayerAFKMarker(player: Player)
-	removeAFKMarker(player)
+function RoundService.SyncPlayerAFKMarker(player: Player)
+	RoundService.RemoveAFKMarker(player)
 
-	if not isPlayerAFK(player) then
+	if not RoundService.IsPlayerAFK(player) then
 		return
 	end
 
@@ -993,7 +1126,7 @@ local function syncPlayerAFKMarker(player: Player)
 		return
 	end
 
-	local template = getAFKTemplate()
+	local template = RoundService.GetAFKTemplate()
 	if not template then
 		return
 	end
@@ -1596,7 +1729,7 @@ local function bindLobbyCharacter(player: Player)
 			clearPlayerRoundState(player)
 			bindNonRoundHumanoid(character)
 			movePlayerToLobby(player)
-			syncPlayerAFKMarker(player)
+			RoundService.SyncPlayerAFKMarker(player)
 		end)
 	end
 
@@ -1904,7 +2037,7 @@ local function bindCharacter(player: Player)
 		task.defer(function()
 			if roundPlayers[player] and not alivePlayers[player] then
 				movePlayerToLobby(player)
-				syncPlayerAFKMarker(player)
+				RoundService.SyncPlayerAFKMarker(player)
 				return
 			end
 
@@ -1929,11 +2062,11 @@ local function bindCharacter(player: Player)
 					end
 					player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
 				end
-				syncPlayerAFKMarker(player)
+				RoundService.SyncPlayerAFKMarker(player)
 			else
 				clearPlayerRoundState(player)
 				movePlayerToLobby(player)
-				syncPlayerAFKMarker(player)
+				RoundService.SyncPlayerAFKMarker(player)
 			end
 		end)
 	end))
@@ -2037,7 +2170,7 @@ local function fireAFKResult(player: Player, accepted: boolean, reason: string?)
 	if setAFKRemote then
 		setAFKRemote:FireClient(player, {
 			accepted = accepted,
-			afk = isPlayerAFK(player),
+			afk = RoundService.IsPlayerAFK(player),
 			source = player:GetAttribute(AFK_SOURCE_ATTR),
 			reason = reason,
 		})
@@ -2058,7 +2191,7 @@ local function setPlayerAFK(player: Player, afk: boolean, source: string): boole
 		return false
 	end
 
-	local wasAFK = isPlayerAFK(player)
+	local wasAFK = RoundService.IsPlayerAFK(player)
 	player:SetAttribute(AFK_ATTR, afk)
 	player:SetAttribute(AFK_SOURCE_ATTR, if afk then normalizeAFKSource(source) else nil)
 	player:SetAttribute(AFK_STARTED_AT_ATTR, if afk then workspace:GetServerTimeNow() else nil)
@@ -2071,7 +2204,7 @@ local function setPlayerAFK(player: Player, afk: boolean, source: string): boole
 	end
 
 	if wasAFK ~= afk then
-		syncPlayerAFKMarker(player)
+		RoundService.SyncPlayerAFKMarker(player)
 	end
 
 	fireAFKResult(player, true, nil)
@@ -2108,29 +2241,29 @@ local function chooseWinningMap(): string?
 	return nil
 end
 
-local function getEligiblePlayers(): { Player }
+function RoundService.GetEligiblePlayers(): { Player }
 	local players = {}
 	for _, player in ipairs(Players:GetPlayers()) do
-		if player.Parent == Players and not isPlayerAFK(player) then
+		if player.Parent == Players and not RoundService.IsPlayerAFK(player) then
 			table.insert(players, player)
 		end
 	end
 	return players
 end
 
-local function getEligiblePlayerCount(): number
-	return #getEligiblePlayers()
+function RoundService.GetEligiblePlayerCount(): number
+	return #RoundService.GetEligiblePlayers()
 end
 
-local function shufflePlayers(players: { Player })
+function RoundService.ShufflePlayers(players: { Player })
 	for index = #players, 2, -1 do
 		local swapIndex = rng:NextInteger(1, index)
 		players[index], players[swapIndex] = players[swapIndex], players[index]
 	end
 end
 
-local function assignTeams(players: { Player })
-	shufflePlayers(players)
+function RoundService.AssignTeams(players: { Player })
+	RoundService.ShufflePlayers(players)
 
 	for index, player in ipairs(players) do
 		local teamName = TEAM_ORDER[((index - 1) % #TEAM_ORDER) + 1]
@@ -2151,7 +2284,7 @@ local function assignTeams(players: { Player })
 	syncAliveCounts()
 end
 
-local function teleportTeamsToMap(map: Model): boolean
+function RoundService.TeleportTeamsToMap(map: Model): boolean
 	for _, teamName in ipairs(TEAM_ORDER) do
 		local spawns = getTeamSpawns(teamName, map)
 		if #spawns == 0 then
@@ -2180,7 +2313,7 @@ local function teleportTeamsToMap(map: Model): boolean
 	return true
 end
 
-local function resetPlayersToLobby()
+function RoundService.ResetPlayersToLobby()
 	for _, player in ipairs(Players:GetPlayers()) do
 		clearPlayerRoundState(player)
 		if not player.Character then
@@ -2220,7 +2353,7 @@ function RoundFlow.waitForSecondsOrInvalid(seconds: number, requireMinPlayers: b
 		if pendingAdminReset or pendingAdminForceStartMapId or pendingAdminWinnerTeam then
 			return false
 		end
-		if requireMinPlayers and getEligiblePlayerCount() < getRequiredPlayerCount() then
+		if requireMinPlayers and RoundService.GetEligiblePlayerCount() < getRequiredPlayerCount() then
 			return false
 		end
 		task.wait(0.2)
@@ -2286,9 +2419,12 @@ function RoundFlow.resetRound()
 	setState(RoundStates.Resetting, "Resetting", 0)
 	pendingAdminReset = false
 	pendingAdminWinnerTeam = nil
-	resetPlayersToLobby()
+	RoundService.ResetPlayersToLobby()
+	DestructionService:BeginBulkUpdate("RoundReset")
 	DestructionService:Cleanup()
 	clearActiveMap()
+	DestructionService:EndBulkUpdate("RoundReset")
+	clearPreparedMapClones(nil)
 	clearAllRoundTracking()
 	for _, player in ipairs(Players:GetPlayers()) do
 		clearPlayerRoundState(player)
@@ -2319,13 +2455,13 @@ function RoundService:_runRoundLoop()
 
 		local forcedMapId = pendingAdminForceStartMapId
 		local requiredPlayerCount = getRequiredPlayerCount()
-		if not forcedMapId and getEligiblePlayerCount() < requiredPlayerCount then
+		if not forcedMapId and RoundService.GetEligiblePlayerCount() < requiredPlayerCount then
 			setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
 			setVotingOpen(false)
 			task.wait(1)
 			continue
 		end
-		if forcedMapId and getEligiblePlayerCount() == 0 then
+		if forcedMapId and RoundService.GetEligiblePlayerCount() == 0 then
 			setState(RoundStates.WaitingForPlayers, "Waiting for admin tester", 0)
 			setVotingOpen(false)
 			task.wait(1)
@@ -2358,6 +2494,7 @@ function RoundService:_runRoundLoop()
 		voteCounts = {}
 		syncVoteChoices()
 		setVotingOpen(not forcedMapId)
+		prepareVoteMapClones(currentChoices)
 
 		local selectedMapId: string?
 		if forcedMapId then
@@ -2384,7 +2521,7 @@ function RoundService:_runRoundLoop()
 		setReplicaValue({ "selectedMapId" }, selectedMapId)
 		setState(RoundStates.AssigningTeams, "Assigning teams", 0)
 
-		local roster = getEligiblePlayers()
+		local roster = RoundService.GetEligiblePlayers()
 		local minimumRosterCount = if forcedMapId then 1 else getRequiredPlayerCount()
 		if #roster < minimumRosterCount then
 			RoundFlow.cancelToWaiting("Round cancelled because roster is below minimum")
@@ -2394,10 +2531,13 @@ function RoundService:_runRoundLoop()
 		roundPlayers = {}
 		alivePlayers = {}
 		playerTeams = {}
-		assignTeams(roster)
+		RoundService.AssignTeams(roster)
 
+		DestructionService:BeginBulkUpdate("RoundMapSetup")
 		local map = spawnActiveMap(selectedMapId)
-		if not map or not setupTeamCores(map) or not teleportTeamsToMap(map) then
+		local mapReady = map and setupTeamCores(map)
+		DestructionService:EndBulkUpdate("RoundMapSetup")
+		if not mapReady or not map or not RoundService.TeleportTeamsToMap(map) then
 			RoundFlow.cancelToWaiting("Round cancelled because map setup is incomplete")
 			continue
 		end
@@ -2540,7 +2680,7 @@ function RoundService:OnStart()
 		if not votingOpen then
 			return
 		end
-		if isPlayerAFK(player) then
+		if RoundService.IsPlayerAFK(player) then
 			return
 		end
 		if typeof(choiceId) ~= "string" then
@@ -2626,7 +2766,7 @@ function RoundService:OnPlayerRemoving(player: Player)
 	if voteChanged then
 		syncVoteChoices()
 	end
-	removeAFKMarker(player)
+	RoundService.RemoveAFKMarker(player)
 	removePlayerScoreboardState(player)
 	disconnectCharacterConnections(player)
 	disconnectLobbyCharacterConnection(player)

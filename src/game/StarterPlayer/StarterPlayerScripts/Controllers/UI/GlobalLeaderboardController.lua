@@ -679,6 +679,12 @@ local function bindButtons(record: BoardRecord)
 		button.Selectable = true
 		button.AutoButtonColor = true
 
+		table.insert(record.connections, button.MouseButton1Down:Connect(function()
+			selectPeriodFromInput(record, periodId)
+		end))
+		table.insert(record.connections, button.MouseButton1Click:Connect(function()
+			selectPeriodFromInput(record, periodId)
+		end))
 		table.insert(record.connections, button.Activated:Connect(function()
 			selectPeriodFromInput(record, periodId)
 		end))

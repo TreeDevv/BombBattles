@@ -61,6 +61,7 @@ local lastRequestAt: { [Player]: number } = {}
 local BLOCKED_TAG = "GrappleBlocked"
 local ENEMY_TAG = "GrappleEnemy"
 local SURFACE_TAG = "HookableSurface"
+local STUNNED_UNTIL_ATTR = "GrappleHook_StunnedUntil"
 
 local UNSAFE_TAGS = {
 	RoundConfig.Tags.TeamCore,
@@ -77,6 +78,39 @@ end
 local function getDefinitionBoolean(definition: AbilityDefinition?, key: string, fallback: boolean): boolean
 	local value = if definition then definition[key] else nil
 	return if typeof(value) == "boolean" then value else fallback
+end
+
+local function getPayloadSessionId(payload: any): number
+	if typeof(payload) ~= "table" or typeof(payload.sequence) ~= "number" then
+		return 0
+	end
+	return math.floor(payload.sequence)
+end
+
+local function fireRejectEffectToPlayer(
+	player: Player,
+	slot: string,
+	sessionId: number,
+	reason: string,
+	anchorPosition: Vector3?,
+	hitNormal: Vector3?
+)
+	local service = abilityService
+	if not service then
+		return
+	end
+
+	service:FireEffectToPlayer(player, "GrappleHookFail", {
+		player = player,
+		slot = slot,
+		abilityId = "GrappleHook",
+		payload = {
+			sessionId = sessionId,
+			reason = reason,
+			anchorPosition = anchorPosition,
+			hitNormal = hitNormal,
+		},
+	})
 end
 
 local function getBombProjectileService()
@@ -265,20 +299,25 @@ local function isValidSurface(instance: Instance): boolean
 	if instance == workspace.Terrain then
 		return true
 	end
-	if hasUnsafeTaggedAncestor(instance) or isBombInstance(instance) then
+	if hasUnsafeTaggedAncestor(instance) or isBombInstance(instance) or getHumanoidFromHit(instance) then
 		return false
 	end
 
 	local part = if instance:IsA("BasePart") then instance else nil
-	if not part or not part.CanCollide or part.Transparency >= 1 then
+	if not part or not part:IsDescendantOf(workspace) or not part.CanCollide or part.Transparency >= 1 then
 		return false
 	end
 
 	local activeMap = getActiveMap()
 	local practiceRange = getPracticeRange()
-	return (activeMap ~= nil and part:IsDescendantOf(activeMap))
+	if (activeMap ~= nil and part:IsDescendantOf(activeMap))
 		or (practiceRange ~= nil and part:IsDescendantOf(practiceRange))
 		or hasTaggedAncestor(part, SURFACE_TAG)
+	then
+		return true
+	end
+
+	return part.Anchored
 end
 
 local function isSkippableHit(instance: Instance): boolean
@@ -687,6 +726,8 @@ local function createWallSession(context: ServerActivateContext, rootPart: BaseP
 	sessionId = if sessionId > 0 then sessionId else nextSessionId
 
 	local definition = context.definition
+	local playerMaxPullTime = getDefinitionNumber(definition, "playerMaxPullTime", 1.5)
+	local latencyGraceSeconds = getDefinitionNumber(definition, "latencyGraceSeconds", 0.3)
 	local travelTime, tautSeconds, pullStartAt = getPullStartTiming(definition, getServerOrigin(rootPart), hit.Position, context.now)
 	local session: GrappleSession = {
 		sessionId = sessionId,
@@ -698,7 +739,7 @@ local function createWallSession(context: ServerActivateContext, rootPart: BaseP
 		hookLocalOffset = if hit.Instance:IsA("BasePart") then hit.Instance.CFrame:ToObjectSpace(CFrame.new(hit.Position)) else nil,
 		startedAt = context.now,
 		pullStartAt = pullStartAt,
-		maxDuration = getDefinitionNumber(definition, "playerMaxPullTime", 1.5),
+		maxDuration = playerMaxPullTime + latencyGraceSeconds,
 		releaseDistance = getDefinitionNumber(definition, "playerArrivalDistance", 7),
 		maxRange = getDefinitionNumber(definition, "maxRange", 350),
 		lineOfSightBreaksHook = getDefinitionBoolean(definition, "lineOfSightBreaksHook", true),
@@ -728,7 +769,7 @@ local function createWallSession(context: ServerActivateContext, rootPart: BaseP
 				playerPullSpeed = getDefinitionNumber(definition, "playerPullSpeed", 120),
 				playerUpwardBias = getDefinitionNumber(definition, "playerUpwardBias", 22),
 				playerArrivalDistance = getDefinitionNumber(definition, "playerArrivalDistance", 7),
-				playerMaxPullTime = getDefinitionNumber(definition, "playerMaxPullTime", 1.5),
+				playerMaxPullTime = playerMaxPullTime,
 				maxRange = getDefinitionNumber(definition, "maxRange", 350),
 				lineOfSightBreaksHook = getDefinitionBoolean(definition, "lineOfSightBreaksHook", true),
 			},
@@ -740,6 +781,7 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 	local enemyRoot = getCharacterRoot(enemyPlayer)
 	if not enemyRoot or activeByTarget[enemyPlayer] then
 		setServerStatus(context.player, "Rejected", "EnemyUnavailable", nil)
+		fireRejectEffectToPlayer(context.player, context.slot, sessionId, "EnemyUnavailable", nil, nil)
 		return false
 	end
 
@@ -747,6 +789,8 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 	sessionId = if sessionId > 0 then sessionId else nextSessionId
 
 	local definition = context.definition
+	local enemyMaxPullTime = getDefinitionNumber(definition, "enemyMaxPullTime", 1)
+	local latencyGraceSeconds = getDefinitionNumber(definition, "latencyGraceSeconds", 0.3)
 	local travelTime, tautSeconds, pullStartAt = getPullStartTiming(definition, getServerOrigin(rootPart), hit.Position, context.now)
 	local session: GrappleSession = {
 		sessionId = sessionId,
@@ -757,7 +801,7 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 		shooterRoot = rootPart,
 		startedAt = context.now,
 		pullStartAt = pullStartAt,
-		maxDuration = getDefinitionNumber(definition, "enemyMaxPullTime", 1),
+		maxDuration = enemyMaxPullTime + latencyGraceSeconds,
 		releaseDistance = getDefinitionNumber(definition, "enemyReleaseDistance", 8),
 		maxRange = getDefinitionNumber(definition, "maxRange", 350),
 		lineOfSightBreaksHook = getDefinitionBoolean(definition, "lineOfSightBreaksHook", true),
@@ -778,7 +822,11 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 			humanoid:TakeDamage(resolvedDamage)
 		end
 	end
-	enemyPlayer:SetAttribute("GrappleHook_StunnedUntil", context.now + getDefinitionNumber(definition, "enemyStunTime", 0.5))
+	local stunnedUntil = context.now + getDefinitionNumber(definition, "enemyStunTime", 0.5)
+	enemyPlayer:SetAttribute(STUNNED_UNTIL_ATTR, stunnedUntil)
+	if enemyPlayer.Character then
+		enemyPlayer.Character:SetAttribute(STUNNED_UNTIL_ATTR, stunnedUntil)
+	end
 
 	setServerStatus(context.player, "AcceptedEnemy", "", hit.Position)
 
@@ -803,7 +851,7 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 				enemyPullSpeed = getDefinitionNumber(definition, "enemyPullSpeed", 95),
 				enemyUpwardBias = getDefinitionNumber(definition, "enemyUpwardBias", 14),
 				enemyReleaseDistance = getDefinitionNumber(definition, "enemyReleaseDistance", 8),
-				enemyMaxPullTime = getDefinitionNumber(definition, "enemyMaxPullTime", 1),
+				enemyMaxPullTime = enemyMaxPullTime,
 			},
 		},
 	}
@@ -820,10 +868,12 @@ local function createBombSession(
 ): AbilityActivationResult
 	if bombRoot and activeByBombRoot[bombRoot] then
 		setServerStatus(context.player, "Rejected", "BombUnavailable", nil)
+		fireRejectEffectToPlayer(context.player, context.slot, sessionId, "BombUnavailable", hitPosition, hitNormal)
 		return false
 	end
 	if projectileId and activeByBombProjectile[projectileId] then
 		setServerStatus(context.player, "Rejected", "BombUnavailable", nil)
+		fireRejectEffectToPlayer(context.player, context.slot, sessionId, "BombUnavailable", hitPosition, hitNormal)
 		return false
 	end
 
@@ -831,6 +881,8 @@ local function createBombSession(
 	sessionId = if sessionId > 0 then sessionId else nextSessionId
 
 	local definition = context.definition
+	local bombMaxPullTime = getDefinitionNumber(definition, "bombMaxPullTime", 1)
+	local latencyGraceSeconds = getDefinitionNumber(definition, "latencyGraceSeconds", 0.3)
 	local travelTime, tautSeconds, pullStartAt = getPullStartTiming(definition, getServerOrigin(rootPart), hitPosition, context.now)
 	local session: GrappleSession = {
 		sessionId = sessionId,
@@ -843,7 +895,7 @@ local function createBombSession(
 		hookPosition = hitPosition,
 		startedAt = context.now,
 		pullStartAt = pullStartAt,
-		maxDuration = getDefinitionNumber(definition, "bombMaxPullTime", 1),
+		maxDuration = bombMaxPullTime + latencyGraceSeconds,
 		releaseDistance = getDefinitionNumber(definition, "bombReleaseDistance", 5),
 		maxRange = getDefinitionNumber(definition, "maxRange", 350),
 		lineOfSightBreaksHook = getDefinitionBoolean(definition, "lineOfSightBreaksHook", true),
@@ -888,7 +940,7 @@ local function createBombSession(
 				bombPullSpeed = getDefinitionNumber(definition, "bombPullSpeed", 115),
 				bombUpwardBias = getDefinitionNumber(definition, "bombUpwardBias", 10),
 				bombReleaseDistance = getDefinitionNumber(definition, "bombReleaseDistance", 5),
-				bombMaxPullTime = getDefinitionNumber(definition, "bombMaxPullTime", 1),
+				bombMaxPullTime = bombMaxPullTime,
 			},
 		},
 	}
@@ -896,19 +948,27 @@ end
 
 function GrappleHook.CanActivate(context: ServerActivateContext): boolean
 	local now = context.now
+	local sessionId = getPayloadSessionId(context.payload)
 	local lastAt = lastRequestAt[context.player]
 	lastRequestAt[context.player] = now
 	if lastAt and now - lastAt < REQUEST_SPAM_SECONDS then
 		setServerStatus(context.player, "Rejected", "Spam", nil)
+		fireRejectEffectToPlayer(context.player, context.slot, sessionId, "Spam", nil, nil)
 		return false
 	end
-	return getCharacterRoot(context.player) ~= nil
+	if not getCharacterRoot(context.player) then
+		setServerStatus(context.player, "Rejected", "NoCharacter", nil)
+		fireRejectEffectToPlayer(context.player, context.slot, sessionId, "NoCharacter", nil, nil)
+		return false
+	end
+	return true
 end
 
 function GrappleHook.OnActivate(context: ServerActivateContext): AbilityActivationResult
 	local rootPart, direction, rejectReason, sessionId = validateRequest(context)
 	if not rootPart or not direction then
 		setServerStatus(context.player, "Rejected", rejectReason, nil)
+		fireRejectEffectToPlayer(context.player, context.slot, sessionId, rejectReason, nil, nil)
 		return false
 	end
 

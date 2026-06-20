@@ -34,6 +34,7 @@ local ACTIVE_FIELDS: { [Player]: { FieldRecord } } = {}
 local SERIALS: { [Player]: number } = {}
 local CAPTURED_PROJECTILES: { [string]: CaptureRecord } = {}
 local RELEASED_AT: { [string]: number } = {}
+local RELEASE_TTL_SECONDS = math.max((BombConfig.FuseSeconds or 3) + (BombConfig.ProjectileLifetimePadding or 0) + 10, 15)
 local abilityService: AbilityServiceLike? = nil
 
 local function getByPath(root: Instance, path: { string }): Instance?
@@ -127,6 +128,15 @@ local function removeRecord(player: Player, fieldId: string): FieldRecord?
 	return nil
 end
 
+local function markReleased(projectileId: string, releaseTime: number)
+	RELEASED_AT[projectileId] = releaseTime
+	task.delay(RELEASE_TTL_SECONDS, function()
+		if RELEASED_AT[projectileId] == releaseTime then
+			RELEASED_AT[projectileId] = nil
+		end
+	end)
+end
+
 local function expireField(player: Player, fieldId: string, currentTime: number?)
 	local record = removeRecord(player, fieldId)
 	if not record then
@@ -138,7 +148,7 @@ local function expireField(player: Player, fieldId: string, currentTime: number?
 		local capture = CAPTURED_PROJECTILES[projectileId]
 		if capture and capture.fieldId == record.id then
 			CAPTURED_PROJECTILES[projectileId] = nil
-			RELEASED_AT[projectileId] = releaseTime
+			markReleased(projectileId, releaseTime)
 		end
 	end
 
@@ -257,7 +267,7 @@ function TimeBubble.OnProjectileStep(context: ServerHookContext): AbilityHookRes
 		return AbilityResult.Continue()
 	elseif capture then
 		CAPTURED_PROJECTILES[projectileId] = nil
-		RELEASED_AT[projectileId] = context.now
+		markReleased(projectileId, context.now)
 	end
 
 	local records = ACTIVE_FIELDS[context.player]
@@ -316,7 +326,7 @@ function TimeBubble.OnPlayerRemoving(player: Player)
 			local capture = CAPTURED_PROJECTILES[projectileId]
 			if capture and capture.fieldId == record.id then
 				CAPTURED_PROJECTILES[projectileId] = nil
-				RELEASED_AT[projectileId] = currentTime
+				markReleased(projectileId, currentTime)
 			end
 		end
 	end

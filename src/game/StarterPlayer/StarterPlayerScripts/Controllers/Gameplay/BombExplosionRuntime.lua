@@ -5,8 +5,10 @@ local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local ExplosionVisibility = require(ReplicatedStorage.Shared.Effects.ExplosionVisibility)
 local OwnerExplosionLaunch = require(ReplicatedStorage.Shared.Effects.OwnerExplosionLaunch)
+local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
 local PlayerHitFlash = require(ReplicatedStorage.Shared.Effects.PlayerHitFlash)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local SettingsConfig = require(ReplicatedStorage.Shared.Config.SettingsConfig)
 local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debris)
 
 local BombExplosionRuntime = {}
@@ -85,6 +87,12 @@ function BombExplosionRuntime.PlayEffect(controller, context, position: Vector3,
 	if decision.quality == ExplosionVisibility.Quality.Skip then
 		return
 	end
+	local explosionQuality = PlayerSettings:Get("explosionVfxQuality")
+	if explosionQuality == SettingsConfig.Quality.Minimal or explosionQuality == SettingsConfig.Quality.Off then
+		decision.quality = ExplosionVisibility.Quality.SoundOnly
+	elseif explosionQuality == SettingsConfig.Quality.Reduced and decision.quality == ExplosionVisibility.Quality.Full then
+		decision.quality = ExplosionVisibility.Quality.SoundOnly
+	end
 
 	local soundLightOnly = decision.quality == ExplosionVisibility.Quality.SoundOnly
 	local emitModule = nil
@@ -120,6 +128,10 @@ end
 
 function BombExplosionRuntime.PlayTerrainDebris(controller, context, payloads)
 	if typeof(payloads) ~= "table" then
+		return
+	end
+	if PlayerSettings:Get("debrisVfxQuality") ~= SettingsConfig.Quality.Full then
+		RuntimeProfiler.Count("Client/BombController/TerrainDebrisSkipped/Settings")
 		return
 	end
 

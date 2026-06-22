@@ -7,6 +7,8 @@ local UserInputService = game:GetService("UserInputService")
 
 local CameraConfig = require(ReplicatedStorage.Shared.Config.CameraConfig)
 local CameraShaker = require(ReplicatedStorage.Shared.Camera.CameraShaker)
+local InputBindings = require(ReplicatedStorage.Shared.Common.InputBindings)
+local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local LocalPlayer = Players.LocalPlayer
@@ -64,6 +66,7 @@ CameraController._shiftLocked = CameraConfig.DefaultShiftLocked == true
 CameraController._headLockedCamera = nil :: Camera?
 CameraController._headLockedSubject = nil :: BasePart?
 CameraController._previousCameraSubject = nil :: Instance?
+CameraController._settingsConnection = nil :: RBXScriptConnection?
 
 local function getControls(): Controls?
 	local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -175,6 +178,18 @@ local function isHudFOVActive(camera: Camera, extraFOVAllowance: number?): boole
 		+ CameraConfig.AirCarryFOVBonus
 		+ (extraFOVAllowance or 0)
 	return camera.FieldOfView > maxMovementFOV + 0.5
+end
+
+local function getShakeScale(): number
+	return PlayerSettings:GetNumberScale("cameraShakeScale")
+end
+
+local function getMotionScale(): number
+	return PlayerSettings:GetNumberScale("cameraMotionScale")
+end
+
+local function getDynamicFOVScale(): number
+	return PlayerSettings:GetNumberScale("dynamicFovScale")
 end
 
 function CameraController:_applyMouseLock(locked: boolean)
@@ -331,18 +346,23 @@ end
 
 function CameraController:_playLandingBump(airborneTime: number)
 	local isHeavyLanding = airborneTime >= CameraConfig.LandingHeavyMinAirTime
+	local shakeScale = getShakeScale()
+	if shakeScale <= 0 then
+		return
+	end
 
 	self:_getCameraShaker():ShakeOnce(
-		if isHeavyLanding then CameraConfig.LandingHeavyShakeMagnitude else CameraConfig.LandingSmallShakeMagnitude,
+		(if isHeavyLanding then CameraConfig.LandingHeavyShakeMagnitude else CameraConfig.LandingSmallShakeMagnitude)
+			* shakeScale,
 		if isHeavyLanding then CameraConfig.LandingHeavyShakeRoughness else CameraConfig.LandingSmallShakeRoughness,
 		0,
 		if isHeavyLanding then CameraConfig.LandingHeavyShakeFadeOutTime else CameraConfig.LandingSmallShakeFadeOutTime,
 		if isHeavyLanding
-			then CameraConfig.LandingHeavyShakePositionInfluence
-			else CameraConfig.LandingSmallShakePositionInfluence,
+			then CameraConfig.LandingHeavyShakePositionInfluence * shakeScale
+			else CameraConfig.LandingSmallShakePositionInfluence * shakeScale,
 		if isHeavyLanding
-			then CameraConfig.LandingHeavyShakeRotationInfluence
-			else CameraConfig.LandingSmallShakeRotationInfluence
+			then CameraConfig.LandingHeavyShakeRotationInfluence * shakeScale
+			else CameraConfig.LandingSmallShakeRotationInfluence * shakeScale
 	)
 end
 
@@ -382,15 +402,18 @@ function CameraController:_getAirActionPunch(now: number): (Vector3, number)
 end
 
 function CameraController:PlayBombThrowPunch()
+	local shakeScale = getShakeScale()
 	self._throwFOVStartTime = os.clock()
-	self:_getCameraShaker():ShakeOnce(
-		CameraConfig.ThrowShakeMagnitude,
-		CameraConfig.ThrowShakeRoughness,
-		0,
-		CameraConfig.ThrowShakeFadeOutTime,
-		CameraConfig.ThrowShakePositionInfluence,
-		CameraConfig.ThrowShakeRotationInfluence
-	)
+	if shakeScale > 0 then
+		self:_getCameraShaker():ShakeOnce(
+			CameraConfig.ThrowShakeMagnitude * shakeScale,
+			CameraConfig.ThrowShakeRoughness,
+			0,
+			CameraConfig.ThrowShakeFadeOutTime,
+			CameraConfig.ThrowShakePositionInfluence * shakeScale,
+			CameraConfig.ThrowShakeRotationInfluence * shakeScale
+		)
+	end
 end
 
 function CameraController:PlayAirBurstPunch()
@@ -399,14 +422,17 @@ function CameraController:PlayAirBurstPunch()
 		CameraConfig.AirBurstPunchFOVBonus,
 		CameraConfig.AirBurstPunchOffset
 	)
-	self:_getCameraShaker():ShakeOnce(
-		CameraConfig.AirBurstShakeMagnitude,
-		CameraConfig.AirBurstShakeRoughness,
-		0,
-		CameraConfig.AirBurstShakeFadeOutTime,
-		CameraConfig.AirBurstShakePositionInfluence,
-		CameraConfig.AirBurstShakeRotationInfluence
-	)
+	local shakeScale = getShakeScale()
+	if shakeScale > 0 then
+		self:_getCameraShaker():ShakeOnce(
+			CameraConfig.AirBurstShakeMagnitude * shakeScale,
+			CameraConfig.AirBurstShakeRoughness,
+			0,
+			CameraConfig.AirBurstShakeFadeOutTime,
+			CameraConfig.AirBurstShakePositionInfluence * shakeScale,
+			CameraConfig.AirBurstShakeRotationInfluence * shakeScale
+		)
+	end
 end
 
 function CameraController:PlayGrapplePullPunch()
@@ -415,14 +441,17 @@ function CameraController:PlayGrapplePullPunch()
 		CameraConfig.GrapplePunchFOVBonus,
 		CameraConfig.GrapplePunchOffset
 	)
-	self:_getCameraShaker():ShakeOnce(
-		CameraConfig.AirBurstShakeMagnitude * 0.85,
-		CameraConfig.AirBurstShakeRoughness,
-		0,
-		CameraConfig.AirBurstShakeFadeOutTime,
-		Vector3.new(0.02, 0.04, 0.02),
-		Vector3.new(0.22, 0.08, 0.12)
-	)
+	local shakeScale = getShakeScale()
+	if shakeScale > 0 then
+		self:_getCameraShaker():ShakeOnce(
+			CameraConfig.AirBurstShakeMagnitude * 0.85 * shakeScale,
+			CameraConfig.AirBurstShakeRoughness,
+			0,
+			CameraConfig.AirBurstShakeFadeOutTime,
+			Vector3.new(0.02, 0.04, 0.02) * shakeScale,
+			Vector3.new(0.22, 0.08, 0.12) * shakeScale
+		)
+	end
 end
 
 function CameraController:PlayAbilityFOVPunch(duration: number, fovBonus: number)
@@ -455,6 +484,8 @@ function CameraController:PlayExplosionShake(origin: Vector3, radius: number?)
 	end
 
 	local strength = smoothstep(1 - math.clamp(distance / maxRadius, 0, 1))
+	local shakeScale = getShakeScale()
+	strength *= shakeScale
 	if strength <= 0 then
 		return
 	end
@@ -470,13 +501,17 @@ function CameraController:PlayExplosionShake(origin: Vector3, radius: number?)
 end
 
 function CameraController:PlayLocalBombExplosionShake()
+	local shakeScale = getShakeScale()
+	if shakeScale <= 0 then
+		return
+	end
 	self:_getCameraShaker():ShakeOnce(
-		CameraConfig.LocalBombExplosionShakeMagnitude,
+		CameraConfig.LocalBombExplosionShakeMagnitude * shakeScale,
 		CameraConfig.LocalBombExplosionShakeRoughness,
 		0,
 		CameraConfig.LocalBombExplosionShakeFadeOutTime,
-		CameraConfig.LocalBombExplosionShakePositionInfluence,
-		CameraConfig.LocalBombExplosionShakeRotationInfluence
+		CameraConfig.LocalBombExplosionShakePositionInfluence * shakeScale,
+		CameraConfig.LocalBombExplosionShakeRotationInfluence * shakeScale
 	)
 end
 
@@ -502,6 +537,7 @@ function CameraController:PlayOrbitalStrikeShake(origin: Vector3, config: { [str
 	end
 
 	local strength = smoothstep(1 - math.clamp(distance / maxRadius, 0, 1))
+	strength *= getShakeScale()
 	if strength <= 0 then
 		return
 	end
@@ -919,6 +955,7 @@ function CameraController:_step(dt: number)
 	targetFOV -= CameraConfig.LandingSettleMaxFOVDip * landingSettleAlpha
 	targetFOV += throwFOVBonus
 	targetFOV += airActionFOVBonus
+	targetFOV = CameraConfig.BaseFOV + ((targetFOV - CameraConfig.BaseFOV) * getDynamicFOVScale())
 
 	if
 		isFrameFOVActive()
@@ -951,11 +988,16 @@ function CameraController:_step(dt: number)
 	self._currentRoll = smoothNumber(self._currentRoll, targetRoll, CameraConfig.RollResponsiveness, dt)
 	self._currentLandingSettleYOffset = CameraConfig.LandingSettleMaxYOffset * landingSettleAlpha
 
-	local cameraMotionOffset = self._currentAirMotionOffset + airActionOffset + Vector3.new(0, takeoffLiftYOffset, 0)
-	local cameraRoll = self._currentRoll + self._currentAirRoll
+	local motionScale = getMotionScale()
+	local cameraMotionOffset = (self._currentAirMotionOffset + airActionOffset + Vector3.new(0, takeoffLiftYOffset, 0))
+		* motionScale
+	local cameraRoll = (self._currentRoll + self._currentAirRoll) * motionScale
+	local fallLagYOffset = self._currentFallLagYOffset * motionScale
+	local fallAnticipationYOffset = self._currentFallAnticipationYOffset * motionScale
+	local landingSettleYOffset = self._currentLandingSettleYOffset * motionScale
 	if firstPerson then
 		cameraMotionOffset = Vector3.zero
-		cameraRoll = self._currentRoll
+		cameraRoll = self._currentRoll * motionScale
 	end
 
 	local shakeCFrame = self:_getCameraShaker():Update(dt)
@@ -963,11 +1005,23 @@ function CameraController:_step(dt: number)
 	camera.CFrame = camera.CFrame
 		* CFrame.new(self._currentShoulderOffset)
 		* CFrame.new(cameraMotionOffset)
-		* CFrame.new(0, self._currentFallLagYOffset, 0)
-		* CFrame.new(0, self._currentFallAnticipationYOffset, 0)
-		* CFrame.new(0, self._currentLandingSettleYOffset, 0)
+		* CFrame.new(0, fallLagYOffset, 0)
+		* CFrame.new(0, fallAnticipationYOffset, 0)
+		* CFrame.new(0, landingSettleYOffset, 0)
 		* CFrame.Angles(0, 0, cameraRoll)
 		* shakeCFrame
+end
+
+function CameraController:_bindShiftLockAction()
+	ContextActionService:UnbindAction(SHIFT_LOCK_ACTION_NAME)
+	ContextActionService:BindAction(
+		SHIFT_LOCK_ACTION_NAME,
+		function(...)
+			return self:_handleShiftLockAction(...)
+		end,
+		false,
+		table.unpack(InputBindings.GetShiftLockInputs())
+	)
 end
 
 function CameraController:_handleShiftLockAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
@@ -981,15 +1035,15 @@ end
 function CameraController:OnStart()
 	self._controls = getControls()
 
-	ContextActionService:UnbindAction(SHIFT_LOCK_ACTION_NAME)
-	ContextActionService:BindAction(
-		SHIFT_LOCK_ACTION_NAME,
-		function(...)
-			return self:_handleShiftLockAction(...)
-		end,
-		false,
-		CameraConfig.ShiftLockToggleKey
-	)
+	self:_bindShiftLockAction()
+	if self._settingsConnection then
+		self._settingsConnection:Disconnect()
+	end
+	self._settingsConnection = PlayerSettings.Changed:Connect(function(id)
+		if id == "shiftLockKey" then
+			self:_bindShiftLockAction()
+		end
+	end)
 
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function(dt)

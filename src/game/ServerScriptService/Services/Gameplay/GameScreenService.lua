@@ -619,9 +619,9 @@ local function formatSubheading(state): string
 	return "Waiting for players..."
 end
 
-local function getCoreCount(state, teamName: string): number
-	local coreCounts = state and state.coreCounts
-	local count = if typeof(coreCounts) == "table" then coreCounts[teamName] else 0
+local function getTeamKillCount(state, teamName: string): number
+	local teamKillCounts = state and state.teamKillCounts
+	local count = if typeof(teamKillCounts) == "table" then teamKillCounts[teamName] else 0
 	count = tonumber(count) or 0
 	if count ~= count or count < 0 then
 		return 0
@@ -695,8 +695,8 @@ local function render()
 
 	currentWidgets.redRespawnsGui.Enabled = isActive or usesIntermissionAppearance == true
 	currentWidgets.blueRespawnsGui.Enabled = isActive or usesIntermissionAppearance == true
-	currentWidgets.redRespawnsLabel.Text = if usesIntermissionAppearance then "..." else tostring(getCoreCount(state, RED_TEAM_NAME))
-	currentWidgets.blueRespawnsLabel.Text = if usesIntermissionAppearance then "..." else tostring(getCoreCount(state, BLUE_TEAM_NAME))
+	currentWidgets.redRespawnsLabel.Text = if usesIntermissionAppearance then "..." else tostring(getTeamKillCount(state, RED_TEAM_NAME))
+	currentWidgets.blueRespawnsLabel.Text = if usesIntermissionAppearance then "..." else tostring(getTeamKillCount(state, BLUE_TEAM_NAME))
 	currentWidgets.aliveCounterValue.Text = tostring(getAlivePlayerCount(state))
 	currentWidgets.inServerCounterValue.Text = tostring(#Players:GetPlayers())
 	currentWidgets.playingCounterValue.Text = tostring(getPlayingPlayerCount(state))

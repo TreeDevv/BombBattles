@@ -2,6 +2,7 @@ local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local AudioSettings = require(ReplicatedStorage.Shared.Audio.AudioSettings)
 local Spring = require(ReplicatedStorage.Shared.Common.Spring)
 
 local TOOL_CONNECTION: RBXScriptConnection? = nil
@@ -27,6 +28,7 @@ end
 local function playOptionalSound(container: Instance, soundName: string)
 	local sound = container:FindFirstChild(soundName)
 	if sound and sound:IsA("Sound") then
+		sound.SoundGroup = AudioSettings.GetGroup("UI")
 		sound:Play()
 	end
 end

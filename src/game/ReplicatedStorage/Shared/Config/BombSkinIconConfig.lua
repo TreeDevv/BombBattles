@@ -2,38 +2,37 @@ local BombSkinIconConfig = {}
 
 local icons = {
 	Default = "rbxassetid://112184464455965",
-	Ghost = "rbxassetid://121317684202145",
-	Pizza = "rbxassetid://108013565269646",
-	Red = "rbxassetid://72985554991898",
-	Cannonball = "rbxassetid://107504780514271",
-	UFO = "rbxassetid://100120510742069",
-	Slime = "rbxassetid://117851012548592",
-	Snowball = "rbxassetid://128960525512793",
-	Disco = "rbxassetid://89047457211561",
-	RubberDuck = "rbxassetid://92738673119949",
-	Meteor = "rbxassetid://84224655165572",
-	Pumpkin = "rbxassetid://93118021388732",
-	Blue = "rbxassetid://93000687181112",
-	TreasureChest = "rbxassetid://139166088005660",
-	Chicken = "rbxassetid://104572841319756",
-	Beehive = "rbxassetid://94602507566144",
-	Paint = "rbxassetid://94752366203347",
-	Firework = "rbxassetid://92294335942021",
-	WaterBalloon = "rbxassetid://93230000148289",
-	TNT = "rbxassetid://138130241539769",
-	EventHorizon = "rbxassetid://106484205535599",
-	Smoke = "rbxassetid://139198785900668",
-	Rusty = "rbxassetid://111202257460621",
-	Gold = "rbxassetid://125777910504344",
-	Toy = "rbxassetid://119441858039488",
-	Nuke = "rbxassetid://125852408372171",
-	Shark = "rbxassetid://124959579197911",
-	FatGuy = "rbxassetid://107317017502986",
+	Red = "rbxassetid://71293779484632",
+	Blue = "rbxassetid://136349207297773",
+	Rusty = "rbxassetid://111490800094903",
+	Toy = "rbxassetid://106602275657078",
+	TNT = "rbxassetid://86937336244768",
+	Cannonball = "rbxassetid://87660896999009",
+	WaterBalloon = "rbxassetid://105082749460502",
+	Paint = "rbxassetid://137238989130297",
+	Smoke = "rbxassetid://106321296285028",
+	Firework = "rbxassetid://95505454938665",
+	Beehive = "rbxassetid://104188729786725",
+	Chicken = "rbxassetid://114474665085007",
+	Pizza = "rbxassetid://83670286703206",
+	Snowball = "rbxassetid://112758032741859",
+	Slime = "rbxassetid://83108723563228",
+	RubberDuck = "rbxassetid://106483697466531",
+	Disco = "rbxassetid://124938911233454",
+	Pumpkin = "rbxassetid://118317426473189",
+	Meteor = "rbxassetid://88753226580637",
+	Ghost = "rbxassetid://113197926864579",
+	Shark = "rbxassetid://97890152431889",
+	TreasureChest = "rbxassetid://73171907878677",
+	UFO = "rbxassetid://100989491332496",
+	Nuke = "rbxassetid://100190229096228",
+	FatGuy = "rbxassetid://116354763358266",
+	HollowPurple = "rbxassetid://111981190835677",
+	Gold = "rbxassetid://115895528667213",
+	EventHorizon = "rbxassetid://102755267228381",
 }
 
-local archivedIcons = {
-	HollowPurple = "rbxassetid://126087450437587",
-}
+local archivedIcons = {}
 
 local iconAliases = {}
 local archivedIconAliases = {}
@@ -58,6 +57,8 @@ addAlias(iconAliases, "Event Horizon", "EventHorizon")
 addAlias(iconAliases, "Event_Horizon", "EventHorizon")
 addAlias(iconAliases, "Fat Guy", "FatGuy")
 addAlias(iconAliases, "Fat_Guy", "FatGuy")
+addAlias(iconAliases, "Hollow Purple", "HollowPurple")
+addAlias(iconAliases, "Hollow_Purple", "HollowPurple")
 addAlias(iconAliases, "Nuke_2", "Nuke")
 addAlias(iconAliases, "Rubber Duck", "RubberDuck")
 addAlias(iconAliases, "Rubber_Duck", "RubberDuck")
@@ -69,9 +70,6 @@ addAlias(iconAliases, "Water_Balloon", "WaterBalloon")
 for skinId in pairs(archivedIcons) do
 	addAlias(archivedIconAliases, skinId, skinId)
 end
-
-addAlias(archivedIconAliases, "Hollow Purple", "HollowPurple")
-addAlias(archivedIconAliases, "Hollow_Purple", "HollowPurple")
 
 function BombSkinIconConfig.GetIconImage(skinId: any): string?
 	if typeof(skinId) ~= "string" then

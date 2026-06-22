@@ -145,6 +145,9 @@ function RoundDeathRuntime.CreditScoreboardDeath(options)
 	if finisherId ~= "" then
 		playerKilledPayload.finisherId = finisherId
 	end
+	if type(options.creditTeamKill) == "function" then
+		options.creditTeamKill(playerKilledPayload)
+	end
 	options.debugDeathFlow("PlayerKilled payload built", playerKilledPayload)
 	options.recordReplayEvent("PlayerKilled", playerKilledPayload)
 	if finisherId ~= "" then

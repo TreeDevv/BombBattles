@@ -2,6 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 
 local BombTrajectoryClient = {}
@@ -59,7 +60,7 @@ function BombTrajectoryClient.GetMouseAimDirection(rootPart: BasePart?): Vector3
 end
 
 function BombTrajectoryClient.GetThrowOrigin(rootPart: BasePart): Vector3
-	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
+	return BombThrowOrigin.GetOrigin(rootPart)
 end
 
 function BombTrajectoryClient.CalculateTrajectoryWithConfig(

@@ -221,6 +221,7 @@ local catalog = {
 		displayName = "Hollow Purple",
 		assetFolder = "Hollow Purple",
 		rarity = "Divine",
+		description = "A cursed violet shell that pulls every throw into impossible force.",
 		catalogOrder = 25.5,
 	},
 	{

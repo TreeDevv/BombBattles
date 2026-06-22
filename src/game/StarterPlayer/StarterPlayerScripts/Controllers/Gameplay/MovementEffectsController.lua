@@ -72,8 +72,10 @@ function MovementEffectsController:_enableSpeedEffect(intensity: number)
 	end
 
 	if self._effectActive then
-		ScreenEffectsController:SetIntensity(getConfigValue("PresetName", "Speed"), intensity)
-		return
+		if ScreenEffectsController:SetIntensity(getConfigValue("PresetName", "Speed"), intensity) then
+			return
+		end
+		self._effectActive = false
 	end
 
 	self._effectActive = ScreenEffectsController:Enable(getConfigValue("PresetName", "Speed"), {

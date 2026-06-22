@@ -20,6 +20,7 @@ local RoundCoreRuntime = require(ServerScriptService.Services.RoundCoreRuntime)
 local RoundDamageRuntime = require(ServerScriptService.Services.RoundDamageRuntime)
 local RoundDeathRuntime = require(ServerScriptService.Services.RoundDeathRuntime)
 local RoundKillFeedRuntime = require(ServerScriptService.Services.RoundKillFeedRuntime)
+local RoundLightingRuntime = require(ServerScriptService.Services.RoundLightingRuntime)
 local RoundMapRuntime = require(ServerScriptService.Services.RoundMapRuntime)
 local RoundPlayerStateRuntime = require(ServerScriptService.Services.RoundPlayerStateRuntime)
 local RoundRagdollRuntime = require(ServerScriptService.Services.RoundRagdollRuntime)
@@ -36,6 +37,10 @@ local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatan
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
 
 local TEAM_ORDER = { RoundConfig.Teams.Red.name, RoundConfig.Teams.Blue.name }
+local VALID_ROUND_TEAMS = {
+	[RoundConfig.Teams.Red.name] = true,
+	[RoundConfig.Teams.Blue.name] = true,
+}
 local REMOTES_FOLDER_NAME = "Remotes"
 local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
 local SET_AFK_REMOTE_NAME = "SetAFK"
@@ -59,6 +64,10 @@ local DEATH_BODY_RETAIN_SECONDS = 1.8
 local RESPAWN_LOAD_VERIFY_DELAY_SECONDS = 0.65
 local RESPAWN_LOAD_MAX_ATTEMPTS = 3
 local ROUND_CHARACTER_READY_TIMEOUT_SECONDS = 5
+local CHARACTER_READINESS_WATCHDOG_TIMEOUT_SECONDS = ROUND_CHARACTER_READY_TIMEOUT_SECONDS
+local CHARACTER_READINESS_WATCHDOG_CHECK_INTERVAL_SECONDS = 0.1
+local CHARACTER_READINESS_WATCHDOG_RETRY_WINDOW_SECONDS = 20
+local CHARACTER_READINESS_WATCHDOG_MAX_RECOVERIES = 2
 local LOBBY_VOID_FALL_CHECK_INTERVAL_SECONDS = 0.25
 local LOBBY_VOID_FALL_SPAWN_PADDING_STUDS = 80
 local DEBUG_REPLAY_EVENTS = false
@@ -84,6 +93,49 @@ type VoteChoice = {
 	displayName: string,
 	thumbnailImage: string?,
 }
+
+local function isValidRoundTeam(teamName: any): boolean
+	return typeof(teamName) == "string" and VALID_ROUND_TEAMS[teamName] == true
+end
+
+local function buildInitialTeamKillCounts(): { [string]: number }
+	return {
+		[RoundConfig.Teams.Red.name] = 0,
+		[RoundConfig.Teams.Blue.name] = 0,
+	}
+end
+
+local function getCreditedTeamKill(payload): string?
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+
+	local killerTeam = payload.killerTeam
+	local victimTeam = payload.victimTeam
+	if not isValidRoundTeam(killerTeam) or not isValidRoundTeam(victimTeam) then
+		return nil
+	end
+	if killerTeam == victimTeam then
+		return nil
+	end
+
+	return killerTeam
+end
+
+local function getTeamKillWinner(counts: { [string]: number }): string
+	local redTeam = RoundConfig.Teams.Red.name
+	local blueTeam = RoundConfig.Teams.Blue.name
+	local redKills = tonumber(counts[redTeam]) or 0
+	local blueKills = tonumber(counts[blueTeam]) or 0
+
+	if redKills > blueKills then
+		return redTeam
+	end
+	if blueKills > redKills then
+		return blueTeam
+	end
+	return "Draw"
+end
 
 local getConfiguredMap: (string) -> MapConfig?
 local getTrackedTeamName: (Player) -> string?
@@ -121,8 +173,10 @@ local playerVotes: { [Player]: string } = {}
 local roundPlayers: { [Player]: boolean } = {}
 local alivePlayers: { [Player]: boolean } = {}
 local playerTeams: { [Player]: string } = {}
+local teamKillCounts: { [string]: number } = buildInitialTeamKillCounts()
 local characterConnections = ConnectionGroupMap.new()
 local lobbyCharacterConnections = ConnectionGroupMap.new()
+local characterReadinessWatchdogConnections = ConnectionGroupMap.new()
 local respawnTokens = RoundRespawnTokens.new()
 local teamCoreInstances: { [string]: { Instance } } = {}
 local coreConnections = ConnectionGroupMap.new()
@@ -134,6 +188,8 @@ local RoundFlow = {}
 local lobbyVoidFallConnection: RBXScriptConnection? = nil
 local lobbyVoidFallAccumulator = 0
 local lobbyVoidResettingPlayers: { [Player]: boolean } = {}
+local characterReadinessWatchdogSerials: { [Player]: number } = {}
+local characterReadinessWatchdogRecoveries: { [Player]: { startedAt: number, count: number } } = {}
 RespawnFlow.VoidFallPadding = 70
 RespawnFlow.LobbyDeathBoundAttribute = "LobbyDeathBound"
 RespawnFlow.RoundDeathBoundAttribute = "RoundDeathBound"
@@ -165,20 +221,6 @@ local function getRequiredPlayerCount(): number
 	return RoundConfig.MinPlayers
 end
 
-local function isSoloStudioRoundHeldActive(counts): boolean
-	local studioTesting = RoundConfig.StudioTesting
-	if not (RunService:IsStudio() and studioTesting and studioTesting.HoldSoloRoundsActive == true) then
-		return false
-	end
-	if getRequiredPlayerCount() > 1 or #Players:GetPlayers() ~= 1 then
-		return false
-	end
-
-	local red = counts[RoundConfig.Teams.Red.name] or 0
-	local blue = counts[RoundConfig.Teams.Blue.name] or 0
-	return red + blue == 1
-end
-
 local function buildInitialState()
 	return {
 		roundId = 0,
@@ -197,6 +239,7 @@ local function buildInitialState()
 			[RoundConfig.Teams.Red.name] = 0,
 			[RoundConfig.Teams.Blue.name] = 0,
 		},
+		teamKillCounts = buildInitialTeamKillCounts(),
 		respawnsEnabled = {
 			[RoundConfig.Teams.Red.name] = false,
 			[RoundConfig.Teams.Blue.name] = false,
@@ -346,6 +389,25 @@ local function syncScoreboardPlatforms()
 	setReplicaValue({ "scoreboardPlatforms" }, deepCopy(scoreboardState.platforms))
 end
 
+local function syncTeamKillCounts()
+	setReplicaValue({ "teamKillCounts" }, deepCopy(teamKillCounts))
+end
+
+local function resetTeamKillCounts()
+	teamKillCounts = buildInitialTeamKillCounts()
+	syncTeamKillCounts()
+end
+
+local function creditTeamKill(payload)
+	local teamName = getCreditedTeamKill(payload)
+	if not teamName then
+		return
+	end
+
+	teamKillCounts[teamName] = (teamKillCounts[teamName] or 0) + 1
+	syncTeamKillCounts()
+end
+
 local function resetScoreboardStats()
 	scoreboardState:Reset()
 	syncScoreboardStats()
@@ -435,6 +497,7 @@ local function creditScoreboardDeath(victim: Player)
 		sendWorldText = sendWorldText,
 		debugDeathFlow = debugDeathFlow,
 		clearRecentDamageFor = clearRecentDamageFor,
+		creditTeamKill = creditTeamKill,
 		syncScoreboardStats = syncScoreboardStats,
 	})
 end
@@ -587,6 +650,7 @@ function RespawnFlow.clearWaitingStateResidue()
 		[RoundConfig.Teams.Red.name] = false,
 		[RoundConfig.Teams.Blue.name] = false,
 	})
+	resetTeamKillCounts()
 	setReplicaValue({ "selectedMapId" }, "")
 end
 
@@ -618,8 +682,11 @@ local function countAliveCores()
 	return RoundCoreRuntime.CountAliveCores(teamCoreInstances)
 end
 
-local function buildRespawnState(coreCounts: { [string]: number })
-	return RoundCoreRuntime.BuildRespawnState(coreCounts)
+local function buildRespawnState(_coreCounts: { [string]: number })
+	return {
+		[RoundConfig.Teams.Red.name] = true,
+		[RoundConfig.Teams.Blue.name] = true,
+	}
 end
 
 local reconcilePlayersWithoutRespawns: (() -> ())?
@@ -635,11 +702,44 @@ local function syncCoreState()
 end
 
 local function teamHasRespawns(teamName: string?): boolean
-	return RoundCoreRuntime.TeamHasRespawns(teamCoreInstances, teamName)
+	return isValidRoundTeam(teamName)
 end
 
 local function hasUsableCharacter(player: Player): boolean
 	return RoundCharacterRuntime.HasUsableCharacter(player)
+end
+
+local function getMissingCharacterReadiness(character: Model): ({ string }, boolean)
+	local missing = {}
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then
+		table.insert(missing, "Humanoid")
+	elseif humanoid.Health <= 0 then
+		return { "HumanoidDead" }, true
+	end
+
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not (rootPart and rootPart:IsA("BasePart")) then
+		table.insert(missing, "HumanoidRootPart")
+	end
+
+	local abilityManagerActor = character:FindFirstChild("AbilityManagerActor")
+	if not abilityManagerActor then
+		table.insert(missing, "AbilityManagerActor")
+	elseif not abilityManagerActor:FindFirstChild("Abilities") then
+		table.insert(missing, "AbilityManagerActor.Abilities")
+	end
+
+	if not character:FindFirstChildOfClass("ControllerManager") then
+		table.insert(missing, "ControllerManager")
+	end
+
+	return missing, false
+end
+
+local function isCharacterReadyForGameplay(character: Model): boolean
+	local missing, terminal = getMissingCharacterReadiness(character)
+	return not terminal and #missing == 0
 end
 
 function RespawnFlow.prepareDeathRagdoll(character: Model)
@@ -916,12 +1016,148 @@ function RespawnFlow.verifyRoundRespawn(player: Player, token: number, attempt: 
 	})
 end
 
+local function canRecoverCharacterReadiness(player: Player): boolean
+	local nowSeconds = os.clock()
+	local record = characterReadinessWatchdogRecoveries[player]
+	if not record or nowSeconds - record.startedAt > CHARACTER_READINESS_WATCHDOG_RETRY_WINDOW_SECONDS then
+		characterReadinessWatchdogRecoveries[player] = {
+			startedAt = nowSeconds,
+			count = 1,
+		}
+		return true
+	end
+
+	if record.count >= CHARACTER_READINESS_WATCHDOG_MAX_RECOVERIES then
+		return false
+	end
+
+	record.count += 1
+	return true
+end
+
+function RespawnFlow.recoverBrokenCharacter(player: Player, character: Model, reason: string, missing: { string }): boolean
+	if player.Parent ~= Players or player.Character ~= character or not character.Parent then
+		return false
+	end
+	if not canRecoverCharacterReadiness(player) then
+		warn(("[RoundService] Character readiness watchdog retry cap reached for %s; missing=%s reason=%s"):format(
+			player.Name,
+			table.concat(missing, ","),
+			reason
+		))
+		return false
+	end
+
+	warn(("[RoundService] Character readiness watchdog respawning %s; missing=%s reason=%s"):format(
+		player.Name,
+		table.concat(missing, ","),
+		reason
+	))
+
+	if roundPlayers[player] == true and alivePlayers[player] == true then
+		cancelScheduledRespawn(player)
+		cancelScheduledCharacterDestroy(player)
+		clearRecentDamageFor(player)
+		player:SetAttribute(ROUND_ALIVE_ATTR, false)
+		player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, workspace:GetServerTimeNow())
+		syncAliveCounts()
+
+		local token = bumpRespawnToken(player)
+		respawnTokens:SetPendingRoundRespawn(player, token)
+		if not RespawnFlow.safeLoadCharacter(player, "CharacterReadinessWatchdogRound") then
+			return false
+		end
+		RespawnFlow.verifyRoundRespawn(player, token, 1)
+		return true
+	end
+
+	if roundPlayers[player] == true then
+		debugDeathFlow(
+			"Character readiness watchdog skipped round-tracked non-alive player",
+			player.Name,
+			currentState,
+			tostring(alivePlayers[player])
+		)
+		return false
+	end
+
+	local token = bumpRespawnToken(player)
+	return RespawnFlow.respawnPlayerToLobby(player, "CharacterReadinessWatchdogLobby", true, token)
+end
+
+local function watchCharacterReadiness(player: Player, character: Model)
+	characterReadinessWatchdogSerials[player] = (characterReadinessWatchdogSerials[player] or 0) + 1
+	local serial = characterReadinessWatchdogSerials[player]
+
+	task.spawn(function()
+		local deadline = os.clock() + CHARACTER_READINESS_WATCHDOG_TIMEOUT_SECONDS
+		local lastMissing = {}
+
+		while os.clock() <= deadline do
+			if player.Parent ~= Players or player.Character ~= character or not character.Parent then
+				return
+			end
+			if characterReadinessWatchdogSerials[player] ~= serial then
+				return
+			end
+
+			local missing, terminal = getMissingCharacterReadiness(character)
+			if terminal then
+				return
+			end
+			if #missing == 0 then
+				return
+			end
+			lastMissing = missing
+			task.wait(CHARACTER_READINESS_WATCHDOG_CHECK_INTERVAL_SECONDS)
+		end
+
+		if player.Parent ~= Players or player.Character ~= character or not character.Parent then
+			return
+		end
+		if characterReadinessWatchdogSerials[player] ~= serial then
+			return
+		end
+		if isCharacterReadyForGameplay(character) then
+			return
+		end
+
+		local missing, terminal = getMissingCharacterReadiness(character)
+		if terminal then
+			return
+		end
+		if #missing == 0 then
+			missing = lastMissing
+		end
+		RespawnFlow.recoverBrokenCharacter(player, character, "ReadinessTimeout", missing)
+	end)
+end
+
+local function bindCharacterReadinessWatchdog(player: Player)
+	characterReadinessWatchdogConnections:Reset(player)
+	characterReadinessWatchdogSerials[player] = (characterReadinessWatchdogSerials[player] or 0) + 1
+
+	characterReadinessWatchdogConnections:Add(player, player.CharacterAdded:Connect(function(character)
+		watchCharacterReadiness(player, character)
+	end))
+
+	if player.Character then
+		watchCharacterReadiness(player, player.Character)
+	end
+end
+
 local function disconnectCharacterConnections(player: Player)
 	characterConnections:Disconnect(player)
 end
 
 local function disconnectLobbyCharacterConnection(player: Player)
 	lobbyCharacterConnections:Disconnect(player)
+end
+
+local function disconnectCharacterReadinessWatchdog(player: Player)
+	characterReadinessWatchdogConnections:Disconnect(player)
+	characterReadinessWatchdogSerials[player] = (characterReadinessWatchdogSerials[player] or 0) + 1
+	characterReadinessWatchdogRecoveries[player] = nil
 end
 
 local function bindLobbyCharacter(player: Player)
@@ -1012,12 +1248,6 @@ local function setupTeamCores(map: Model): boolean
 		end
 		teamCoreInstances[teamName] = repairedCores
 
-		if #repairedCores < RoundConfig.Cores.MinPerTeam then
-			warn("[RoundService] Missing TeamCore tagged instances for team:", teamName)
-			syncCoreState()
-			return false
-		end
-
 		for _, core in ipairs(repairedCores) do
 			bindCore(core, map)
 		end
@@ -1027,42 +1257,8 @@ local function setupTeamCores(map: Model): boolean
 	return true
 end
 
-local function getWinnerFromObjectiveState(aliveCounts, coreCounts): string?
-	local redTeam = RoundConfig.Teams.Red.name
-	local blueTeam = RoundConfig.Teams.Blue.name
-	local redAlive = aliveCounts[redTeam] or 0
-	local blueAlive = aliveCounts[blueTeam] or 0
-	local redCores = coreCounts[redTeam] or 0
-	local blueCores = coreCounts[blueTeam] or 0
-
-	local redEliminated = redAlive <= 0 and redCores <= 0
-	local blueEliminated = blueAlive <= 0 and blueCores <= 0
-
-	if redEliminated and blueEliminated then
-		return "Draw"
-	end
-	if blueEliminated then
-		return redTeam
-	end
-	if redEliminated then
-		return blueTeam
-	end
-
-	return nil
-end
-
 local function getTimeoutWinner(): string
-	local counts = countAlivePlayers()
-	local red = counts[RoundConfig.Teams.Red.name] or 0
-	local blue = counts[RoundConfig.Teams.Blue.name] or 0
-
-	if red > blue then
-		return RoundConfig.Teams.Red.name
-	end
-	if blue > red then
-		return RoundConfig.Teams.Blue.name
-	end
-	return "Draw"
+	return getTeamKillWinner(teamKillCounts)
 end
 
 eliminatePlayer = function(player: Player)
@@ -1420,6 +1616,7 @@ function RoundFlow.createNewRound()
 	roundId += 1
 	resetReplayRoundState()
 	resetScoreboardStats()
+	resetTeamKillCounts()
 	setReplicaValue({ "roundId" }, roundId)
 	setReplicaValue({ "selectedMapId" }, "")
 	setReplicaValue({ "roundResults" }, {})
@@ -1480,16 +1677,6 @@ function RoundFlow.runActiveRound()
 			return
 		end
 
-		local aliveCounts = countAlivePlayers()
-		local winner = getWinnerFromObjectiveState(aliveCounts, countAliveCores())
-		if winner then
-			if isSoloStudioRoundHeldActive(aliveCounts) then
-				task.wait(0.2)
-				continue
-			end
-			RoundFlow.endRound(winner)
-			return
-		end
 		task.wait(0.2)
 	end
 
@@ -1505,12 +1692,14 @@ function RoundFlow.resetRound()
 	DestructionService:Cleanup()
 	clearActiveMap()
 	DestructionService:EndBulkUpdate("RoundReset")
+	RoundLightingRuntime.RestoreDefaultLighting()
 	clearPreparedMapClones(nil)
 	clearAllRoundTracking()
 	for _, player in ipairs(Players:GetPlayers()) do
 		clearPlayerRoundState(player)
 	end
 	resetScoreboardStats()
+	resetTeamKillCounts()
 	setReplicaValue({ "selectedMapId" }, "")
 	setReplicaValue({ "roundResults" }, {})
 	setVotingOpen(false)
@@ -1620,6 +1809,9 @@ function RoundService:_runRoundLoop()
 		local map = spawnActiveMap(selectedMapId)
 		local mapReady = map and setupTeamCores(map)
 		DestructionService:EndBulkUpdate("RoundMapSetup")
+		if map then
+			RoundLightingRuntime.ApplyMapLighting(map)
+		end
 		if not mapReady or not map or not RoundService.TeleportTeamsToMap(map) then
 			RoundFlow.cancelToWaiting("Round cancelled because map setup is incomplete")
 			continue
@@ -1689,6 +1881,8 @@ end
 
 function RoundService:OnStart()
 	Players.CharacterAutoLoads = false
+	RoundLightingRuntime.Initialize()
+	StudioAICombatants.SetTeamKillRecorder(creditTeamKill)
 	RespawnFlow.startLobbyVoidFallMonitor()
 	DestructionService:SetScoreRecorder(function(sourceContext, targetsHit, position)
 		RoundService:RecordMapDestruction(sourceContext, targetsHit, position)
@@ -1742,6 +1936,7 @@ function RoundService:OnStart()
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		RoundAFKRuntime.ResetPlayer(player)
+		bindCharacterReadinessWatchdog(player)
 		bindLobbyCharacter(player)
 		task.defer(function()
 			if player.Parent == Players then
@@ -1761,6 +1956,7 @@ end
 function RoundService:OnPlayerAdded(player: Player)
 	clearPlayerRoundState(player)
 	RoundAFKRuntime.ResetPlayer(player)
+	bindCharacterReadinessWatchdog(player)
 	bindLobbyCharacter(player)
 	task.defer(function()
 		if player.Parent ~= Players then
@@ -1781,6 +1977,7 @@ function RoundService:OnPlayerRemoving(player: Player)
 	removePlayerScoreboardState(player)
 	disconnectCharacterConnections(player)
 	disconnectLobbyCharacterConnection(player)
+	disconnectCharacterReadinessWatchdog(player)
 
 	if currentState == RoundStates.Active and alivePlayers[player] then
 		alivePlayers[player] = nil

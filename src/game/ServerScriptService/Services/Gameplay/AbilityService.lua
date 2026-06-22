@@ -8,6 +8,7 @@ local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local DataService = require(ServerScriptService.Services.DataService)
 local EmoteService = require(ServerScriptService.Services.EmoteService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 local ReplicaService = require(ServerScriptService.Packages.ReplicaService)
@@ -521,6 +522,9 @@ local function activate(player: Player, resolved: ResolvedAbilityRequest, curren
 		slot = resolved.slot,
 		abilityId = resolved.abilityId,
 	})
+	if type(DataService.RecordAbilityUsage) == "function" then
+		DataService:RecordAbilityUsage(player, resolved.abilityId)
+	end
 
 	if typeof(behaviorResult) == "table" and typeof(behaviorResult.effect) == "table" then
 		fireAbilityEffect(behaviorResult.effect.name or resolved.abilityId, {

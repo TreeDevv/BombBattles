@@ -57,6 +57,7 @@ local function getSkinTemplate(skinId: any): Instance?
 	local named = folder:FindFirstChild(definition.assetFolder)
 		or folder:FindFirstChild(definition.displayName)
 		or folder:FindFirstChild(definition.id)
+		or folder:FindFirstChild(BombSkinConfig.DefaultSkinId)
 	if named and (named:IsA("BasePart") or named:IsA("Model")) then
 		return named
 	end

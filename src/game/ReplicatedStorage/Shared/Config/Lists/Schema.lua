@@ -1,3 +1,5 @@
+local SettingsConfig = require(script.Parent.Parent.SettingsConfig)
+
 return {
 	Cash = {
 		key = "cash",
@@ -22,6 +24,31 @@ return {
 	LifetimeDestruction = {
 		key = "lifetimeDestruction",
 		value = 0,
+	},
+
+	GamesPlayed = {
+		key = "gamesPlayed",
+		value = 0,
+	},
+
+	Losses = {
+		key = "losses",
+		value = 0,
+	},
+
+	CurrentWinStreak = {
+		key = "currentWinStreak",
+		value = 0,
+	},
+
+	BestWinStreak = {
+		key = "bestWinStreak",
+		value = 0,
+	},
+
+	AbilityUsage = {
+		key = "abilityUsage",
+		value = {},
 	},
 
 	DailyLeaderboardStats = {
@@ -109,6 +136,8 @@ return {
 		value = {
 			Basic = 0,
 			Premium = 0,
+			FinisherBasic = 0,
+			FinisherPremium = 0,
 		},
 	},
 
@@ -123,6 +152,11 @@ return {
 			resetAtUnix = 0,
 			completed = false,
 		},
+	},
+
+	RedeemedCodes = {
+		key = "redeemedCodes",
+		value = {},
 	},
 
 	GroupReward = {
@@ -166,6 +200,11 @@ return {
 			progress = {},
 			claimed = {},
 		},
+	},
+
+	PlayerSettings = {
+		key = "playerSettings",
+		value = SettingsConfig.NormalizeSettings(nil),
 	},
 
 	Diagnostics = {

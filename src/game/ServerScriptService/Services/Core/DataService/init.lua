@@ -18,6 +18,11 @@ local TIME_PLAYED_FLUSH_INTERVAL = 30
 
 local CASH_KEY = Schema.Cash and Schema.Cash.key or nil
 local TIME_PLAYED_KEY = Schema.TimePlayed and Schema.TimePlayed.key or nil
+local GAMES_PLAYED_KEY = Schema.GamesPlayed and Schema.GamesPlayed.key or "gamesPlayed"
+local LOSSES_KEY = Schema.Losses and Schema.Losses.key or "losses"
+local CURRENT_WIN_STREAK_KEY = Schema.CurrentWinStreak and Schema.CurrentWinStreak.key or "currentWinStreak"
+local BEST_WIN_STREAK_KEY = Schema.BestWinStreak and Schema.BestWinStreak.key or "bestWinStreak"
+local ABILITY_USAGE_KEY = Schema.AbilityUsage and Schema.AbilityUsage.key or "abilityUsage"
 
 local ATTR_BY_KEY: { [string]: string } = {}
 if CASH_KEY then
@@ -45,6 +50,19 @@ local function deepCopy(value: any): any
 		copy[key] = deepCopy(child)
 	end
 	return copy
+end
+
+local function roundNonNegative(value: any): number
+	local numberValue = tonumber(value) or 0
+	if numberValue ~= numberValue or numberValue < 0 then
+		return 0
+	end
+
+	return math.floor(numberValue + 0.5)
+end
+
+local function incrementNonNegative(currentValue: any, amount: number?): number
+	return roundNonNegative(currentValue) + roundNonNegative(amount or 1)
 end
 
 local function getKey(userId: number): string
@@ -229,6 +247,44 @@ local function startTimePlayedLoop()
 	end)
 end
 
+local function recordRoundStats(dataService, results)
+	if typeof(results) ~= "table" or typeof(results.players) ~= "table" then
+		return
+	end
+
+	local winnerTeam = if typeof(results.winnerTeam) == "string" then results.winnerTeam else ""
+	local hasWinner = winnerTeam ~= "" and winnerTeam ~= "Draw"
+
+	for _, playerResult in ipairs(results.players) do
+		if typeof(playerResult) ~= "table" or typeof(playerResult.userId) ~= "number" then
+			continue
+		end
+
+		local player = Players:GetPlayerByUserId(playerResult.userId)
+		if not (player and player.Parent == Players) then
+			continue
+		end
+
+		dataService:Set(player, GAMES_PLAYED_KEY, incrementNonNegative)
+
+		if not hasWinner then
+			continue
+		end
+
+		local playerTeam = if typeof(playerResult.teamName) == "string" then playerResult.teamName else ""
+		if playerTeam == winnerTeam then
+			local nextStreak = roundNonNegative(dataService:Get(player, CURRENT_WIN_STREAK_KEY)) + 1
+			dataService:Set(player, CURRENT_WIN_STREAK_KEY, nextStreak)
+			dataService:Set(player, BEST_WIN_STREAK_KEY, function(currentValue)
+				return math.max(roundNonNegative(currentValue), nextStreak)
+			end)
+		else
+			dataService:Set(player, LOSSES_KEY, incrementNonNegative)
+			dataService:Set(player, CURRENT_WIN_STREAK_KEY, 0)
+		end
+	end
+end
+
 local profileStoreName = if DEBUG then "studio" else SCOPE
 local profileTemplate = buildStructureFromSchema(Schema)
 local profileStore = ProfileService.GetProfileStore(profileStoreName, profileTemplate)
@@ -363,7 +419,23 @@ function DataService:SendGlobalUpdate(sender: Player, targetId: number, updateTy
 end
 
 function DataService:ReportLeaderboardRoundResults(results)
+	recordRoundStats(self, results)
 	Leaderboards.RecordRoundResults(self, results)
+end
+
+function DataService:RecordAbilityUsage(player: Player, abilityId: string)
+	if not (player and player.Parent == Players) then
+		return
+	end
+	if typeof(abilityId) ~= "string" or abilityId == "" then
+		return
+	end
+
+	self:Set(player, ABILITY_USAGE_KEY, function(currentValue)
+		local usage = if typeof(currentValue) == "table" then deepCopy(currentValue) else {}
+		usage[abilityId] = roundNonNegative(usage[abilityId]) + 1
+		return usage
+	end)
 end
 
 function DataService:AdminAddLeaderboardStats(player: Player, increments): (boolean, string?)

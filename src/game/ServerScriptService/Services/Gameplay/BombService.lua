@@ -11,6 +11,7 @@ local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibil
 local BombDamage = require(ReplicatedStorage.Shared.Bombs.BombDamage)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
+local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
@@ -29,6 +30,7 @@ local REMOTES_FOLDER_NAME = "Remotes"
 local BEGIN_REMOTE_NAME = "BeginBombCook"
 local RELEASE_REMOTE_NAME = "ReleaseBombCook"
 local EFFECT_REMOTE_NAME = "BombEffect"
+local HIT_REMOTE_NAME = "Hit"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local KNOCKBACK_UNTIL_ATTR = "Bomb_KnockbackUntil"
@@ -77,6 +79,7 @@ local BombService = {}
 local beginRemote: RemoteEvent? = nil
 local releaseRemote: RemoteEvent? = nil
 local effectRemote: RemoteEvent? = nil
+local hitRemote: RemoteEvent? = nil
 local heartbeatConnection: RBXScriptConnection? = nil
 local cookStates: { [Player]: CookState } = {}
 local activeProjectiles: { [string]: ProjectileState } = {}
@@ -231,6 +234,14 @@ local function isPlayerOwner(owner: any): boolean
 	return typeof(owner) == "Instance" and owner:IsA("Player")
 end
 
+local function fireHitMarker(owner: any, amount: number)
+	if not (hitRemote and isPlayerOwner(owner) and amount > 0) then
+		return
+	end
+
+	hitRemote:FireClient(owner, amount)
+end
+
 local function getOwnerUserId(owner: any): number
 	if typeof(owner) == "table" and typeof(owner.UserId) == "number" then
 		return owner.UserId
@@ -350,7 +361,7 @@ local function sanitizeAimDirection(direction: any, fallback: Vector3): Vector3
 end
 
 local function getThrowOrigin(rootPart: BasePart): Vector3
-	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
+	return BombThrowOrigin.GetOrigin(rootPart)
 end
 
 local function getProjectileFolder(): Folder
@@ -703,6 +714,7 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 			local healthAfter = humanoid.Health
 
 			table.insert(hitUserIds, player.UserId)
+			fireHitMarker(owner, appliedDamage)
 			if healthBefore > 0 and healthAfter <= 0 then
 				table.insert(killedUserIds, player.UserId)
 				RuntimeProfiler.Count("Server/BombService/DeathsFromPlayerDamage")
@@ -1962,6 +1974,7 @@ function BombService:OnStart()
 	beginRemote = ensureRemote(BEGIN_REMOTE_NAME)
 	releaseRemote = ensureRemote(RELEASE_REMOTE_NAME)
 	effectRemote = ensureRemote(EFFECT_REMOTE_NAME)
+	hitRemote = ensureRemote(HIT_REMOTE_NAME)
 
 	BombProjectileService:SetHandlers({
 		fireEffect = fireEffect,

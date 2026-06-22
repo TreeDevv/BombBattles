@@ -5,6 +5,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local InstanceUtil = require(ReplicatedStorage.Shared.Common.InstanceUtil)
+local MapScriptRuntime = require(ReplicatedStorage.Shared.Maps.MapScriptRuntime)
 
 local DestructionService = require(script.Parent.DestructionService)
 
@@ -19,6 +20,20 @@ RoundMapRuntime.QueuedMapClones = {}
 local preparedMapClones: { [string]: Model } = {}
 local preparingMapClones: { [string]: boolean } = {}
 local mapPreparationGeneration = 0
+local activeMapScriptCleanup: (() -> ())? = nil
+
+local function clearActiveMapScripts()
+	local cleanup = activeMapScriptCleanup
+	activeMapScriptCleanup = nil
+	if cleanup then
+		cleanup()
+	end
+end
+
+local function bindActiveMapScripts(mapId: string, map: Model)
+	clearActiveMapScripts()
+	activeMapScriptCleanup = MapScriptRuntime.Bind(mapId, map)
+end
 
 local function getStoredMapTemplate(mapId: string, shouldWarn: boolean): Model?
 	local folder = InstanceUtil.GetByPath(ReplicatedStorage, RoundConfig.MapsFolderPath)
@@ -102,6 +117,7 @@ function RoundMapRuntime.GetActiveMap(): Model?
 end
 
 function RoundMapRuntime.ClearActiveMap()
+	clearActiveMapScripts()
 	local active = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	if active then
 		local token = RuntimeProfiler.Begin("Server/Round/Map/ClearActiveMap")
@@ -258,6 +274,7 @@ function RoundMapRuntime.SpawnActiveMap(mapId: string): Model?
 		local cacheToken = RuntimeProfiler.Begin("Server/Round/Map/RebuildDestructionCache")
 		DestructionService:RebuildTargetCache("WorkspaceMapSelected")
 		RuntimeProfiler.End("Server/Round/Map/RebuildDestructionCache", cacheToken)
+		bindActiveMapScripts(mapId, workspaceMap)
 		return workspaceMap
 	end
 
@@ -279,6 +296,7 @@ function RoundMapRuntime.SpawnActiveMap(mapId: string): Model?
 	local cacheToken = RuntimeProfiler.Begin("Server/Round/Map/RebuildDestructionCache")
 	DestructionService:RebuildTargetCache("MapSpawned")
 	RuntimeProfiler.End("Server/Round/Map/RebuildDestructionCache", cacheToken)
+	bindActiveMapScripts(mapId, clone)
 	return clone
 end
 

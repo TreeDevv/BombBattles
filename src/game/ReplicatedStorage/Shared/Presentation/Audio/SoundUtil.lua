@@ -1,5 +1,8 @@
 local SoundService = game:GetService("SoundService")
 
+local AudioSettings = require(script.Parent.AudioSettings)
+local PlayerSettings = require(game:GetService("ReplicatedStorage").Shared.Common.PlayerSettings)
+
 local SoundUtil = {}
 
 local function resolveBaseSound(soundOrName)
@@ -24,15 +27,24 @@ local function resolveBaseSound(soundOrName)
 	return nil
 end
 
-function SoundUtil.Play(soundOrName, parent: Instance?): Sound?
+function SoundUtil.Play(soundOrName, parent: Instance?, groupKind: string?): Sound?
 	local baseSound = resolveBaseSound(soundOrName)
 	if not baseSound then
 		return nil
 	end
 
+	AudioSettings.Apply(PlayerSettings:GetAll())
 	local clone = baseSound:Clone()
 	clone.Looped = false
 	clone.TimePosition = 0
+	local requestedGroupKind = groupKind or baseSound:GetAttribute("SoundGroupKind")
+	if requestedGroupKind ~= nil then
+		clone.SoundGroup = AudioSettings.GetGroup(requestedGroupKind)
+	elseif baseSound.SoundGroup then
+		clone.SoundGroup = baseSound.SoundGroup
+	else
+		clone.SoundGroup = AudioSettings.GetGroup("SFX")
+	end
 	clone.Parent = parent or SoundService
 
 	local endedConnection: RBXScriptConnection? = nil

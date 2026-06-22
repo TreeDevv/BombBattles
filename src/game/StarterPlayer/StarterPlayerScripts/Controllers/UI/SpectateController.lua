@@ -38,7 +38,7 @@ local LOCAL_CAMERA_RESTORE_RETRY_SECONDS = 0.1
 local LOCAL_CAMERA_RESTORE_MAX_ATTEMPTS = 20
 local EMPTY_HEALTH_OFFSET = -0.5
 local FULL_HEALTH_OFFSET = 0.5
-local DEBUG_SPECTATE_REPLAY = RunService:IsStudio()
+local DEBUG_SPECTATE_REPLAY = false
 
 type HealthBarBinding = {
 	root: Frame,
@@ -57,8 +57,6 @@ do
 		local ok, loadedReplayClient = pcall(require, replayModule)
 		if ok then
 			ReplayClient = loadedReplayClient
-		else
-			warn("[SpectateController] Failed to require ReplayClient: " .. tostring(loadedReplayClient))
 		end
 	end
 end

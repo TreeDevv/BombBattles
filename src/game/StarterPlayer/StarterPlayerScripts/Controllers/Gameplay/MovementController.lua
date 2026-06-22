@@ -24,7 +24,7 @@ local GRAVITY_BOOTS_ACTIVE_UNTIL_ATTR = "GravityBoots_ActiveUntil"
 local FREEZE_BOMB_SLOW_UNTIL_ATTR = "FreezeBomb_SlowUntil"
 local FREEZE_BOMB_SLOW_MULTIPLIER_ATTR = "FreezeBomb_SlowMultiplier"
 local GRAPPLE_HOOK_STUNNED_UNTIL_ATTR = "GrappleHook_StunnedUntil"
-local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 1
+local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 1
 local CONTROLLER_LOOKUP_TIMEOUT = 0.75
 local CONTROLLER_BIND_RETRY_TIMEOUT = 20
 local CONTROLLER_BIND_RETRY_INTERVAL = 0.25
@@ -2004,7 +2004,7 @@ function MovementController:_updateLandingState(now: number, isGrounded: boolean
 	end
 end
 
-function MovementController:_snapRootYawToFacingDirection(facingDirection: Vector3): boolean
+function MovementController:_snapRootYawToFacingDirection(facingDirection: Vector3, clearYawAngularVelocity: boolean?): boolean
 	local rootPart = self._rootPart
 	local humanoid = self._humanoid
 	if not (
@@ -2034,6 +2034,9 @@ function MovementController:_snapRootYawToFacingDirection(facingDirection: Vecto
 	local rotation = rootPart.CFrame - position
 	rootPart.CFrame = (CFrame.fromAxisAngle(Vector3.yAxis, yawDelta) * rotation) + position
 	rootPart.AssemblyLinearVelocity = linearVelocity
+	if clearYawAngularVelocity then
+		angularVelocity -= Vector3.yAxis * angularVelocity:Dot(Vector3.yAxis)
+	end
 	rootPart.AssemblyAngularVelocity = angularVelocity
 	return true
 end
@@ -2464,7 +2467,7 @@ function MovementController:_step(dt: number)
 			self._smoothedFacingYaw = cameraFacingYaw
 			self._smoothedFacingDirection = cameraFacingDirection
 			controllerManager.FacingDirection = cameraFacingDirection
-			self:_snapRootYawToFacingDirection(cameraFacingDirection)
+			self:_snapRootYawToFacingDirection(cameraFacingDirection, true)
 		end
 	else
 		local targetFacingDirection = if hasMoveInput then targetMoveDirection.Unit else Vector3.zero

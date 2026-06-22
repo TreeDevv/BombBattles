@@ -6,6 +6,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local CountryTimezoneOffsets = require(ReplicatedStorage.Shared.Config.CountryTimezoneOffsets)
 local QuestConfig = require(ReplicatedStorage.Shared.Config.QuestConfig)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local DataService = require(ServerScriptService.Services.DataService)
 
 local DAY_SECONDS = 24 * 60 * 60
@@ -30,34 +31,11 @@ local requestWindows: { [Player]: RequestWindow } = {}
 local regionByPlayer: { [Player]: RegionRecord } = {}
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(QuestConfig.RemotesFolderName)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = QuestConfig.RemotesFolderName
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, QuestConfig.RemotesFolderName)
 end
 
 local function ensureRequestRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(QuestConfig.RequestRemoteName)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = QuestConfig.RequestRemoteName
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), QuestConfig.RequestRemoteName)
 end
 
 local function getUnixTime(): number

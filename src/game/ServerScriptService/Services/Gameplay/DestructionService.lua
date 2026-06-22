@@ -660,6 +660,22 @@ local function getPayloadNumberKey(value): string
 end
 
 local function getDebrisBatchKey(payload): string
+	if typeof(payload) == "table" and payload.compact == true then
+		return table.concat({
+			"compact",
+			tostring(payload.materialName),
+			getPayloadColorKey(payload.color),
+			getPayloadNumberKey(payload.transparency),
+			getPayloadNumberKey(payload.reflectance),
+			getPayloadNumberKey(payload.speedMin),
+			getPayloadNumberKey(payload.speedMax),
+			getPayloadNumberKey(payload.lifetime),
+			tostring(payload.useGraphicsQualitySampling),
+			getPayloadNumberKey(payload.automaticQualityLevel),
+			getPayloadNumberKey(payload.maxSamplingDivisor),
+		}, "|")
+	end
+
 	return table.concat({
 		tostring(payload.materialName),
 		getPayloadColorKey(payload.color),
@@ -675,7 +691,6 @@ local function getDebrisBatchKey(payload): string
 end
 
 local function copyDebrisBatchFields(target, source)
-	target.sourceCFrame = CFrame.new()
 	target.explosionPosition = source.explosionPosition
 	target.materialName = source.materialName
 	target.color = source.color
@@ -688,7 +703,16 @@ local function copyDebrisBatchFields(target, source)
 	target.automaticQualityLevel = source.automaticQualityLevel
 	target.maxSamplingDivisor = source.maxSamplingDivisor
 	target.seed = if typeof(source.seed) == "number" then source.seed else Random.new():NextInteger(1, 2147483647)
-	target.blocks = {}
+	if source.compact == true then
+		target.compact = true
+		target.sourceBlockCount = 0
+		target.sampleCount = 0
+		target.averageSize = Vector3.zero
+		target.radius = if typeof(source.radius) == "number" then source.radius else 0
+	else
+		target.sourceCFrame = CFrame.new()
+		target.blocks = {}
+	end
 end
 
 local function batchDebrisPayloads(payloads, options)
@@ -705,12 +729,7 @@ local function batchDebrisPayloads(payloads, options)
 	local blockCount = 0
 
 	for _, payload in ipairs(payloads) do
-		if
-			typeof(payload) ~= "table"
-			or typeof(payload.sourceCFrame) ~= "CFrame"
-			or typeof(payload.explosionPosition) ~= "Vector3"
-			or typeof(payload.blocks) ~= "table"
-		then
+		if typeof(payload) ~= "table" or typeof(payload.explosionPosition) ~= "Vector3" then
 			continue
 		end
 
@@ -721,6 +740,29 @@ local function batchDebrisPayloads(payloads, options)
 			copyDebrisBatchFields(batch, payload)
 			batchesByKey[key] = batch
 			table.insert(batches, batch)
+		end
+
+		if payload.compact == true then
+			local sourceBlockCount = math.max(if typeof(payload.sourceBlockCount) == "number" then payload.sourceBlockCount else 0, 0)
+			local sampleCount = math.max(if typeof(payload.sampleCount) == "number" then payload.sampleCount else 0, 0)
+			local previousSourceBlockCount = math.max(if typeof(batch.sourceBlockCount) == "number" then batch.sourceBlockCount else 0, 0)
+			local previousAverageSize = if typeof(batch.averageSize) == "Vector3" then batch.averageSize else Vector3.zero
+			local nextSourceBlockCount = previousSourceBlockCount + sourceBlockCount
+			if nextSourceBlockCount > 0 and typeof(payload.averageSize) == "Vector3" then
+				batch.averageSize = (previousAverageSize * previousSourceBlockCount + payload.averageSize * sourceBlockCount)
+					/ nextSourceBlockCount
+			end
+			batch.sourceBlockCount = nextSourceBlockCount
+			batch.sampleCount = (batch.sampleCount or 0) + sampleCount
+			if typeof(payload.radius) == "number" then
+				batch.radius = math.max(if typeof(batch.radius) == "number" then batch.radius else 0, payload.radius)
+			end
+			blockCount += sourceBlockCount
+			continue
+		end
+
+		if typeof(payload.sourceCFrame) ~= "CFrame" or typeof(payload.blocks) ~= "table" then
+			continue
 		end
 
 		for _, block in ipairs(payload.blocks) do
@@ -742,6 +784,23 @@ local function batchDebrisPayloads(payloads, options)
 				})
 				blockCount += 1
 			end
+		end
+	end
+
+	local maxCompactPayloads = math.max(math.floor(DestructionConfig.DebrisCompactMaxPayloads or math.huge), 1)
+	local maxCompactSamples = math.max(math.floor(DestructionConfig.DebrisCompactMaxSamples or math.huge), 1)
+	local compactSamples = 0
+	for _, batch in ipairs(batches) do
+		if batch.compact == true then
+			local requested = math.max(if typeof(batch.sampleCount) == "number" then math.floor(batch.sampleCount) else 0, 0)
+			local allowed = math.max(maxCompactSamples - compactSamples, 0)
+			batch.sampleCount = math.min(requested, allowed)
+			compactSamples += batch.sampleCount
+		end
+	end
+	for index = #batches, maxCompactPayloads + 1, -1 do
+		if batches[index] and batches[index].compact == true then
+			table.remove(batches, index)
 		end
 	end
 

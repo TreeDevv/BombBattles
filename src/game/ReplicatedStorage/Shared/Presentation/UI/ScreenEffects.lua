@@ -174,6 +174,22 @@ function ScreenEffects.HoldBlack(): boolean
 	return true
 end
 
+function ScreenEffects.IsBlack(threshold: number?): boolean
+	local overlay = activeBlackOverlay
+	if not (overlay and overlay.Parent) then
+		local screenGui = getScreenGui()
+		local existing = screenGui and screenGui:FindFirstChild("BlackFade")
+		overlay = if existing and existing:IsA("Frame") then existing else nil
+		activeBlackOverlay = overlay
+	end
+	if not (overlay and overlay.Visible) then
+		return false
+	end
+
+	local resolvedThreshold = math.clamp(tonumber(threshold) or 0.01, 0, 1)
+	return overlay.BackgroundTransparency <= resolvedThreshold
+end
+
 function ScreenEffects.ClearBlack(duration: number?): boolean
 	if typeof(duration) == "number" and duration > 0 then
 		local overlay = activeBlackOverlay

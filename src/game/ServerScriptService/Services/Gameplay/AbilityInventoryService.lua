@@ -5,6 +5,7 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local Globals = require(ReplicatedStorage.Shared.Config.Lists.Globals)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 
 local DataService = require(script.Parent.DataService)
 local AbilityService = require(script.Parent.AbilityService)
@@ -30,34 +31,11 @@ local requestRemote: RemoteEvent? = nil
 local requestWindows: { [Player]: RequestWindow } = {}
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
 end
 
 local function ensureRequestRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(REQUEST_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = REQUEST_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), REQUEST_REMOTE_NAME)
 end
 
 local function isPlainString(value: any, maxLength: number): boolean

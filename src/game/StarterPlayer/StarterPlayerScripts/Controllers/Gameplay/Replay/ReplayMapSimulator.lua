@@ -23,7 +23,8 @@ local MAX_DESTRUCTION_EVENTS_PER_STEP = 3
 local MAX_DEBRIS_PARTS_PER_EVENT = 36
 local MAX_DEBRIS_PARTS_PER_REPLAY = 180
 local MAX_PREPARED_MAP_TEMPLATES = 4
-local MAX_PREPARED_REUSABLE_SCENES = 1
+local MAX_PREPARED_REUSABLE_SCENES = 2
+local PREWARM_TARGET_COLLECTION_BUDGET_SECONDS = 0.002
 local DEBRIS_LIFETIME_SCALE = 0.85
 
 local UNSAFE_TAGS = {
@@ -37,6 +38,9 @@ local preparedTemplateOrder = {}
 local preparedSceneCache = {}
 local preparedSceneOrder = {}
 local preparedSceneInProgress = {}
+
+local PRIORITY_ACTIVE = "Active"
+local PRIORITY_BACKGROUND = "Background"
 
 local function isFiniteNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
@@ -115,6 +119,20 @@ local function destroyPreparedSceneEntry(entry)
 	end
 	if entry.scene then
 		entry.scene:Destroy()
+	end
+end
+
+local function destroyDuplicatePreparedScenes(mapId: string, keepScene: Instance?)
+	for _, child in ipairs(Workspace:GetChildren()) do
+		if child == keepScene then
+			continue
+		end
+		if string.sub(child.Name, 1, #PREPARED_SCENE_NAME_PREFIX) ~= PREPARED_SCENE_NAME_PREFIX then
+			continue
+		end
+		if child:GetAttribute("ReplayMapId") == mapId then
+			child:Destroy()
+		end
 	end
 end
 
@@ -376,6 +394,74 @@ local function buildStaticDestructibleTargets(context): ({ BasePart }, boolean)
 	return targets, true
 end
 
+local function shouldYieldForBudget(startedAt: number, budgetSeconds: number): boolean
+	return os.clock() - startedAt >= budgetSeconds
+end
+
+local function buildStaticDestructibleTargetsBudgeted(context, budgetSeconds: number): ({ BasePart }, boolean, number)
+	local staticRoot = context and context.staticMapRoot
+	if not staticRoot then
+		return {}, false, 0
+	end
+
+	local targets = {}
+	local seen = {}
+	local descendants = staticRoot:GetDescendants()
+	local frames = 1
+	local startedAt = os.clock()
+	for _, descendant in ipairs(descendants) do
+		if descendant:IsA("BasePart") and isReplayMapPart(descendant, staticRoot) and hasDestructibleTag(descendant, staticRoot) then
+			addTarget(targets, seen, descendant)
+		end
+		if shouldYieldForBudget(startedAt, budgetSeconds) then
+			frames += 1
+			task.wait()
+			startedAt = os.clock()
+		end
+	end
+
+	if #targets > 0 then
+		return targets, false, frames
+	end
+
+	table.clear(seen)
+	startedAt = os.clock()
+	for _, descendant in ipairs(descendants) do
+		if descendant:IsA("BasePart") and isReplayMapPart(descendant, staticRoot) then
+			addTarget(targets, seen, descendant)
+		end
+		if shouldYieldForBudget(startedAt, budgetSeconds) then
+			frames += 1
+			task.wait()
+			startedAt = os.clock()
+		end
+	end
+
+	return targets, true, frames
+end
+
+local function prewarmStaticDestructibleTargets(context): boolean
+	if not (context and context.mapRoot) then
+		return false
+	end
+	if context.staticTargets then
+		return true
+	end
+
+	local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmStaticTargets")
+	local startedAt = os.clock()
+	local staticTargets, usedFallbackTargets, frames =
+		buildStaticDestructibleTargetsBudgeted(context, PREWARM_TARGET_COLLECTION_BUDGET_SECONDS)
+	context.staticTargets = staticTargets
+	context.staticUsedFallbackTargets = usedFallbackTargets
+	context.staticTargetCount = #staticTargets
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmStaticTargetFrames", frames)
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmStaticTargetCount", #staticTargets)
+	RuntimeProfiler.Gauge("Client/Replay/MapSimulator/PrewarmStaticTargetMs", (os.clock() - startedAt) * 1000)
+	RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmStaticTargets", token)
+	return true
+end
+
 local function addLiveCachedTargets(targets: { BasePart }, seen: { [BasePart]: boolean }, source)
 	for _, part in ipairs(source or {}) do
 		if part and part.Parent then
@@ -451,6 +537,35 @@ end
 local function transformDebrisPayload(context, payload)
 	if typeof(payload) ~= "table" then
 		return nil
+	end
+	if payload.compact == true then
+		if typeof(payload.explosionPosition) ~= "Vector3" then
+			return nil
+		end
+		local transformed = {
+			compact = true,
+			explosionPosition = ReplayMapSimulator.TransformPoint(context, payload.explosionPosition),
+			sourceBlockCount = payload.sourceBlockCount,
+			sampleCount = payload.sampleCount,
+			averageSize = payload.averageSize,
+			radius = payload.radius,
+		}
+		for _, fieldName in ipairs({
+			"materialName",
+			"color",
+			"transparency",
+			"reflectance",
+			"speedMin",
+			"speedMax",
+			"lifetime",
+			"useGraphicsQualitySampling",
+			"automaticQualityLevel",
+			"maxSamplingDivisor",
+			"seed",
+		}) do
+			transformed[fieldName] = payload[fieldName]
+		end
+		return transformed
 	end
 	if not (isFiniteCFrame(payload.sourceCFrame) and typeof(payload.explosionPosition) == "Vector3") then
 		return nil
@@ -666,11 +781,15 @@ local function spawnRecordedDebrisPayloads(context, payloads, maxParts: number):
 		if remainingParts <= 0 then
 			break
 		end
-		if typeof(payload) ~= "table" or typeof(payload.blocks) ~= "table" then
+		if typeof(payload) ~= "table" then
 			continue
 		end
 
-		payloadBlocks += #payload.blocks
+		payloadBlocks += if typeof(payload.blocks) == "table"
+			then #payload.blocks
+			elseif typeof(payload.sourceBlockCount) == "number"
+			then payload.sourceBlockCount
+			else 0
 		local spawned, attempts = VoxelDebris.spawnPayload(payload, {
 			parentFolder = context.debrisFolder,
 			maxParts = remainingParts,
@@ -892,11 +1011,33 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 	return context
 end
 
-local function rememberPreparedScene(mapId: string, scene: Folder, mapContext)
+local function normalizePrewarmPriority(priority: any): string
+	return if priority == PRIORITY_ACTIVE then PRIORITY_ACTIVE else PRIORITY_BACKGROUND
+end
+
+local function findPreparedSceneEvictionIndex(currentMapId: string): number?
+	local fallbackIndex = nil
+	for index, mapId in ipairs(preparedSceneOrder) do
+		if mapId == currentMapId then
+			continue
+		end
+		local entry = preparedSceneCache[mapId]
+		if fallbackIndex == nil then
+			fallbackIndex = index
+		end
+		if not entry or entry.priority ~= PRIORITY_ACTIVE then
+			return index
+		end
+	end
+	return fallbackIndex
+end
+
+local function rememberPreparedScene(mapId: string, scene: Folder, mapContext, priority: any)
 	local existing = preparedSceneCache[mapId]
 	if existing then
 		destroyPreparedSceneEntry(existing)
 	end
+	destroyDuplicatePreparedScenes(mapId, scene)
 	if not preparedSceneCache[mapId] then
 		table.insert(preparedSceneOrder, mapId)
 	end
@@ -905,35 +1046,58 @@ local function rememberPreparedScene(mapId: string, scene: Folder, mapContext)
 		mapId = mapId,
 		scene = scene,
 		mapContext = mapContext,
+		priority = normalizePrewarmPriority(priority),
 	}
 
 	while #preparedSceneOrder > MAX_PREPARED_REUSABLE_SCENES do
-		local oldMapId = table.remove(preparedSceneOrder, 1)
-		if oldMapId ~= mapId then
-			local oldEntry = preparedSceneCache[oldMapId]
-			preparedSceneCache[oldMapId] = nil
-			destroyPreparedSceneEntry(oldEntry)
+		local evictionIndex = findPreparedSceneEvictionIndex(mapId)
+		if not evictionIndex then
+			break
 		end
+		local oldMapId = table.remove(preparedSceneOrder, evictionIndex)
+		local oldEntry = oldMapId and preparedSceneCache[oldMapId]
+		preparedSceneCache[oldMapId] = nil
+		destroyPreparedSceneEntry(oldEntry)
 	end
 end
 
-function ReplayMapSimulator.PrewarmReusableScene(mapId: any): boolean
+function ReplayMapSimulator.PrewarmReusableScene(mapId: any, options): boolean
 	if typeof(mapId) ~= "string" or mapId == "" then
 		return false
 	end
-	if preparedSceneCache[mapId] or preparedSceneInProgress[mapId] then
+	local priority = normalizePrewarmPriority(if typeof(options) == "table" then options.priority else nil)
+	local existing = preparedSceneCache[mapId]
+	if existing then
+		existing.priority = if priority == PRIORITY_ACTIVE then PRIORITY_ACTIVE else normalizePrewarmPriority(existing.priority)
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmCacheHit")
+		return true
+	end
+	if preparedSceneInProgress[mapId] then
+		if priority == PRIORITY_ACTIVE then
+			preparedSceneInProgress[mapId].priority = PRIORITY_ACTIVE
+		end
 		return true
 	end
 	if not getMapTemplate(mapId) then
 		return false
 	end
 
-	preparedSceneInProgress[mapId] = true
+	preparedSceneInProgress[mapId] = {
+		priority = priority,
+	}
+	RuntimeProfiler.Count(
+		if priority == PRIORITY_ACTIVE
+			then "Client/Replay/MapSimulator/ActiveReusableScenePrewarmQueued"
+			else "Client/Replay/MapSimulator/ReusableScenePrewarmQueued"
+	)
 	task.spawn(function()
 		task.wait()
 		local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmReusableScene")
 		local ok, err = pcall(function()
+			local record = preparedSceneInProgress[mapId]
+			local effectivePriority = normalizePrewarmPriority(if typeof(record) == "table" then record.priority else priority)
 			ReplayMapSimulator.PrewarmTemplate(mapId)
+			task.wait()
 			local scene = createPreparedScene(mapId)
 			local mapContext = ReplayMapSimulator.Create(scene, {
 				mapId = mapId,
@@ -943,9 +1107,14 @@ function ReplayMapSimulator.PrewarmReusableScene(mapId: any): boolean
 				scene:Destroy()
 				return
 			end
-			collectDestructibleTargets(mapContext)
-			rememberPreparedScene(mapId, scene, mapContext)
-			RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmedReusableScenes")
+			task.wait()
+			prewarmStaticDestructibleTargets(mapContext)
+			rememberPreparedScene(mapId, scene, mapContext, effectivePriority)
+			RuntimeProfiler.Count(
+				if effectivePriority == PRIORITY_ACTIVE
+					then "Client/Replay/MapSimulator/PrewarmedActiveReusableScenes"
+					else "Client/Replay/MapSimulator/PrewarmedReusableScenes"
+			)
 		end)
 		preparedSceneInProgress[mapId] = nil
 		RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmReusableScene", token)
@@ -956,10 +1125,18 @@ function ReplayMapSimulator.PrewarmReusableScene(mapId: any): boolean
 	return true
 end
 
+function ReplayMapSimulator.PrewarmActiveScene(mapId: any): boolean
+	return ReplayMapSimulator.PrewarmReusableScene(mapId, {
+		priority = PRIORITY_ACTIVE,
+	})
+end
+
 function ReplayMapSimulator.PrewarmReusableScenes(limit: number?): number
 	local queued = 0
 	for _, mapId in ipairs(getPreferredMapIds(limit)) do
-		if ReplayMapSimulator.PrewarmReusableScene(mapId) then
+		if ReplayMapSimulator.PrewarmReusableScene(mapId, {
+			priority = PRIORITY_BACKGROUND,
+		}) then
 			queued += 1
 		end
 	end

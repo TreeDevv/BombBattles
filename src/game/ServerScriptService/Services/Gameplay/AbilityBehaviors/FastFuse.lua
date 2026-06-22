@@ -1,6 +1,8 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AbilityBehaviorServices = require(ServerScriptService.Services.AbilityBehaviorServices)
+
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
@@ -15,23 +17,9 @@ local FastFuse = {} :: AbilityTypes.ServerBehavior
 local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
 local projectileSerial = 0
-local bombProjectileService = nil
 
 local function getBombProjectileService()
-	if bombProjectileService then
-		return bombProjectileService
-	end
-
-	local serviceModule = ServerScriptService.Services:FindFirstChild("BombProjectileService")
-	if serviceModule and serviceModule:IsA("ModuleScript") then
-		local ok, service = pcall(require, serviceModule)
-		if ok and typeof(service) == "table" then
-			bombProjectileService = service
-			return bombProjectileService
-		end
-	end
-
-	return nil
+	return AbilityBehaviorServices.GetBombProjectileService()
 end
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number

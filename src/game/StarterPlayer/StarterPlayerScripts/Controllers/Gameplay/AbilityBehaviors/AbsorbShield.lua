@@ -4,6 +4,7 @@ local TweenService = game:GetService("TweenService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 
 type AbilityDefinition = AbilityTypes.AbilityDefinition
 type ClientActivateRequestedContext = AbilityTypes.ClientActivateRequestedContext
@@ -46,9 +47,6 @@ local LocalPlayer = Players.LocalPlayer
 local activeBubbles: { [Player]: BubbleRecord } = {}
 local empowerHighlights: { [Player]: EmpowerRecord } = {}
 local serial = 0
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
 	local value = if definition then definition[key] else nil
@@ -101,69 +99,8 @@ local function getVisualFolder(): Folder
 	return folder
 end
 
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[AbsorbShield] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[AbsorbShield] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[AbsorbShield] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
-end
-
 local function emitRoot(root: Instance)
-	local module = getEmitModule()
-	if not (module and ensureEmitModuleInitialized(module) and type(module.emit) == "function") then
-		return
-	end
-
-	local ok, err = pcall(function()
-		module.emit(root)
-	end)
-	if not ok then
-		warn("[AbsorbShield] EmitModule emit failed: " .. tostring(err))
-	end
+	EmitService.Emit(root, "[AbsorbShield]")
 end
 
 local function getBaseParts(root: Instance): { BasePart }

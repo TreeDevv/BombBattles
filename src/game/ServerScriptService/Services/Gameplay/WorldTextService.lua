@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local WorldTextConstants = require(ReplicatedStorage.Shared.Effects.WorldTextConstants)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 
 local WorldTextService = {}
 
@@ -19,34 +20,11 @@ local function isFiniteVector3(value: any): boolean
 end
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(WorldTextConstants.REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = WorldTextConstants.REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, WorldTextConstants.REMOTES_FOLDER_NAME)
 end
 
 local function ensureRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(WorldTextConstants.REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local created = Instance.new("RemoteEvent")
-	created.Name = WorldTextConstants.REMOTE_NAME
-	created.Parent = folder
-	return created
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), WorldTextConstants.REMOTE_NAME)
 end
 
 local function getPlayerRootPosition(player: Player): Vector3?

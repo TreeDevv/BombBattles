@@ -4,6 +4,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AbilityBehaviorServices = require(ServerScriptService.Services.AbilityBehaviorServices)
+
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
@@ -49,7 +51,6 @@ local REQUEST_SPAM_SECONDS = 0.12
 local MAX_RAYCAST_SKIPS = 8
 
 local abilityService: AbilityServiceLike? = nil
-local bombProjectileService: any? = nil
 local nextSessionId = 0
 local heartbeatConnection: RBXScriptConnection? = nil
 local activeByShooter: { [Player]: GrappleSession } = {}
@@ -114,22 +115,7 @@ local function fireRejectEffectToPlayer(
 end
 
 local function getBombProjectileService()
-	if bombProjectileService then
-		return bombProjectileService
-	end
-
-	local services = ServerScriptService:FindFirstChild("Services")
-	local module = services and services:FindFirstChild("BombProjectileService")
-	if not (module and module:IsA("ModuleScript")) then
-		return nil
-	end
-
-	local ok, service = pcall(require, module)
-	if ok and typeof(service) == "table" then
-		bombProjectileService = service
-		return service
-	end
-	return nil
+	return AbilityBehaviorServices.GetBombProjectileService()
 end
 
 local function isFiniteVector(value: any): boolean

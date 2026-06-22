@@ -2,65 +2,11 @@ local Debris = game:GetService("Debris")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 
 local FinisherVFX = {}
 
 local CLONE_LIFETIME_SECONDS = 8
-
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
-
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[FinisherVFX] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[FinisherVFX] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[FinisherVFX] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
-end
 
 local function prepBasePart(part: BasePart, hideAnchor: boolean)
 	part.Anchored = true
@@ -105,8 +51,7 @@ function FinisherVFX.PlayAt(finisherId: any, position: Vector3, options): boolea
 		return false
 	end
 
-	local module = getEmitModule()
-	if not (module and ensureEmitModuleInitialized(module) and type(module.emit) == "function") then
+	if not EmitService.EnsureInitialized("[FinisherVFX]") then
 		return false
 	end
 
@@ -118,11 +63,7 @@ function FinisherVFX.PlayAt(finisherId: any, position: Vector3, options): boolea
 	placeClone(clone, CFrame.new(position))
 	clone.Parent = parent
 
-	local ok, err = pcall(function()
-		module.emit(clone)
-	end)
-	if not ok then
-		warn("[FinisherVFX] EmitModule emit failed for " .. tostring(finisherId) .. ": " .. tostring(err))
+	if not EmitService.Emit(clone, "[FinisherVFX]") then
 		clone:Destroy()
 		return false
 	end

@@ -1,6 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local InstanceUtil = require(ReplicatedStorage.Shared.Common.InstanceUtil)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 
 local HipBombVisual = {}
@@ -104,18 +105,7 @@ local function getFirstBasePart(instance: Instance?): BasePart?
 	return instance:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function getBaseParts(instance: Instance): { BasePart }
-	local parts: { BasePart } = {}
-	if instance:IsA("BasePart") then
-		table.insert(parts, instance)
-	end
-	for _, descendant in ipairs(instance:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			table.insert(parts, descendant)
-		end
-	end
-	return parts
-end
+local getBaseParts = InstanceUtil.GetBaseParts
 
 local function getCarrierPart(character: Model): BasePart?
 	local lowerTorso = character:FindFirstChild("LowerTorso")

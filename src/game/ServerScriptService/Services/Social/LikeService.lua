@@ -2,8 +2,14 @@ local HttpService = game:GetService("HttpService")
 
 local PROXY_URL = "https://like-proxy.hpaulbus.workers.dev"
 local TOKEN = "K4HmA_xvQIBGzvUKi19Un__TPJ48qfBjGRPSUACgQUg"
+local CACHE_TTL_SECONDS = 8
 
 local LikeService = {}
+local cachedLikes: number? = nil
+local cachedAt = 0
+local inFlightRequest: BindableEvent? = nil
+local inFlightLikes: number? = nil
+local inFlightError: string? = nil
 
 local function sanitizeInteger(value: any): number
 	local numberValue = tonumber(value) or 0
@@ -28,7 +34,11 @@ local function decodeLikePayload(responseBody: string): number?
 	return sanitizeInteger(likes)
 end
 
-function LikeService.FetchLikes(): (number?, string?)
+local function isCacheFresh(): boolean
+	return cachedLikes ~= nil and os.clock() - cachedAt < CACHE_TTL_SECONDS
+end
+
+local function requestLikesFromProxy(): (number?, string?)
 	local success, response = pcall(function()
 		return HttpService:RequestAsync({
 			Url = PROXY_URL,
@@ -63,6 +73,40 @@ function LikeService.FetchLikes(): (number?, string?)
 	end
 
 	return likes, nil
+end
+
+function LikeService.FetchLikes(): (number?, string?)
+	if isCacheFresh() then
+		return cachedLikes, nil
+	end
+
+	local activeRequest = inFlightRequest
+	if activeRequest then
+		activeRequest.Event:Wait()
+		if isCacheFresh() then
+			return cachedLikes, nil
+		end
+		return inFlightLikes, inFlightError
+	end
+
+	local requestCompleted = Instance.new("BindableEvent")
+	inFlightRequest = requestCompleted
+	inFlightLikes = nil
+	inFlightError = nil
+
+	local likes, err = requestLikesFromProxy()
+	if likes ~= nil then
+		cachedLikes = likes
+		cachedAt = os.clock()
+	end
+
+	inFlightLikes = likes
+	inFlightError = err
+	inFlightRequest = nil
+	requestCompleted:Fire()
+	requestCompleted:Destroy()
+
+	return likes, err
 end
 
 return LikeService

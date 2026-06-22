@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Globals = require(ReplicatedStorage.Shared.Config.Lists.Globals)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 
 local REFRESH_TIME = 60 * 60
 local MAX_ENTRIES = 100
@@ -173,50 +174,15 @@ local function getUsernameForUserId(userId: number): string
 end
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
 end
 
 local function ensureGetLeaderboardRemote(): RemoteFunction
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(GET_LEADERBOARD_REMOTE_NAME)
-	if existing and existing:IsA("RemoteFunction") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteFunction")
-	remote.Name = GET_LEADERBOARD_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteFunction(ensureRemotesFolder(), GET_LEADERBOARD_REMOTE_NAME)
 end
 
 local function ensureLeaderboardUpdatedRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(LEADERBOARD_UPDATED_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = LEADERBOARD_UPDATED_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), LEADERBOARD_UPDATED_REMOTE_NAME)
 end
 
 local function getStoreName(boardId: string, periodId: string, periodKey: string): string

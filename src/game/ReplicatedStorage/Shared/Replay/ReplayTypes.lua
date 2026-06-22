@@ -101,9 +101,14 @@ Expected shape for replay map reconstruction:
 	ownerUserId: number?,
 	debrisPayloads: {
 		{
-			sourceCFrame: CFrame,
-			explosionPosition: Vector3,
-			blocks: { { center: Vector3?, cframe: CFrame?, size: Vector3 } },
+			compact: boolean?,
+			explosionPosition: Vector3?,
+			sourceBlockCount: number?,
+			sampleCount: number?,
+			averageSize: Vector3?,
+			radius: number?,
+			sourceCFrame: CFrame?,
+			blocks: { { center: Vector3?, cframe: CFrame?, size: Vector3 } }?,
 			materialName: string?,
 			color: Color3?,
 			transparency: number?,

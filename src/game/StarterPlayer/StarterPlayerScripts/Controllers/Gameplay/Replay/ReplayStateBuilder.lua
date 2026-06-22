@@ -112,6 +112,7 @@ function ReplayStateBuilder.Build(client, payload, deps)
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/CreateScene", sceneToken)
 	local mapToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/CreateMap")
 	if not mapContext then
+		RuntimeProfiler.Count("Client/Replay/Death/StateBuilder/ColdMapBuilds")
 		mapContext = deps.ReplayMapSimulator.Create(scene, payload)
 	end
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/CreateMap", mapToken)

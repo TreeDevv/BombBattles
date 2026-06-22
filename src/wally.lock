@@ -18,6 +18,11 @@ version = "1.0.2"
 dependencies = []
 
 [[package]]
+name = "legitatx/topbarplus"
+version = "3.0.5"
+dependencies = []
+
+[[package]]
 name = "miagobble/expressive-prompts"
 version = "1.1.4"
 dependencies = [["Seam", "miagobble/seam@0.5.6"]]
@@ -35,4 +40,4 @@ dependencies = []
 [[package]]
 name = "template/game-template"
 version = "0.1.0"
-dependencies = [["ReplicaController", "etheroit/replicacontroller@1.0.0"], ["ZonePlus", "streeteenk/zoneplus@3.2.1"], ["expressive-prompts", "miagobble/expressive-prompts@1.1.4"], ["ProfileService", "etheroit/profileservice@1.2.0"], ["ReplicaService", "etheroit/replicaservice@1.0.2"]]
+dependencies = [["ReplicaController", "etheroit/replicacontroller@1.0.0"], ["ZonePlus", "streeteenk/zoneplus@3.2.1"], ["expressive-prompts", "miagobble/expressive-prompts@1.1.4"], ["topbarplus", "legitatx/topbarplus@3.0.5"], ["ProfileService", "etheroit/profileservice@1.2.0"], ["ReplicaService", "etheroit/replicaservice@1.0.2"]]

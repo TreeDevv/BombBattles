@@ -133,6 +133,7 @@ return table.freeze({
 	PulseEndHz = 8,
 	PulseWhite = Color3.new(1, 1, 1),
 	PulseRed = Color3.fromRGB(255, 45, 35),
+	PulseFriendlyBlue = Color3.fromRGB(72, 171, 255),
 	PulseStartFillTransparency = 0.75,
 	PulseEndFillTransparency = 0.35,
 	PulseStartOutlineTransparency = 0.75,

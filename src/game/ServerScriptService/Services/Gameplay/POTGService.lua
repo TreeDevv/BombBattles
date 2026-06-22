@@ -394,7 +394,7 @@ local function registerBombExploded(event, timestamp: number)
 end
 
 local function getBombTypeFromEvent(event): string?
-	local sourceId = getSourceId(event.sourceId) or getSourceId(event.bombId)
+	local sourceId = getSourceId(event.bombId) or getSourceId(event.sourceId)
 	local launch = if sourceId then bombLaunches[sourceId] else nil
 	local bombType = getString(event.bombType)
 	if bombType then
@@ -729,7 +729,7 @@ local function getLongRangeDistance(event): number?
 		return explicitDistance
 	end
 
-	local sourceId = getSourceId(event.sourceId) or getSourceId(event.bombId)
+	local sourceId = getSourceId(event.bombId) or getSourceId(event.sourceId)
 	local travel = sourceId and bombTravelDistances[sourceId]
 	if typeof(travel) == "table" and isFiniteNumber(travel.distance) then
 		return travel.distance
@@ -739,7 +739,7 @@ local function getLongRangeDistance(event): number?
 end
 
 local function isLongRangeBombKill(event): boolean
-	local sourceId = getSourceId(event.sourceId) or getSourceId(event.bombId)
+	local sourceId = getSourceId(event.bombId) or getSourceId(event.sourceId)
 	local hasBombSource = anyEventTextContains(event, { "bomb", "projectile" })
 		or getSourceId(event.bombId) ~= nil
 		or (sourceId ~= nil and bombTravelDistances[sourceId] ~= nil)

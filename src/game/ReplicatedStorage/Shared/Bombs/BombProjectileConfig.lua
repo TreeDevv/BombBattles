@@ -10,9 +10,18 @@ BombProjectileConfig.BombType = {
 	Drill = "DrillBomb",
 }
 
-BombProjectileConfig.SnapshotHz = 20
+BombProjectileConfig.SnapshotHz = 15
+BombProjectileConfig.SettledSnapshotHz = 4
+BombProjectileConfig.SnapshotBatchHz = 20
+BombProjectileConfig.SnapshotMinPositionDelta = 0.35
+BombProjectileConfig.SnapshotMinVelocityDelta = 2
+BombProjectileConfig.SnapshotMaxSilenceSeconds = 0.25
 BombProjectileConfig.FixedStepSeconds = 1 / 60
 BombProjectileConfig.MaxStepsPerHeartbeat = 6
+BombProjectileConfig.GroundedStepHz = 30
+BombProjectileConfig.SlowGroundedStepHz = 20
+BombProjectileConfig.SettledStepHz = 10
+BombProjectileConfig.MaxAdaptiveStepSeconds = 0.1
 BombProjectileConfig.MaxSubstepDistance = 8
 BombProjectileConfig.ProjectileLifetimePadding = BombConfig.ProjectileLifetimePadding
 

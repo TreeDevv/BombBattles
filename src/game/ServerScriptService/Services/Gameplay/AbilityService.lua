@@ -1,5 +1,6 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
@@ -55,8 +56,12 @@ local AbilityService = {}
 
 local requestRemote: RemoteEvent? = nil
 local effectRemote: RemoteEvent? = nil
+local hookFrameConnection: RBXScriptConnection? = nil
+local hookCacheFrame = 0
 local runtimes: { [Player]: PlayerRuntime } = {}
 local behaviorModules: { [string]: ServerBehavior } = {}
+local behaviorHookNames: { [string]: boolean } = {}
+local hookCandidateCache: { [string]: { frame: number, currentTime: number, candidates: { HookCandidate } } } = {}
 
 local function now(): number
 	return workspace:GetServerTimeNow()
@@ -183,6 +188,8 @@ end
 
 local function loadBehaviors()
 	table.clear(behaviorModules)
+	table.clear(behaviorHookNames)
+	table.clear(hookCandidateCache)
 
 	local folder = getBehaviorFolder()
 	if not folder then
@@ -197,6 +204,11 @@ local function loadBehaviors()
 		local ok, behavior = pcall(require, child)
 		if ok and typeof(behavior) == "table" then
 			behaviorModules[child.Name] = behavior
+			for key, value in pairs(behavior) do
+				if typeof(key) == "string" and type(value) == "function" then
+					behaviorHookNames[key] = true
+				end
+			end
 		else
 			warn("[AbilityService] Failed to load ability behavior " .. child:GetFullName() .. ": " .. tostring(behavior))
 		end
@@ -641,10 +653,36 @@ local function collectHookCandidates(hookName: string, currentTime: number): { H
 	return candidates
 end
 
+local function getCachedHookCandidates(hookName: string, currentTime: number): { HookCandidate }
+	if behaviorHookNames[hookName] ~= true then
+		return {}
+	end
+
+	local cached = hookCandidateCache[hookName]
+	if cached and cached.frame == hookCacheFrame then
+		return cached.candidates
+	end
+
+	local candidates = collectHookCandidates(hookName, currentTime)
+	hookCandidateCache[hookName] = {
+		frame = hookCacheFrame,
+		currentTime = currentTime,
+		candidates = candidates,
+	}
+	return candidates
+end
+
 function AbilityService:OnStart()
 	loadBehaviors()
 	requestRemote = ensureRemote(REQUEST_REMOTE_NAME)
 	effectRemote = ensureRemote(EFFECT_REMOTE_NAME)
+
+	if not hookFrameConnection then
+		hookFrameConnection = RunService.Heartbeat:Connect(function()
+			hookCacheFrame += 1
+			table.clear(hookCandidateCache)
+		end)
+	end
 
 	requestRemote.OnServerEvent:Connect(handleClientMessage)
 
@@ -689,11 +727,14 @@ function AbilityService:RunHook(hookName: string, context: any?): AbilityHookRes
 	if typeof(hookName) ~= "string" or hookName == "" then
 		return AbilityResult.Continue()
 	end
+	if behaviorHookNames[hookName] ~= true then
+		return AbilityResult.Continue()
+	end
 
 	local hookLabel = "Server/Ability/RunHook/" .. hookName
 	local hookToken = RuntimeProfiler.Begin(hookLabel)
 	local currentTime = now()
-	for _, candidate in ipairs(collectHookCandidates(hookName, currentTime)) do
+	for _, candidate in ipairs(getCachedHookCandidates(hookName, currentTime)) do
 		local behaviorLabel = "Server/Ability/Hook/" .. hookName .. "/" .. candidate.abilityId
 		local behaviorToken = RuntimeProfiler.Begin(behaviorLabel)
 		local ok, result = pcall(function()
@@ -727,6 +768,14 @@ function AbilityService:RunHook(hookName: string, context: any?): AbilityHookRes
 
 	RuntimeProfiler.End(hookLabel, hookToken)
 	return AbilityResult.Continue()
+end
+
+function AbilityService:HasHookCandidates(hookName: string): boolean
+	if typeof(hookName) ~= "string" or hookName == "" or behaviorHookNames[hookName] ~= true then
+		return false
+	end
+
+	return #getCachedHookCandidates(hookName, now()) > 0
 end
 
 function AbilityService:FireEffect(effectName: string, payload: any?)

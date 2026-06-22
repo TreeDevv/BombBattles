@@ -7,6 +7,7 @@ local CrateRollConfig = require(ReplicatedStorage.Shared.Config.CrateRollConfig)
 local RobuxPurchases = require(ReplicatedStorage.Shared.Config.Lists.RobuxPurchases)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 
 local BombSkinService = require(script.Parent.BombSkinService)
 local DataService = require(script.Parent.DataService)
@@ -20,6 +21,7 @@ local PROMPT_CRATE_ID_ATTRIBUTE = CrateRollConfig.PromptCrateIdAttribute
 local PROMPT_FREE_ROLL_SOURCE = CrateRollConfig.PromptFreeRollSource
 local CASH_KEY = Schema.Cash and Schema.Cash.key or "cash"
 local HISTORY_KEY = Schema.CrateRollHistory and Schema.CrateRollHistory.key or "crateRollHistory"
+local CRATE_TOKENS_KEY = Schema.CrateTokens and Schema.CrateTokens.key or "crateTokens"
 
 type RequestWindow = {
 	startedAt: number,
@@ -37,50 +39,15 @@ local rng = Random.new()
 local rollSerial = 0
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
 end
 
 local function ensureRequestRemote(): RemoteFunction
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(REQUEST_REMOTE_NAME)
-	if existing and existing:IsA("RemoteFunction") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteFunction")
-	remote.Name = REQUEST_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteFunction(ensureRemotesFolder(), REQUEST_REMOTE_NAME)
 end
 
 local function ensureResultRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(RESULT_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = RESULT_REMOTE_NAME
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), RESULT_REMOTE_NAME)
 end
 
 local function response(ok: boolean, code: string, message: string?, data: any?)
@@ -101,6 +68,62 @@ local function getCash(player: Player): number
 	return math.max(0, tonumber(DataService:Get(player, CASH_KEY)) or 0)
 end
 
+local function roundNonNegative(value: any): number
+	local numberValue = tonumber(value) or 0
+	if numberValue ~= numberValue or numberValue < 0 then
+		return 0
+	end
+	return math.floor(numberValue + 0.5)
+end
+
+local function normalizeCrateTokens(value: any): { [string]: number }
+	local tokens = {
+		Basic = 0,
+		Premium = 0,
+	}
+	if typeof(value) ~= "table" then
+		return tokens
+	end
+
+	for crateId in pairs(tokens) do
+		tokens[crateId] = roundNonNegative(value[crateId])
+	end
+	return tokens
+end
+
+local function getCrateTokens(player: Player): { [string]: number }
+	return normalizeCrateTokens(DataService:Get(player, CRATE_TOKENS_KEY))
+end
+
+local function getCrateTokenCount(player: Player, crateId: string): number
+	local normalizedCrateId = CrateRollConfig.NormalizeCrateId(crateId)
+	if normalizedCrateId == "" then
+		return 0
+	end
+	return roundNonNegative(getCrateTokens(player)[normalizedCrateId])
+end
+
+local function consumeCrateToken(player: Player, crateId: string): boolean
+	local normalizedCrateId = CrateRollConfig.NormalizeCrateId(crateId)
+	if normalizedCrateId == "" then
+		return false
+	end
+
+	local consumed = false
+	DataService:Set(player, CRATE_TOKENS_KEY, function(currentValue)
+		local tokens = normalizeCrateTokens(currentValue)
+		local currentCount = roundNonNegative(tokens[normalizedCrateId])
+		if currentCount <= 0 then
+			return tokens
+		end
+
+		tokens[normalizedCrateId] = currentCount - 1
+		consumed = true
+		return tokens
+	end)
+	return consumed
+end
+
 local function getProductConfig(productKey: string?)
 	if typeof(productKey) ~= "string" or productKey == "" then
 		return nil
@@ -119,6 +142,7 @@ local function buildStatePayload(player: Player)
 	return {
 		crates = CrateRollConfig.GetCratesPayload(),
 		cash = getCash(player),
+		crateTokens = getCrateTokens(player),
 		ownedBombSkins = BombSkinService:GetOwnedSkins(player),
 		bombSkinCopies = BombSkinService:GetSkinCopies(player),
 	}
@@ -267,6 +291,23 @@ local function grantRoll(player: Player, crateDefinition, source: string): (bool
 end
 
 local function rollCash(player: Player, crateDefinition)
+	if getCrateTokenCount(player, crateDefinition.id) > 0 then
+		local ok, rollPayload = grantRoll(player, crateDefinition, "CrateToken")
+		if not ok then
+			return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
+		end
+
+		if not consumeCrateToken(player, crateDefinition.id) then
+			return response(false, "TokenUnavailable", "Crate token is unavailable.", buildStatePayload(player))
+		end
+
+		return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
+			roll = rollPayload,
+			reward = rollPayload.reward,
+			state = buildStatePayload(player),
+		})
+	end
+
 	local price = tonumber(crateDefinition.cashPrice)
 	if not price or price < 0 then
 		return response(false, "CashUnavailable", "This crate cannot be opened with cash.", buildStatePayload(player))
@@ -294,6 +335,31 @@ local function rollCash(player: Player, crateDefinition)
 		reward = rollPayload.reward,
 		state = buildStatePayload(player),
 	})
+end
+
+local function rollPrompt(player: Player, crateDefinition)
+	if getCrateTokenCount(player, crateDefinition.id) > 0 then
+		local ok, rollPayload = grantRoll(player, crateDefinition, "CrateToken")
+		if not ok then
+			return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
+		end
+
+		if not consumeCrateToken(player, crateDefinition.id) then
+			return response(false, "TokenUnavailable", "Crate token is unavailable.", buildStatePayload(player))
+		end
+
+		return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
+			roll = rollPayload,
+			reward = rollPayload.reward,
+			state = buildStatePayload(player),
+		})
+	end
+
+	if tonumber(crateDefinition.cashPrice) ~= nil then
+		return rollCash(player, crateDefinition)
+	end
+
+	return response(false, "PurchaseRequired", "This crate requires a purchase.", buildStatePayload(player))
 end
 
 local function rollPromptFree(player: Player, crateDefinition)
@@ -403,7 +469,7 @@ local function handlePromptTriggered(prompt: ProximityPrompt, player: Player)
 	end
 
 	local resultPayload = withRollLock(player, function()
-		return rollPromptFree(player, crateDefinition)
+		return rollPrompt(player, crateDefinition)
 	end)
 
 	fireRollResult(player, resultPayload)
@@ -497,6 +563,38 @@ function CrateRollService:AdminRoll(player: Player, rawCrateId: any): (boolean, 
 	local reward = resultPayload.reward
 	local rewardName = if typeof(reward) == "table" then tostring(reward.displayName or reward.skinId) else "reward"
 	return resultPayload.ok == true, resultPayload.message or resultPayload.code, resultPayload.ok == true and rewardName or nil
+end
+
+function CrateRollService:GrantRewardRoll(player: Player, rawCrateId: any, source: string?): (boolean, string?, any?)
+	if not (player and player:IsA("Player")) then
+		return false, "Player is required", nil
+	end
+
+	local crateDefinition = CrateRollConfig.GetDefinition(rawCrateId)
+	if not crateDefinition then
+		return false, "Unknown crate: " .. tostring(rawCrateId), nil
+	end
+
+	local resultPayload = withRollLock(player, function()
+		local ok, rollPayload = grantRoll(player, crateDefinition, tostring(source or "Reward"))
+		if not ok then
+			return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
+		end
+
+		return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
+			roll = rollPayload,
+			reward = rollPayload.reward,
+			state = buildStatePayload(player),
+		})
+	end)
+
+	if resultPayload.ok == true then
+		fireRollResult(player, resultPayload)
+	end
+
+	local reward = resultPayload.reward
+	local rewardName = if typeof(reward) == "table" then tostring(reward.displayName or reward.skinId) else nil
+	return resultPayload.ok == true, resultPayload.message or resultPayload.code, rewardName
 end
 
 function CrateRollService:OnStart()

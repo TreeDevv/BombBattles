@@ -7,6 +7,7 @@ local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local BombService = require(ServerScriptService.Services.BombService)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
@@ -36,50 +37,15 @@ local lastRequestAtByUserId: { [number]: number } = {}
 local explosionDemoSerial = 0
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
 end
 
 local function ensureRequestRemote(): RemoteFunction
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(AdminConfig.RequestRemoteName)
-	if existing and existing:IsA("RemoteFunction") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteFunction")
-	remote.Name = AdminConfig.RequestRemoteName
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteFunction(ensureRemotesFolder(), AdminConfig.RequestRemoteName)
 end
 
 local function ensurePOTGCutsceneRemote(): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(AdminConfig.POTGCutsceneRemoteName)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = AdminConfig.POTGCutsceneRemoteName
-	remote.Parent = folder
-	return remote
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), AdminConfig.POTGCutsceneRemoteName)
 end
 
 local function isAllowedUserId(userId: number): boolean

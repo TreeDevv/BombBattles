@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PlacementSurfaceUtil = require(ReplicatedStorage.Shared.Common.PlacementSurfaceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
@@ -14,6 +15,7 @@ type ServerActivateContext = AbilityTypes.ServerActivateContext
 type FloorPlacement = {
 	position: Vector3,
 	facing: Vector3,
+	normal: Vector3,
 	floor: Instance,
 }
 
@@ -68,23 +70,6 @@ local function getBaseParts(root: Instance): { BasePart }
 	return parts
 end
 
-local function getBounds(instance: Instance): (CFrame, Vector3)
-	if instance:IsA("Model") then
-		return instance:GetBoundingBox()
-	end
-
-	local part = instance :: BasePart
-	return part.CFrame, part.Size
-end
-
-local function pivotTo(instance: Instance, cframe: CFrame)
-	if instance:IsA("Model") then
-		instance:PivotTo(cframe)
-	else
-		(instance :: BasePart).CFrame = cframe
-	end
-end
-
 local function getActiveMap(): Instance?
 	local map = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	return if map and map:IsA("Model") then map else nil
@@ -116,27 +101,6 @@ local function getWallFolder(player: Player): Folder
 	return folder
 end
 
-local function hasUnsafeTaggedAncestor(instance: Instance): boolean
-	local current: Instance? = instance
-	while current and current ~= workspace do
-		for _, tagName in ipairs(UNSAFE_TAGS) do
-			if CollectionService:HasTag(current, tagName) then
-				return true
-			end
-		end
-		current = current.Parent
-	end
-	return false
-end
-
-local function flattenDirection(direction: Vector3): Vector3
-	local flat = Vector3.new(direction.X, 0, direction.Z)
-	if flat.Magnitude < 0.05 then
-		return Vector3.zAxis
-	end
-	return flat.Unit
-end
-
 local function getCharacterRoot(player: Player): BasePart?
 	local character = player.Character
 	if not character then
@@ -151,110 +115,18 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
-	local distance = definition.placementDistance or 8
-	local rayUp = definition.floorRaycastUp or 8
-	local rayDown = definition.floorRaycastDown or 32
-	local facing = flattenDirection(rootPart.CFrame.LookVector)
-	local target = rootPart.Position + facing * distance
-	local rayOrigin = target + Vector3.yAxis * rayUp
-	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
-	local hit = workspace:Raycast(rayOrigin, rayDirection)
-	if not hit then
-		return nil
-	end
-	if hit.Normal.Y < (definition.minFloorNormalY or 0.65) then
-		return nil
-	end
-	if hasUnsafeTaggedAncestor(hit.Instance) then
-		return nil
-	end
-
-	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
-	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
-		return nil
-	end
-
-	return {
-		position = hit.Position,
-		facing = facing,
-		floor = hit.Instance,
-	}
-end
-
-local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing: Vector3): (CFrame, Vector3)
-	local pivot = CFrame.lookAt(floorPosition, floorPosition + facing)
-	pivotTo(clone, pivot)
-
-	local boundsCFrame, boundsSize = getBounds(clone)
-	local bottomY = boundsCFrame.Position.Y - boundsSize.Y * 0.5
-	local finalPivot = pivot + Vector3.yAxis * (floorPosition.Y - bottomY)
-	pivotTo(clone, finalPivot)
-
-	return getBounds(clone)
-end
-
-local function isProtectedOrCharacter(part: BasePart): boolean
-	if hasUnsafeTaggedAncestor(part) then
-		return true
-	end
-
-	local model = part:FindFirstAncestorOfClass("Model")
-	return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
-end
-
-local function isPlacementClear(boundsCFrame: CFrame, boundsSize: Vector3, floor: Instance): boolean
-	local up = boundsCFrame.UpVector
-	local overlapSize = Vector3.new(
-		math.max(boundsSize.X * 0.95, 0.1),
-		math.max(boundsSize.Y - 0.25, 0.1),
-		math.max(boundsSize.Z * 0.95, 0.1)
-	)
-	local overlapCFrame = boundsCFrame + up * 0.18
-
-	local params = OverlapParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = {}
-	params.RespectCanCollide = true
-
-	for _, part in ipairs(workspace:GetPartBoundsInBox(overlapCFrame, overlapSize, params)) do
-		if part == floor or part:IsDescendantOf(floor) then
-			continue
-		end
-		if isProtectedOrCharacter(part) then
-			return false
-		end
-		if part.CanCollide and part.Transparency < 1 then
-			return false
-		end
-	end
-
-	return true
-end
-
-local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance): FloorPlacement?
+local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance, payload: any): FloorPlacement?
+	local _ = template
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil
 	end
 
-	local floor = findFloor(player, rootPart, definition)
-	if not floor then
-		return nil
-	end
-
-	local clone = template:Clone()
-	local boundsCFrame, boundsSize = alignCloneToFloor(clone, floor.position, floor.facing)
-	clone:Destroy()
-
-	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
-		return nil
-	end
-	if not isPlacementClear(boundsCFrame, boundsSize, floor.floor) then
-		return nil
-	end
-
-	return floor
+	return PlacementSurfaceUtil.ResolveForwardOffsetPlacement({
+		rootPart = rootPart,
+		definition = definition,
+		payload = payload,
+	})
 end
 
 local function addHighlight(wall: Instance): Highlight
@@ -424,7 +296,7 @@ function WallBuilder.OnActivate(context: ServerActivateContext): AbilityActivati
 		return false
 	end
 
-	local placement = validatePlacement(context.player, definition, template)
+	local placement = validatePlacement(context.player, definition, template, context.payload)
 	if not placement then
 		return false
 	end
@@ -433,7 +305,7 @@ function WallBuilder.OnActivate(context: ServerActivateContext): AbilityActivati
 	wall.Name = "WallBuilder_" .. context.player.UserId
 	wall:SetAttribute(OWNER_ATTR, context.player.UserId)
 	wall:SetAttribute("AbilityId", context.abilityId)
-	alignCloneToFloor(wall, placement.position, placement.facing)
+	PlacementSurfaceUtil.PivotTo(wall, PlacementSurfaceUtil.GetFloorPivot(placement.position, placement.facing, placement.normal))
 
 	local records = prepareGrowth(wall, definition)
 	local highlight = addHighlight(wall)

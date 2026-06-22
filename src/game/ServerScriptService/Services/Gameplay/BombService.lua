@@ -296,6 +296,19 @@ local function getTeamName(owner: any): string?
 	return nil
 end
 
+local function getOwnerVisualIdentity(owner: any): (number?, string?)
+	local ownerIdentity = StudioAICombatants.GetOwnerIdentity(owner)
+	local ownerUserId = if ownerIdentity and typeof(ownerIdentity.userId) == "number"
+		then ownerIdentity.userId
+		else getOwnerUserId(owner)
+	local ownerTeam = if ownerIdentity
+			and typeof(ownerIdentity.teamName) == "string"
+			and ownerIdentity.teamName ~= ""
+		then ownerIdentity.teamName
+		else getTeamName(owner)
+	return ownerUserId, ownerTeam
+end
+
 local function getHorizontalDirection(direction: any): Vector3?
 	if typeof(direction) ~= "Vector3" then
 		return nil
@@ -674,8 +687,14 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 			local appliedDamage = math.min(damage, healthBefore)
 			if isPlayerOwner(owner) or isStudioAIBotOwner(owner) then
 				RoundService:RecordPlayerDamage(owner, player, appliedDamage, {
-					sourceType = "Bomb",
-					sourceId = sourceId,
+					sourceType = explosionConfig.replaySourceType or "Bomb",
+					sourceId = explosionConfig.replaySourceId or sourceId,
+					bombId = sourceId,
+					bombType = explosionConfig.replayBombType,
+					abilityName = explosionConfig.replayAbilityName,
+					abilityId = explosionConfig.abilityId,
+					directHit = explosionConfig.directHit == true,
+					sourceDetail = explosionConfig.sourceDetail,
 				})
 			end
 			local takeDamageToken = RuntimeProfiler.Begin("Server/BombService/DamageEnemyPlayers/TakeDamage")
@@ -693,14 +712,23 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 				victimUserId = player.UserId,
 				attackerUserId = ownerUserId,
 				amount = appliedDamage,
-				sourceType = "Bomb",
-				sourceId = sourceId,
+				sourceType = explosionConfig.replaySourceType or "Bomb",
+				sourceId = explosionConfig.replaySourceId or sourceId,
+				bombId = sourceId,
+				bombType = explosionConfig.replayBombType,
+				abilityName = explosionConfig.replayAbilityName,
+				abilityId = explosionConfig.abilityId,
+				directHit = explosionConfig.directHit == true,
+				sourceDetail = explosionConfig.sourceDetail,
 				victimHealthAfter = healthAfter,
 			})
 			RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/RecordDamageReplay", replayToken)
 			sendWorldText("PlayerDamaged", owner, player, appliedDamage, rootPart.Position, {
-				sourceType = "Bomb",
-				sourceId = sourceId,
+				sourceType = explosionConfig.replaySourceType or "Bomb",
+				sourceId = explosionConfig.replaySourceId or sourceId,
+				bombId = sourceId,
+				bombType = explosionConfig.replayBombType,
+				abilityName = explosionConfig.replayAbilityName,
 				victimHealthAfter = healthAfter,
 			})
 		end
@@ -796,8 +824,8 @@ local function damageEnemyAnchors(owner: any, origin: Vector3, sourceId: string?
 
 			RoundService:DamageCore(trackedCore, damage, {
 				attackerUserId = ownerUserId,
-				sourceType = "Bomb",
-				sourceId = sourceId,
+				sourceType = explosionConfig.replaySourceType or "Bomb",
+				sourceId = explosionConfig.replaySourceId or sourceId,
 			})
 		end
 	end
@@ -888,6 +916,28 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 	explosionConfig = applyExplosionResult(explosionConfig, explosionResult)
 	playerDamageMultiplier = readNonNegativeNumber(explosionResult.playerDamageMultiplier, playerDamageMultiplier)
 	coreDamageMultiplier = readNonNegativeNumber(explosionResult.coreDamageMultiplier, coreDamageMultiplier)
+	local replayAbilityId = if typeof(explosionConfig.abilityId) == "string" and explosionConfig.abilityId ~= ""
+		then explosionConfig.abilityId
+		else nil
+	local replaySourceType = if typeof(explosionConfig.sourceType) == "string" and explosionConfig.sourceType ~= ""
+		then explosionConfig.sourceType
+		elseif replayAbilityId or source == "Ability"
+		then "Ability"
+		else "Bomb"
+	local replaySourceId = if typeof(explosionConfig.sourceId) == "string" and explosionConfig.sourceId ~= ""
+		then explosionConfig.sourceId
+		elseif replayAbilityId
+		then replayAbilityId
+		else projectileId
+	local replayBombType = if typeof(explosionConfig.bombType) == "string" and explosionConfig.bombType ~= ""
+		then explosionConfig.bombType
+		elseif replayAbilityId
+		then replayAbilityId
+		else BombProjectileConfig.BombType.Normal
+	explosionConfig.replaySourceType = replaySourceType
+	explosionConfig.replaySourceId = replaySourceId
+	explosionConfig.replayBombType = replayBombType
+	explosionConfig.replayAbilityName = replayAbilityId
 	local impactTimestamp = workspace:GetServerTimeNow()
 
 	local hitUserIds = {}
@@ -898,8 +948,8 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		local ownerUserId = getOwnerUserId(owner)
 		local destructionToken = RuntimeProfiler.Begin("Server/BombService/ExplosionDestruction")
 		debrisPayloads = DestructionService:DestroySphere(position, explosionConfig.terrainRadius, {
-			sourceType = "Bomb",
-			sourceId = projectileId,
+			sourceType = replaySourceType,
+			sourceId = replaySourceId,
 			bombId = projectileId,
 			ownerUserId = ownerUserId,
 			timestamp = impactTimestamp,
@@ -941,8 +991,10 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 	sendWorldText("BombExploded", owner, position, {
 		projectileId = projectileId,
 		source = source,
-		sourceType = "Bomb",
-		bombType = BombProjectileConfig.BombType.Normal,
+		sourceType = replaySourceType,
+		sourceId = replaySourceId,
+		bombType = replayBombType,
+		abilityName = replayAbilityId,
 		bombSkinId = bombSkinId,
 		chargeScale = explosionConfig.chargeScale,
 	})
@@ -956,16 +1008,20 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 	recordReplayEvent("BombExploded", {
 		timestamp = impactTimestamp,
 		bombId = projectileId,
-		sourceId = projectileId,
+		sourceId = replaySourceId,
 		projectileId = projectileId,
 		source = source,
-		sourceType = "Bomb",
+		sourceType = replaySourceType,
 		ownerUserId = getOwnerUserId(owner),
 		ownerName = if ownerIdentity then ownerIdentity.name else nil,
 		ownerDisplayName = if ownerIdentity then ownerIdentity.displayName else nil,
 		ownerTeam = if ownerIdentity then ownerIdentity.teamName else nil,
 		ownerIsNPC = if ownerIdentity then ownerIdentity.isNPC == true else nil,
-		bombType = BombProjectileConfig.BombType.Normal,
+		bombType = replayBombType,
+		abilityName = replayAbilityId,
+		abilityId = replayAbilityId,
+		directHit = explosionConfig.directHit == true,
+		sourceDetail = explosionConfig.sourceDetail,
 		bombSkinId = bombSkinId,
 		position = position,
 		innerRadius = explosionConfig.innerRadius,
@@ -1370,8 +1426,11 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 	activeProjectiles[projectileId] = state
 	RuntimeProfiler.Count("Server/BombService/LegacyProjectileLaunch")
 
+	local ownerUserId, ownerTeam = getOwnerVisualIdentity(player)
 	fireEffect("Throw", {
 		player = player,
+		ownerUserId = ownerUserId,
+		ownerTeam = ownerTeam,
 		projectileId = projectileId,
 		bombSkinId = skinId,
 		origin = trajectory.origin,
@@ -1386,7 +1445,8 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 	})
 	recordReplayEvent("BombThrown", {
 		bombId = projectileId,
-		ownerUserId = player.UserId,
+		ownerUserId = ownerUserId,
+		ownerTeam = ownerTeam,
 		bombType = BombProjectileConfig.BombType.Normal,
 		bombSkinId = skinId,
 		position = trajectory.origin,
@@ -1510,8 +1570,11 @@ local function fireProjectileSnapshot(state: ProjectileState, currentTime: numbe
 		currentVelocity = currentVelocity or getProjectilePhysicsVelocity(state)
 	end
 
+	local ownerUserId, ownerTeam = getOwnerVisualIdentity(state.owner)
 	fireEffect("ProjectileSnapshot", {
 		player = state.owner,
+		ownerUserId = ownerUserId,
+		ownerTeam = ownerTeam,
 		projectileId = state.id,
 		customProjectile = true,
 		bombSkinId = state.skinId,

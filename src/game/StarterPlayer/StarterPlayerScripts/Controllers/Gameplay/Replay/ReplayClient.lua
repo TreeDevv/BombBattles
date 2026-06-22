@@ -58,6 +58,7 @@ ReplayClient._activeReplay = nil
 ReplayClient._replayBuildInProgress = false
 ReplayClient._pendingKillReplayPayload = nil
 ReplayClient._pendingKillReplayKey = nil
+ReplayClient._killReplayFadeSerial = 0
 ReplayClient._visualsEnabled = nil
 ReplayClient._boundRemotes = {}
 ReplayClient.ReplayStarted = Signal.new()
@@ -2069,6 +2070,7 @@ function ReplayClient:_disconnectAll()
 end
 
 function ReplayClient:CancelReplay(reason: string?)
+	self._killReplayFadeSerial += 1
 	local state = self._activeReplay
 	self._activeReplay = nil
 	if not state then
@@ -2436,7 +2438,35 @@ function ReplayClient:PlayKillReplay(payload)
 end
 
 function ReplayClient:ReceiveKillReplay(payload)
+	local victimUserId = if typeof(payload) == "table" then payload.victimUserId else nil
+	local isLocalKillReplay = victimUserId == nil
+		or (typeof(victimUserId) == "number" and math.floor(victimUserId) == LocalPlayer.UserId)
+	if not isLocalKillReplay then
+		task.defer(function()
+			self:PlayKillReplay(payload)
+		end)
+		return true
+	end
+
+	local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
+	self._killReplayFadeSerial += 1
+	local serial = self._killReplayFadeSerial
 	task.defer(function()
+		if not ScreenEffects.IsBlack(0.01) then
+			if ScreenEffects.FadeToBlack(0.25) then
+				task.wait(0.25)
+				RunService.RenderStepped:Wait()
+			end
+		end
+		if serial ~= self._killReplayFadeSerial then
+			return
+		end
+		if LocalPlayer:GetAttribute("RoundAlive") == true then
+			ScreenEffects.FadeFromBlack(0.25)
+			return
+		end
+
+		ScreenEffects.HoldBlack()
 		self:PlayKillReplay(payload)
 	end)
 	return true

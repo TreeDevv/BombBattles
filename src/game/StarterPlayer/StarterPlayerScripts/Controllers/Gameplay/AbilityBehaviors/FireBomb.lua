@@ -4,6 +4,7 @@ local RunService = game:GetService("RunService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local BombController = require(script.Parent.Parent:WaitForChild("BombController"))
 
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -21,9 +22,6 @@ FireBomb.HandlesInputState = true
 local activeThrow: ThrowState? = nil
 local predictedCooldownEndsAt = 0
 local previewConnection: RBXScriptConnection? = nil
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 local warnedMissingTemplate = false
 local warnedInvalidTemplate = false
 local warnedMissingImpactTemplate = false
@@ -222,57 +220,6 @@ local function getImpactTemplate(path: any): Attachment?
 	return template
 end
 
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[FireBomb] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[FireBomb] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[FireBomb] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
-end
-
 local function getVfxFolder(): Folder
 	local existing = workspace:FindFirstChild("FireBombVFX")
 	if existing and existing:IsA("Folder") then
@@ -339,15 +286,7 @@ local function playBurnEffect(position: Vector3, payload: any, definition: Abili
 	clone.CFrame = CFrame.new(position)
 	clone.Parent = getVfxFolder()
 
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, err = pcall(function()
-			module.emit(clone)
-		end)
-		if not ok then
-			warn("[FireBomb] Failed to emit burn VFX: " .. tostring(err))
-		end
-	end
+	EmitService.Emit(clone, "[FireBomb]")
 
 	cleanupVisualAfterDelay(clone, cleanupSeconds)
 end
@@ -381,15 +320,7 @@ local function playImpactEffect(position: Vector3, payload: any, definition: Abi
 	impact.Parent = holder
 
 	local cleanupSeconds = math.max(getDefinitionNumber(definition, "impactVisualCleanupSeconds", 3), 0.25)
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, err = pcall(function()
-			module.emit(impact)
-		end)
-		if not ok then
-			warn("[FireBomb] Failed to emit impact VFX: " .. tostring(err))
-		end
-	end
+	EmitService.Emit(impact, "[FireBomb]")
 
 	cleanupVisualAfterDelay(holder, cleanupSeconds)
 end

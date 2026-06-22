@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PlacementSurfaceUtil = require(ReplicatedStorage.Shared.Common.PlacementSurfaceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
@@ -16,7 +17,8 @@ type ServerHookContext = AbilityTypes.ServerHookContext
 type FloorPlacement = {
 	position: Vector3,
 	facing: Vector3,
-	floor: Instance,
+	normal: Vector3,
+	floor: Instance?,
 }
 type ShieldRecord = {
 	id: string,
@@ -189,49 +191,19 @@ local function getRequestedPlacement(player: Player, rootPart: BasePart, definit
 end
 
 local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
-	local distance = definition.placementDistance or 8
-	local rayUp = definition.floorRaycastUp or 8
-	local rayDown = definition.floorRaycastDown or 32
-	local requestedPosition, requestedFacing = getRequestedPlacement(player, rootPart, definition, payload)
-	if not requestedPosition then
-		return nil
-	end
-	local facing = requestedFacing or flattenDirection(rootPart.CFrame.LookVector)
-	local target = requestedPosition or (rootPart.Position + facing * distance)
-	local rayOrigin = target + Vector3.yAxis * rayUp
-	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
-	local hit = workspace:Raycast(rayOrigin, rayDirection)
-	if not hit then
-		return nil
-	end
-	if hit.Normal.Y < (definition.minFloorNormalY or 0.65) then
-		return nil
-	end
-	if hasUnsafeTaggedAncestor(hit.Instance) then
-		return nil
-	end
-
-	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
-	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
-		return nil
-	end
-
-	return {
-		position = hit.Position,
-		facing = facing,
-		floor = hit.Instance,
-	}
+	local _ = player
+	return PlacementSurfaceUtil.ResolveRootPlacement({
+		rootPart = rootPart,
+		definition = definition,
+		payload = payload,
+	})
 end
 
-local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing: Vector3): (CFrame, Vector3)
-	local pivot = CFrame.lookAt(floorPosition, floorPosition + facing)
-	pivotTo(clone, pivot)
-
-	local boundsCFrame, boundsSize = getBounds(clone)
-	local bottomY = boundsCFrame.Position.Y - boundsSize.Y * 0.5
-	local finalPivot = pivot + Vector3.yAxis * (floorPosition.Y - bottomY)
-	pivotTo(clone, finalPivot)
-
+local function alignCloneToFloor(clone: Instance, placement: FloorPlacement): (CFrame, Vector3)
+	local pivot = PlacementSurfaceUtil.GetFloorPivot(placement.position, placement.facing, placement.normal)
+	PlacementSurfaceUtil.PivotTo(clone, pivot)
+	local boundsCFrame = getBounds(clone)
+	PlacementSurfaceUtil.PivotTo(clone, pivot + (placement.position - boundsCFrame.Position))
 	return getBounds(clone)
 end
 
@@ -304,13 +276,10 @@ local function validatePlacement(player: Player, definition: AbilityDefinition, 
 	end
 
 	local clone = template:Clone()
-	local boundsCFrame, boundsSize = alignCloneToFloor(clone, floor.position, floor.facing)
+	local boundsCFrame, boundsSize = alignCloneToFloor(clone, floor)
 	clone:Destroy()
 
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
-		return nil, nil, nil
-	end
-	if not isPlacementClear(boundsCFrame, boundsSize, floor.floor, definition) then
 		return nil, nil, nil
 	end
 
@@ -496,7 +465,7 @@ function ReflectShield.OnActivate(context: ServerActivateContext): AbilityActiva
 	shield:SetAttribute(ID_ATTR, shieldId)
 	shield:SetAttribute(OWNER_ATTR, context.player.UserId)
 	shield:SetAttribute("AbilityId", context.abilityId)
-	alignCloneToFloor(shield, floor.position, floor.facing)
+	alignCloneToFloor(shield, floor)
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
 		shield:Destroy()
 		return false
@@ -626,6 +595,9 @@ function ReflectShield.OnProjectileStep(context: ServerHookContext): AbilityHook
 		return {
 			kind = RESULT_KIND.RedirectProjectile,
 			owner = context.player,
+			sourceType = "Ability",
+			sourceId = "ReflectShield",
+			reflected = true,
 			origin = hitPosition + aimDirection * (sweepRadius + surfaceOffset),
 			aimDirection = aimDirection,
 			launchSpeed = getReflectSpeed(context.definition, velocity),

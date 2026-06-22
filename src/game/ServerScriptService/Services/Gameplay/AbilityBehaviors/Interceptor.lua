@@ -1,8 +1,8 @@
-local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PlacementSurfaceUtil = require(ReplicatedStorage.Shared.Common.PlacementSurfaceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
@@ -108,68 +108,21 @@ local function getBounds(instance: Instance): (CFrame, Vector3)
 	return part.CFrame, part.Size
 end
 
-local function pivotTo(instance: Instance, cframe: CFrame)
-	if instance:IsA("Model") then
-		instance:PivotTo(cframe)
-	else
-		(instance :: BasePart).CFrame = cframe
-	end
-end
-
-local function getPartAxisExtents(part: BasePart, axis: Vector3, origin: Vector3): (number, number)
-	local halfSize = part.Size * 0.5
-	local minDistance = math.huge
-	local maxDistance = -math.huge
-
-	for _, xSign in ipairs({ -1, 1 }) do
-		for _, ySign in ipairs({ -1, 1 }) do
-			for _, zSign in ipairs({ -1, 1 }) do
-				local corner = part.CFrame:PointToWorldSpace(Vector3.new(
-					halfSize.X * xSign,
-					halfSize.Y * ySign,
-					halfSize.Z * zSign
-				))
-				local distance = (corner - origin):Dot(axis)
-				minDistance = math.min(minDistance, distance)
-				maxDistance = math.max(maxDistance, distance)
-			end
-		end
-	end
-
-	return minDistance, maxDistance
-end
-
-local function getInstanceAxisExtents(instance: Instance, axis: Vector3, origin: Vector3): (number, number)
-	local minDistance = math.huge
-	local maxDistance = -math.huge
-	local foundPart = false
-	for _, part in ipairs(getBaseParts(instance)) do
-		foundPart = true
-		local partMin, partMax = getPartAxisExtents(part, axis, origin)
-		minDistance = math.min(minDistance, partMin)
-		maxDistance = math.max(maxDistance, partMax)
-	end
-
-	if not foundPart then
-		return 0, 0
-	end
-	return minDistance, maxDistance
-end
-
 local function getActiveMap(): Instance?
 	local map = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	return if map and map:IsA("Model") then map else nil
 end
 
-local function getInterceptorRootFolder(): Folder
-	local abilitiesFolder = workspace:FindFirstChild(ABILITIES_FOLDER_NAME)
+local function getInterceptorRootFolder(player: Player): Folder
+	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
+	local abilitiesFolder = parent:FindFirstChild(ABILITIES_FOLDER_NAME)
 	if not (abilitiesFolder and abilitiesFolder:IsA("Folder")) then
 		if abilitiesFolder then
 			abilitiesFolder:Destroy()
 		end
 		abilitiesFolder = Instance.new("Folder")
 		abilitiesFolder.Name = ABILITIES_FOLDER_NAME
-		abilitiesFolder.Parent = workspace
+		abilitiesFolder.Parent = parent
 	end
 
 	local interceptorFolder = abilitiesFolder:FindFirstChild(INTERCEPTOR_FOLDER_NAME)
@@ -186,27 +139,6 @@ local function getInterceptorRootFolder(): Folder
 	return folder
 end
 
-local function hasUnsafeTaggedAncestor(instance: Instance): boolean
-	local current: Instance? = instance
-	while current and current ~= workspace do
-		for _, tagName in ipairs(UNSAFE_TAGS) do
-			if CollectionService:HasTag(current, tagName) then
-				return true
-			end
-		end
-		current = current.Parent
-	end
-	return false
-end
-
-local function flattenDirection(direction: Vector3): Vector3
-	local flat = Vector3.new(direction.X, 0, direction.Z)
-	if flat.Magnitude < 0.05 then
-		return Vector3.zAxis
-	end
-	return flat.Unit
-end
-
 local function getCharacterRoot(player: Player): BasePart?
 	local character = player.Character
 	if not character then
@@ -221,160 +153,30 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function isFiniteVector(value: any): boolean
-	return typeof(value) == "Vector3" and value.X == value.X and value.Y == value.Y and value.Z == value.Z
-end
-
-local function getRequestedPlacement(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): (Vector3?, Vector3?)
-	if typeof(payload) ~= "table" or not isFiniteVector(payload.floorPosition) then
-		return nil, nil
-	end
-
-	local floorPosition = payload.floorPosition
-	local maxDistance = math.max(tonumber(definition.placementDistance) or 8, 0) + 4
-	if (floorPosition - rootPart.Position).Magnitude > maxDistance then
-		return nil, nil
-	end
-
-	local facing = flattenDirection(if isFiniteVector(payload.facing) then payload.facing else rootPart.CFrame.LookVector)
-	return floorPosition, facing
-end
-
-local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
-	local distance = definition.placementDistance or 8
-	local rayUp = definition.floorRaycastUp or 8
-	local rayDown = definition.floorRaycastDown or 32
-	local requestedPosition, requestedFacing = getRequestedPlacement(player, rootPart, definition, payload)
-	if not requestedPosition then
-		return nil
-	end
-	local facing = requestedFacing or flattenDirection(rootPart.CFrame.LookVector)
-	local target = requestedPosition or (rootPart.Position + facing * distance)
-	local rayOrigin = target + Vector3.yAxis * rayUp
-	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
-	local hit = workspace:Raycast(rayOrigin, rayDirection)
-	if not hit then
-		return nil
-	end
-	if hit.Normal.Y < (definition.minFloorNormalY or 0.65) then
-		return nil
-	end
-	if hasUnsafeTaggedAncestor(hit.Instance) then
-		return nil
-	end
-
-	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
-	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
-		return nil
-	end
-
-	return {
-		position = hit.Position,
-		facing = facing,
-		normal = hit.Normal,
-		floor = hit.Instance,
-	}
-end
-
-local function getFloorPivot(floorPosition: Vector3, facing: Vector3, normal: Vector3): CFrame
-	local up = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
-	local forward = facing - up * facing:Dot(up)
-	if forward.Magnitude < 0.05 then
-		forward = up:Cross(Vector3.xAxis)
-		if forward.Magnitude < 0.05 then
-			forward = up:Cross(Vector3.zAxis)
-		end
-	end
-
-	forward = forward.Unit
-	local right = up:Cross(forward).Unit
-	forward = right:Cross(up).Unit
-	return CFrame.fromMatrix(floorPosition, right, up, -forward)
-end
-
-local function alignCloneToFloor(clone: Instance, floorPosition: Vector3, facing: Vector3, normal: Vector3): (CFrame, Vector3)
-	local pivot = getFloorPivot(floorPosition, facing, normal)
-	pivotTo(clone, pivot)
-
-	local bottomOffset = getInstanceAxisExtents(clone, pivot.UpVector, floorPosition)
-	local finalPivot = pivot - pivot.UpVector * bottomOffset
-	pivotTo(clone, finalPivot)
-
-	return getBounds(clone)
-end
-
-local function alignCloneToRootPosition(clone: Instance, rootPart: BasePart): (CFrame, Vector3)
-	local rootCFrame = rootPart.CFrame
-	pivotTo(clone, rootCFrame)
-
-	local boundsCFrame = getBounds(clone)
-	local centeredCFrame = rootCFrame + (rootPart.Position - boundsCFrame.Position)
-	pivotTo(clone, centeredCFrame)
-
-	return getBounds(clone)
-end
-
-local function isProtectedOrCharacter(part: BasePart): boolean
-	if hasUnsafeTaggedAncestor(part) then
-		return true
-	end
-
-	local model = part:FindFirstAncestorOfClass("Model")
-	return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
-end
-
-local function isPlacementClear(boundsCFrame: CFrame, boundsSize: Vector3, floor: Instance): boolean
-	local up = boundsCFrame.UpVector
-	local overlapSize = Vector3.new(
-		math.max(boundsSize.X * 0.95, 0.1),
-		math.max(boundsSize.Y - 0.25, 0.1),
-		math.max(boundsSize.Z * 0.95, 0.1)
-	)
-	local overlapCFrame = boundsCFrame + up * 0.18
-
-	local params = OverlapParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	params.FilterDescendantsInstances = {}
-	params.RespectCanCollide = true
-
-	for _, part in ipairs(workspace:GetPartBoundsInBox(overlapCFrame, overlapSize, params)) do
-		if part == floor or part:IsDescendantOf(floor) then
-			continue
-		end
-		if isProtectedOrCharacter(part) then
-			return false
-		end
-		if part.CanCollide and part.Transparency < 1 then
-			return false
-		end
-	end
-
-	return true
+local function findSurface(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
+	return PlacementSurfaceUtil.ResolvePayloadSurfacePlacement({
+		rootPart = rootPart,
+		definition = definition,
+		payload = payload,
+		targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap()),
+		unsafeTags = UNSAFE_TAGS,
+		excludeInstances = if player.Character then { player.Character } else {},
+	})
 end
 
 local function validatePlacement(player: Player, definition: AbilityDefinition, centerTemplate: Instance, payload: any): FloorPlacement?
+	local _ = centerTemplate
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil
 	end
 
-	local floor = findFloor(player, rootPart, definition, payload)
-	if not floor then
+	local surface = findSurface(player, rootPart, definition, payload)
+	if not surface then
 		return nil
 	end
 
-	local clone = centerTemplate:Clone()
-	local boundsCFrame, boundsSize = alignCloneToFloor(clone, floor.position, floor.facing, floor.normal)
-	clone:Destroy()
-
-	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
-		return nil
-	end
-	if not isPlacementClear(boundsCFrame, boundsSize, floor.floor) then
-		return nil
-	end
-
-	return floor
+	return surface
 end
 
 local function prepareCenterPiece(centerPiece: Instance)
@@ -544,14 +346,14 @@ function Interceptor.OnActivate(context: ServerActivateContext): AbilityActivati
 	centerPiece:SetAttribute(ID_ATTR, interceptorId)
 	centerPiece:SetAttribute(OWNER_ATTR, context.player.UserId)
 	centerPiece:SetAttribute("AbilityId", context.abilityId)
-	local _boundsCFrame, boundsSize = alignCloneToFloor(centerPiece, placement.position, placement.facing, placement.normal)
+	local _boundsCFrame, boundsSize = PlacementSurfaceUtil.AlignToFloor(centerPiece, placement)
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
 		folder:Destroy()
 		return false
 	end
 	prepareCenterPiece(centerPiece)
 	centerPiece.Parent = folder
-	folder.Parent = getInterceptorRootFolder()
+	folder.Parent = getInterceptorRootFolder(context.player)
 
 	local durationSeconds = math.max(tonumber(context.definition.durationSeconds) or 0, 0)
 	local activeEndsAt = context.now + durationSeconds

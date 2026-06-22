@@ -4,6 +4,7 @@ local RunService = game:GetService("RunService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local BombController = require(script.Parent.Parent:WaitForChild("BombController"))
 
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -21,9 +22,6 @@ BlackHole.HandlesInputState = true
 local activeThrow: ThrowState? = nil
 local predictedCooldownEndsAt = 0
 local previewConnection: RBXScriptConnection? = nil
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 local warnedMissingTemplate = false
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
@@ -174,57 +172,6 @@ local function getTemplate(path: any): Instance?
 	return nil
 end
 
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[BlackHole] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[BlackHole] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[BlackHole] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
-end
-
 local function getVfxFolder(): Folder
 	local existing = workspace:FindFirstChild("BlackHoleVFX")
 	if existing and existing:IsA("Folder") then
@@ -321,15 +268,7 @@ local function playBlackHoleEffect(payload: any)
 		root.Parent = getVfxFolder()
 	end
 
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, err = pcall(function()
-			module.emit(root)
-		end)
-		if not ok then
-			warn("[BlackHole] Failed to emit VFX: " .. tostring(err))
-		end
-	end
+	EmitService.Emit(root, "[BlackHole]")
 
 	cleanupVisualAfterDelay(holder or root, cleanupSeconds)
 end

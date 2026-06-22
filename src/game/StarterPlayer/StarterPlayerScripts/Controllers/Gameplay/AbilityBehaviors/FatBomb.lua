@@ -6,6 +6,7 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local BombController = require(script.Parent.Parent:WaitForChild("BombController"))
 local CameraController = require(script.Parent.Parent:WaitForChild("CameraController"))
 
@@ -46,9 +47,6 @@ local activeThrow: ThrowState? = nil
 local predictedCooldownEndsAt = 0
 local previewConnection: RBXScriptConnection? = nil
 local activeSequences: { [number]: SequenceState } = {}
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 local warnedMissingImpactTemplate = false
 local warnedInvalidImpactTemplate = false
 
@@ -99,57 +97,6 @@ local function getInstanceByPath(path: any): Instance?
 		current = current:FindFirstChild(name)
 	end
 	return current
-end
-
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[FatBomb] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[FatBomb] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[FatBomb] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
 end
 
 local function getBaseParts(instance: Instance): { BasePart }
@@ -675,12 +622,9 @@ local function playImpactAssetVfx(sequence: SequenceState, definition: AbilityDe
 
 	local cleanupRoot = if clone:IsA("Attachment") then clone.Parent else clone
 	local cleanupSeconds = math.max(getDefinitionNumber(definition, "impactVisualCleanupSeconds", 5), maxSoundDuration + 0.25, 0.25)
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, env = pcall(function()
-			return module.emit(clone)
-		end)
-		if ok and typeof(env) == "table" and env.Finished and type(env.Finished.finally) == "function" then
+	local ok, env = EmitService.EmitWithResult(clone, "[FatBomb]")
+	if ok then
+		if typeof(env) == "table" and env.Finished and type(env.Finished.finally) == "function" then
 			env.Finished:finally(function()
 				if playedSound and maxSoundDuration <= 0 then
 					return
@@ -697,8 +641,6 @@ local function playImpactAssetVfx(sequence: SequenceState, definition: AbilityDe
 			end):catch(function(err)
 				warn("[FatBomb] Impact VFX emit failed: " .. tostring(err))
 			end)
-		elseif not ok then
-			warn("[FatBomb] Impact VFX emit failed: " .. tostring(env))
 		end
 	end
 

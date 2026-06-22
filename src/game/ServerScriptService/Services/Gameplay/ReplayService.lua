@@ -10,7 +10,6 @@ local ReplayUtil = require(ReplicatedStorage.Shared.Replay.ReplayUtil)
 local ReplayClipPolicy = require(ReplicatedStorage.Shared.Replay.ReplayClipPolicy)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
-local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local POTGService = require(ServerScriptService.Services.POTGService)
 local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatants)
 local ReplayBuffer = require(script.Parent.Replay.ReplayBuffer)
@@ -30,6 +29,8 @@ local KILL_REPLAY_REQUEST_COOLDOWN_SECONDS = 0.75
 local MIN_KILL_REPLAY_FRAMES = ReplayClipPolicy.MinKillReplayFrames
 local MIN_KILL_REPLAY_SEND_FRAMES = ReplayClipPolicy.MinKillReplaySendFrames
 local MIN_POTG_REPLAY_FRAMES = ReplayClipPolicy.MinPOTGReplayFrames
+local MIN_POTG_FALLBACK_SEND_FRAMES = 1
+local MAX_ROUND_DESTRUCTION_EVENTS = ReplayClipPolicy.GetPOTGClipCaps().maxDestructionEvents
 local CLIENT_ANIMATION_STATE_MAX_RATE = 20
 local CLIENT_ANIMATION_STATE_STALE_SECONDS = 0.5
 local MAX_REPLAY_ANIMATION_SPEED = 220
@@ -79,6 +80,7 @@ local potgSendToken = 0
 local optimizedReplayPayloads = setmetatable({}, { __mode = "k" })
 local debugKillReplaySend = nil
 local sendKillReplayForEvent = nil
+local bombProjectileService = nil
 
 local isFiniteNumber = ReplayUtil.IsFiniteNumber
 local isFiniteCFrame = ReplayUtil.IsFiniteCFrame
@@ -627,6 +629,25 @@ local function bindKillReplayRequestRemote(remote: RemoteEvent)
 	killReplayRequestConnection = remote.OnServerEvent:Connect(handleKillReplayRequest)
 end
 
+local function getBombProjectileService()
+	if bombProjectileService then
+		return bombProjectileService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local module = services and services:FindFirstChild("BombProjectileService")
+	if not (module and module:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, module)
+	if ok and typeof(service) == "table" then
+		bombProjectileService = service
+		return bombProjectileService
+	end
+	return nil
+end
+
 local function getPlayerSnapshot(player: Player, timestamp: number)
 	local token = RuntimeProfiler.Begin("Server/Replay/GetPlayerSnapshot")
 	local character = player.Character
@@ -758,11 +779,12 @@ local function getBombSnapshots()
 	local token = RuntimeProfiler.Begin("Server/Replay/GetBombSnapshots")
 	local bombs = {}
 	lastBombSource = "None"
-	lastBombServiceSnapshotAvailable = type(BombProjectileService.GetReplaySnapshots) == "function"
+	local projectileService = getBombProjectileService()
+	lastBombServiceSnapshotAvailable = type(projectileService and projectileService.GetReplaySnapshots) == "function"
 
 	if lastBombServiceSnapshotAvailable then
 		local ok, snapshots = pcall(function()
-			return BombProjectileService:GetReplaySnapshots(ReplayConstants.MAX_REPLAY_BOMBS)
+			return projectileService:GetReplaySnapshots(ReplayConstants.MAX_REPLAY_BOMBS)
 		end)
 		lastBombServiceSnapshotAvailable = ok
 		if ok then
@@ -922,6 +944,10 @@ local function isPOTGClipReasonable(clip): boolean
 	return isClipWithinCaps(clip, MIN_POTG_REPLAY_FRAMES, getPOTGClipCaps())
 end
 
+local function isFallbackPOTGClipSendable(clip): boolean
+	return isClipWithinCaps(clip, MIN_POTG_FALLBACK_SEND_FRAMES, getPOTGClipCaps())
+end
+
 debugKillReplaySend = function(status: string, payload)
 	local token = RuntimeProfiler.Begin("Server/Replay/Death/DebugKillReplaySummary")
 	local estimate = estimateClipPayloadSize(payload)
@@ -1031,6 +1057,64 @@ end
 local function copyDebrisPayload(payload, remainingBlocks: number)
 	if typeof(payload) ~= "table" or remainingBlocks <= 0 then
 		return nil, 0
+	end
+	if payload.compact == true then
+		if not isFiniteVector3(payload.explosionPosition) then
+			return nil, 0
+		end
+		local sampleCount = math.clamp(
+			math.floor(if isFiniteNumber(payload.sampleCount) then payload.sampleCount else 0),
+			0,
+			remainingBlocks
+		)
+		if sampleCount <= 0 then
+			return nil, 0
+		end
+
+		local copy = {
+			compact = true,
+			explosionPosition = payload.explosionPosition,
+			sourceBlockCount = if isFiniteNumber(payload.sourceBlockCount)
+				then math.max(math.floor(payload.sourceBlockCount), 0)
+				else sampleCount,
+			sampleCount = sampleCount,
+			averageSize = if isFiniteVector3(payload.averageSize) then payload.averageSize else Vector3.new(1.25, 1.25, 1.25),
+			radius = if isFiniteNumber(payload.radius) then math.clamp(payload.radius, 1, 80) else 8,
+		}
+		if typeof(payload.materialName) == "string" and payload.materialName ~= "" then
+			copy.materialName = payload.materialName
+		end
+		if isFiniteColor3(payload.color) then
+			copy.color = payload.color
+		end
+		if isFiniteNumber(payload.transparency) then
+			copy.transparency = math.clamp(payload.transparency, 0, 1)
+		end
+		if isFiniteNumber(payload.reflectance) then
+			copy.reflectance = math.clamp(payload.reflectance, 0, 1)
+		end
+		if isFiniteNumber(payload.speedMin) then
+			copy.speedMin = math.max(payload.speedMin, 0)
+		end
+		if isFiniteNumber(payload.speedMax) then
+			copy.speedMax = math.max(payload.speedMax, 0)
+		end
+		if isFiniteNumber(payload.lifetime) then
+			copy.lifetime = math.clamp(payload.lifetime, 0.1, 10)
+		end
+		if typeof(payload.useGraphicsQualitySampling) == "boolean" then
+			copy.useGraphicsQualitySampling = payload.useGraphicsQualitySampling
+		end
+		if isFiniteNumber(payload.automaticQualityLevel) then
+			copy.automaticQualityLevel = math.clamp(math.floor(payload.automaticQualityLevel), 1, 10)
+		end
+		if isFiniteNumber(payload.maxSamplingDivisor) then
+			copy.maxSamplingDivisor = math.clamp(math.floor(payload.maxSamplingDivisor), 1, 20)
+		end
+		if isFiniteNumber(payload.seed) then
+			copy.seed = math.clamp(math.floor(payload.seed), 1, MAX_RANDOM_SEED)
+		end
+		return copy, sampleCount
 	end
 	if not (isFiniteCFrame(payload.sourceCFrame) and isFiniteVector3(payload.explosionPosition)) then
 		return nil, 0
@@ -1463,6 +1547,21 @@ local function buildPOTGReplayPayload(candidate)
 	return payload
 end
 
+local function buildSendablePOTGReplayPayload(candidate, allowFallbackClip: boolean?)
+	local payload = buildPOTGReplayPayload(candidate)
+	if not payload then
+		return nil, "invalid-candidate"
+	end
+	if typeof(payload.frames) ~= "table" or #payload.frames == 0 then
+		return nil, "empty-clip"
+	end
+	local isSendable = if allowFallbackClip == true then isFallbackPOTGClipSendable(payload) else isPOTGClipReasonable(payload)
+	if not isSendable then
+		return nil, "clip-guard"
+	end
+	return payload, nil
+end
+
 local function getPOTGRecipients(recipients)
 	if typeof(recipients) ~= "table" then
 		return Players:GetPlayers()
@@ -1529,8 +1628,27 @@ local function getReplaySnapshotString(snapshot, fieldName: string): string?
 	return if typeof(value) == "string" and value ~= "" then value else nil
 end
 
+local function captureFallbackReplayFrame(): boolean
+	local timestamp = workspace:GetServerTimeNow()
+	local frame = buildFrame(timestamp)
+	if typeof(frame.players) ~= "table" or #frame.players == 0 then
+		return false
+	end
+	local recorded = ensureBuffer():AddFrame(frame)
+	if recorded then
+		lastSampleTime = timestamp
+		sampleCount += 1
+	end
+	return recorded
+end
+
 local function buildFallbackPOTGCandidate(recipients)
-	local bufferCounts = ensureBuffer():GetDebugCounts()
+	local buffer = ensureBuffer()
+	local bufferCounts = buffer:GetDebugCounts()
+	if not (isFiniteNumber(bufferCounts.frames) and bufferCounts.frames > 0 and isFiniteNumber(bufferCounts.newestTimestamp)) then
+		captureFallbackReplayFrame()
+		bufferCounts = buffer:GetDebugCounts()
+	end
 	if not (isFiniteNumber(bufferCounts.frames) and bufferCounts.frames > 0 and isFiniteNumber(bufferCounts.newestTimestamp)) then
 		return nil
 	end
@@ -1541,7 +1659,7 @@ local function buildFallbackPOTGCandidate(recipients)
 		else ReplayConstants.BUFFER_SECONDS
 	local windowSeconds = math.min(ReplayConstants.POTG_PRE_SECONDS + ReplayConstants.POTG_POST_SECONDS, bufferSeconds)
 	local startTime = endTime - windowSeconds
-	local clip = ensureBuffer():GetClip(startTime, endTime)
+	local clip = buffer:GetClip(startTime, endTime)
 	if typeof(clip.frames) ~= "table" or #clip.frames == 0 then
 		return nil
 	end
@@ -1561,6 +1679,28 @@ local function buildFallbackPOTGCandidate(recipients)
 	end
 
 	snapshot = snapshot or findAnyReplayPlayerSnapshot(clip.frames, true) or findAnyReplayPlayerSnapshot(clip.frames, false)
+	if not snapshot and captureFallbackReplayFrame() then
+		bufferCounts = buffer:GetDebugCounts()
+		endTime = bufferCounts.newestTimestamp
+		bufferSeconds = if isFiniteNumber(bufferCounts.bufferSeconds) and bufferCounts.bufferSeconds > 0
+			then bufferCounts.bufferSeconds
+			else ReplayConstants.BUFFER_SECONDS
+		windowSeconds = math.min(ReplayConstants.POTG_PRE_SECONDS + ReplayConstants.POTG_POST_SECONDS, bufferSeconds)
+		startTime = endTime - windowSeconds
+		clip = buffer:GetClip(startTime, endTime)
+		for _, recipient in ipairs(getPOTGRecipients(recipients)) do
+			if recipient.Parent ~= Players then
+				continue
+			end
+
+			snapshot = findReplayPlayerSnapshot(clip.frames, recipient.UserId)
+			if snapshot then
+				player = recipient
+				break
+			end
+		end
+		snapshot = snapshot or findAnyReplayPlayerSnapshot(clip.frames, true) or findAnyReplayPlayerSnapshot(clip.frames, false)
+	end
 	if not snapshot then
 		return nil
 	end
@@ -2153,7 +2293,12 @@ function ReplayService.PlayPOTG(first, second, third)
 	local sendToken = potgSendToken
 	potgSendInProgress = true
 	local startedGeneration = roundStorageGeneration
-	local candidate = POTGService.GetBestCandidate() or buildFallbackPOTGCandidate(recipients)
+	local candidate = POTGService.GetBestCandidate()
+	local usedFallbackCandidate = false
+	if not candidate then
+		candidate = buildFallbackPOTGCandidate(recipients)
+		usedFallbackCandidate = candidate ~= nil
+	end
 	if not candidate then
 		debugPOTGReplaySend("skipped-no-candidate", nil, nil)
 		clearPOTGSendInProgress(sendToken)
@@ -2167,21 +2312,22 @@ function ReplayService.PlayPOTG(first, second, third)
 		return false
 	end
 
-	local payload = buildPOTGReplayPayload(candidate)
+	local payload, payloadFailure = buildSendablePOTGReplayPayload(candidate, usedFallbackCandidate)
 	if not payload then
-		debugPOTGReplaySend("skipped-invalid-candidate", nil, nil)
-		clearPOTGSendInProgress(sendToken)
-		return false
-	end
-	if typeof(payload.frames) ~= "table" or #payload.frames == 0 then
-		debugPOTGReplaySend("skipped-empty-clip", payload, nil)
-		clearPOTGSendInProgress(sendToken)
-		return false
-	end
-	if not isPOTGClipReasonable(payload) then
-		debugPOTGReplaySend("skipped-clip-guard", payload, nil)
-		clearPOTGSendInProgress(sendToken)
-		return false
+		debugPOTGReplaySend("candidate-" .. payloadFailure, nil, nil)
+		if not usedFallbackCandidate then
+			local fallbackCandidate = buildFallbackPOTGCandidate(recipients)
+			if fallbackCandidate then
+				candidate = fallbackCandidate
+				usedFallbackCandidate = true
+				payload, payloadFailure = buildSendablePOTGReplayPayload(candidate, true)
+			end
+		end
+		if not payload then
+			debugPOTGReplaySend("skipped-" .. (payloadFailure or "invalid-candidate"), nil, nil)
+			clearPOTGSendInProgress(sendToken)
+			return false
+		end
 	end
 	if startedGeneration ~= roundStorageGeneration then
 		debugPOTGReplaySend("skipped-stale-round", payload, nil)

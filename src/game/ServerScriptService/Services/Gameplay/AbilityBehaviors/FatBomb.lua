@@ -2,6 +2,8 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AbilityBehaviorServices = require(ServerScriptService.Services.AbilityBehaviorServices)
+
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
@@ -42,44 +44,16 @@ local MIN_AIM_HORIZONTAL = 0.08
 local MAX_AIM_MAGNITUDE = 1.5
 
 local abilityService: AbilityServiceLike? = nil
-local bombProjectileService = nil
-local bombService = nil
 local projectileSerial = 0
 local sequenceSerial = 0
 local activeFlares: { [string]: FlareRecord } = {}
 
 local function getBombProjectileService()
-	if bombProjectileService then
-		return bombProjectileService
-	end
-
-	local serviceModule = ServerScriptService.Services:FindFirstChild("BombProjectileService")
-	if serviceModule and serviceModule:IsA("ModuleScript") then
-		local ok, service = pcall(require, serviceModule)
-		if ok and typeof(service) == "table" then
-			bombProjectileService = service
-			return bombProjectileService
-		end
-	end
-
-	return nil
+	return AbilityBehaviorServices.GetBombProjectileService()
 end
 
 local function getBombService()
-	if bombService then
-		return bombService
-	end
-
-	local serviceModule = ServerScriptService.Services:FindFirstChild("BombService")
-	if serviceModule and serviceModule:IsA("ModuleScript") then
-		local ok, service = pcall(require, serviceModule)
-		if ok and typeof(service) == "table" then
-			bombService = service
-			return bombService
-		end
-	end
-
-	return nil
+	return AbilityBehaviorServices.GetBombService()
 end
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number

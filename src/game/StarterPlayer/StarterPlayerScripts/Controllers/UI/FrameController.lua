@@ -9,16 +9,19 @@ local FRAME_TAG = "Frame"
 local EXCLUSIVE_ATTRIBUTE = "Exclusive"
 local SLIDE_FROM_ATTRIBUTE = "SlideFrom"
 local BACKDROP_NAME = "FrameControllerBackdrop"
+local FRAME_FOV_ACTIVE_ATTRIBUTE = "FrameControllerFOVActive"
 
 local TOP_MARGIN_PX = 32
 local EDGE_MARGIN_PX = 48
 local BACKDROP_TRANSPARENCY = 0.18
+local FRAME_FOV_BONUS = 15
 
 local OPEN_TWEEN = TweenInfo.new(0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local CLOSE_TWEEN = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 local HUD_HIDE_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 local HUD_SHOW_TWEEN = TweenInfo.new(0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local BACKDROP_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local FOV_TWEEN = TweenInfo.new(0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 
 type FrameRecord = {
 	frame: GuiObject,
@@ -42,6 +45,7 @@ local FrameController = {}
 FrameController.FrameTag = FRAME_TAG
 FrameController.ExclusiveAttribute = EXCLUSIVE_ATTRIBUTE
 FrameController.SlideFromAttribute = SLIDE_FROM_ATTRIBUTE
+FrameController.FOVActiveAttribute = FRAME_FOV_ACTIVE_ATTRIBUTE
 FrameController.SlideFromTop = "Top"
 FrameController.SlideFromRight = "Right"
 
@@ -158,6 +162,8 @@ function FrameController:_ensureState()
 	self._backdrop = nil :: TextButton?
 	self._backdropTween = nil :: Tween?
 	self._backdropConnection = nil :: RBXScriptConnection?
+	self._fovTween = nil :: Tween?
+	self._restoreFOV = nil :: number?
 	self._started = false
 	self._stateReady = true
 end
@@ -182,6 +188,79 @@ function FrameController:_cancelBackdropTween()
 		self._backdropTween:Cancel()
 		self._backdropTween = nil
 	end
+end
+
+function FrameController:_cancelFOVTween()
+	if self._fovTween then
+		self._fovTween:Cancel()
+		self._fovTween = nil
+	end
+end
+
+function FrameController:_activateFrameFOV()
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return
+	end
+
+	self:_cancelFOVTween()
+	if not self._restoreFOV then
+		self._restoreFOV = camera.FieldOfView
+	end
+
+	LocalPlayer:SetAttribute(FRAME_FOV_ACTIVE_ATTRIBUTE, true)
+	local targetFOV = math.clamp(self._restoreFOV + FRAME_FOV_BONUS, 1, 120)
+	local tween = TweenService:Create(camera, FOV_TWEEN, {
+		FieldOfView = targetFOV,
+	})
+	self._fovTween = tween
+	tween:Play()
+	tween.Completed:Once(function(playbackState)
+		if playbackState ~= Enum.PlaybackState.Completed or self._fovTween ~= tween then
+			return
+		end
+		self._fovTween = nil
+	end)
+end
+
+function FrameController:_restoreFrameFOV(instant: boolean?)
+	local camera = workspace.CurrentCamera
+	local restoreFOV = self._restoreFOV
+	if not restoreFOV then
+		LocalPlayer:SetAttribute(FRAME_FOV_ACTIVE_ATTRIBUTE, false)
+		return
+	end
+
+	self:_cancelFOVTween()
+
+	if not camera then
+		self._restoreFOV = nil
+		LocalPlayer:SetAttribute(FRAME_FOV_ACTIVE_ATTRIBUTE, false)
+		return
+	end
+
+	if instant then
+		camera.FieldOfView = restoreFOV
+		self._restoreFOV = nil
+		LocalPlayer:SetAttribute(FRAME_FOV_ACTIVE_ATTRIBUTE, false)
+		return
+	end
+
+	LocalPlayer:SetAttribute(FRAME_FOV_ACTIVE_ATTRIBUTE, true)
+	local tween = TweenService:Create(camera, FOV_TWEEN, {
+		FieldOfView = restoreFOV,
+	})
+	self._fovTween = tween
+	tween:Play()
+	tween.Completed:Once(function(playbackState)
+		if playbackState ~= Enum.PlaybackState.Completed or self._fovTween ~= tween then
+			return
+		end
+		camera.FieldOfView = restoreFOV
+		self._fovTween = nil
+		self._restoreFOV = nil
+		LocalPlayer:SetAttribute(FRAME_FOV_ACTIVE_ATTRIBUTE, false)
+	end)
 end
 
 function FrameController:_restoreFrameZIndex(record: FrameRecord)
@@ -299,12 +378,40 @@ function FrameController:_restoreExclusiveHud(instant: boolean?)
 	self._exclusiveHudRecords = {}
 end
 
-function FrameController:_moveExclusiveHudOffscreen(screenGui: ScreenGui, frame: GuiObject)
+function FrameController:_isHudMoveCandidate(guiObject: GuiObject, frame: GuiObject): boolean
+	if guiObject == frame or guiObject == self._backdrop then
+		return false
+	end
+
+	if not guiObject.Visible then
+		return false
+	end
+
+	if self._records[guiObject] or CollectionService:HasTag(guiObject, FRAME_TAG) then
+		return false
+	end
+
+	return true
+end
+
+function FrameController:_moveExclusiveHudOffscreen(_screenGui: ScreenGui?, frame: GuiObject)
 	self:_restoreExclusiveHud(true)
 
-	for _, child in ipairs(screenGui:GetChildren()) do
-		if child:IsA("GuiObject") and child ~= frame and child ~= self._backdrop and child.Visible then
+	for _, playerGuiChild in ipairs(PlayerGui:GetChildren()) do
+		if not playerGuiChild:IsA("ScreenGui") or not playerGuiChild.Enabled then
+			continue
+		end
+
+		for _, child in ipairs(playerGuiChild:GetChildren()) do
+			if not child:IsA("GuiObject") then
+				continue
+			end
+
 			local guiObject = child :: GuiObject
+			if not self:_isHudMoveCandidate(guiObject, frame) then
+				continue
+			end
+
 			local record: HudRecord = {
 				guiObject = guiObject,
 				position = guiObject.Position,
@@ -347,6 +454,7 @@ function FrameController:_deactivateExclusive(record: FrameRecord, instant: bool
 	self:_restoreFrameZIndex(record)
 	self:_restoreExclusiveHud(instant)
 	self:_hideBackdrop(instant)
+	self:_restoreFrameFOV(instant)
 end
 
 function FrameController:_findRegisteredName(record: FrameRecord): string?
@@ -516,13 +624,19 @@ function FrameController:OpenFrame(frameName: string): GuiObject?
 	frame.Position = record.originalPosition
 	local hiddenPosition = getHiddenFramePosition(frame, record.originalPosition)
 	local isExclusive = frame:GetAttribute(EXCLUSIVE_ATTRIBUTE) == true
+	local screenGui = getScreenGui(frame)
 
 	if isExclusive then
 		self:_activateExclusive(record)
 	else
-		self:_restoreExclusiveHud(true)
+		if screenGui then
+			self:_moveExclusiveHudOffscreen(screenGui, frame)
+		else
+			self:_restoreExclusiveHud(true)
+		end
 		self:_hideBackdrop(true)
 	end
+	self:_activateFrameFOV()
 
 	frame.Visible = true
 	frame.Position = hiddenPosition

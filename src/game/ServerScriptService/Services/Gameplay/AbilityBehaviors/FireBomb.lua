@@ -2,6 +2,8 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
+local AbilityBehaviorServices = require(ServerScriptService.Services.AbilityBehaviorServices)
+
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
@@ -31,26 +33,12 @@ local ZONE_FOLDER_NAME = "FireBombZones"
 
 local PROJECTILES: { [string]: FireRecord } = {}
 local projectileSerial = 0
-local bombProjectileService = nil
 local abilityService: AbilityServiceLike? = nil
 local warnedMissingTemplate = false
 local warnedInvalidTemplate = false
 
 local function getBombProjectileService()
-	if bombProjectileService then
-		return bombProjectileService
-	end
-
-	local serviceModule = ServerScriptService.Services:FindFirstChild("BombProjectileService")
-	if serviceModule and serviceModule:IsA("ModuleScript") then
-		local ok, service = pcall(require, serviceModule)
-		if ok and typeof(service) == "table" then
-			bombProjectileService = service
-			return bombProjectileService
-		end
-	end
-
-	return nil
+	return AbilityBehaviorServices.GetBombProjectileService()
 end
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number

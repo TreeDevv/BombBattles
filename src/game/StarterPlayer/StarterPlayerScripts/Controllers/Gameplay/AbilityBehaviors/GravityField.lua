@@ -8,9 +8,12 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local AbilityPlacementFlow = require(ReplicatedStorage.Shared.Common.AbilityPlacementFlow)
+local InstanceUtil = require(ReplicatedStorage.Shared.Common.InstanceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local RoundController = require(script.Parent.Parent:WaitForChild("RoundController"))
 
 type AbilityControllerLike = AbilityTypes.AbilityControllerLike
@@ -88,20 +91,11 @@ local activeVisuals: { [string]: VisualRecord } = {}
 local highlights: { [Player]: HighlightRecord } = {}
 local highlightConnection: RBXScriptConnection? = nil
 local lastHighlightStep = 0
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 
-local function getByPath(root: Instance, path: { string }): Instance?
-	local current: Instance? = root
-	for _, name in ipairs(path) do
-		if not current then
-			return nil
-		end
-		current = current:FindFirstChild(name)
-	end
-	return current
-end
+local getBaseParts = InstanceUtil.GetBaseParts
+local getBounds = InstanceUtil.GetBounds
+local pivotTo = InstanceUtil.PivotTo
+local scaledVector = InstanceUtil.ScaledVector
 
 local function getTemplate(definition: AbilityDefinition?): Instance?
 	local path = definition and definition.assetPath
@@ -109,49 +103,11 @@ local function getTemplate(definition: AbilityDefinition?): Instance?
 		return nil
 	end
 
-	local template = getByPath(ReplicatedStorage, path)
+	local template = InstanceUtil.GetByPath(ReplicatedStorage, path)
 	if template and (template:IsA("Model") or template:IsA("BasePart")) then
 		return template
 	end
 	return nil
-end
-
-local function getBaseParts(root: Instance): { BasePart }
-	local parts = {}
-	if root:IsA("BasePart") then
-		table.insert(parts, root)
-	end
-	for _, descendant in ipairs(root:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			table.insert(parts, descendant)
-		end
-	end
-	return parts
-end
-
-local function getBounds(instance: Instance): (CFrame, Vector3)
-	if instance:IsA("Model") then
-		return instance:GetBoundingBox()
-	end
-
-	local part = instance :: BasePart
-	return part.CFrame, part.Size
-end
-
-local function pivotTo(instance: Instance, cframe: CFrame)
-	if instance:IsA("Model") then
-		instance:PivotTo(cframe)
-	else
-		(instance :: BasePart).CFrame = cframe
-	end
-end
-
-local function scaledVector(vector: Vector3, scale: number): Vector3
-	return Vector3.new(
-		math.max(vector.X * scale, 0.01),
-		math.max(vector.Y * scale, 0.01),
-		math.max(vector.Z * scale, 0.01)
-	)
 end
 
 local function getPreviewFolder(): Folder
@@ -415,74 +371,13 @@ local function handleCommitAction(_actionName: string, inputState: Enum.UserInpu
 	return Enum.ContextActionResult.Sink
 end
 
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[GravityField] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[GravityField] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[GravityField] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
-end
-
 local function emitCenter(root: Instance)
 	local center = root:FindFirstChild("center", true)
 	if not (center and center:IsA("Attachment")) then
 		return
 	end
 
-	local module = getEmitModule()
-	if not (module and ensureEmitModuleInitialized(module) and type(module.emit) == "function") then
-		return
-	end
-
-	local ok, err = pcall(function()
-		module.emit(center)
-	end)
-	if not ok then
-		warn("[GravityField] Failed to emit center VFX: " .. tostring(err))
-	end
+	EmitService.Emit(center, "[GravityField]")
 end
 
 local function startPreview(context: ClientActivateRequestedContext): boolean
@@ -845,10 +740,9 @@ end
 function GravityField.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	if preview.active then
 		cancelPreview()
-		return true
 	end
 
-	return startPreview(context)
+	return AbilityPlacementFlow.SendInstant(context)
 end
 
 function GravityField.OnEffect(context: ClientEffectContext)

@@ -2,6 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local InstanceUtil = require(ReplicatedStorage.Shared.Common.InstanceUtil)
 
 local BombVisualUtil = {}
 
@@ -18,16 +19,7 @@ local EXPLOSION_VISUAL_POSITION_OFFSET = Vector3.new(0, -1, 0)
 
 local warnedMissingAttachments = {}
 
-local function getByPath(root: Instance, path): Instance?
-	local current: Instance? = root
-	for _, name in ipairs(path) do
-		if typeof(name) ~= "string" or name == "" or not current then
-			return nil
-		end
-		current = current:FindFirstChild(name)
-	end
-	return current
-end
+local getBaseParts = InstanceUtil.GetBaseParts
 
 local function getAssetsBombsFolder(): Folder?
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
@@ -43,19 +35,6 @@ local function getFirstBasePart(instance: Instance?): BasePart?
 		return instance
 	end
 	return instance:FindFirstChildWhichIsA("BasePart", true)
-end
-
-local function getBaseParts(instance: Instance): { BasePart }
-	local parts = {}
-	if instance:IsA("BasePart") then
-		table.insert(parts, instance)
-	end
-	for _, descendant in ipairs(instance:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			table.insert(parts, descendant)
-		end
-	end
-	return parts
 end
 
 local function getSkinFolder(skinId: any): Instance?
@@ -95,7 +74,7 @@ local function getSkinTemplate(skinId: any): Instance?
 end
 
 local function getDefaultExplosionTemplate(): Instance?
-	return getByPath(ReplicatedStorage, DEFAULT_EXPLOSION_VFX_PATH)
+	return InstanceUtil.GetByPath(ReplicatedStorage, DEFAULT_EXPLOSION_VFX_PATH)
 end
 
 local function createFallbackVisual(): BasePart
@@ -216,6 +195,56 @@ local function scaleEffectInstance(instance: Instance, scale: number)
 		elseif descendant:IsA("PointLight") or descendant:IsA("SpotLight") or descendant:IsA("SurfaceLight") then
 			descendant.Range = descendant.Range * scale
 		end
+	end
+end
+
+local function scaleNumericAttribute(instance: Instance, attributeName: string, scale: number, minimum: number?)
+	local value = instance:GetAttribute(attributeName)
+	if typeof(value) ~= "number" then
+		return
+	end
+
+	local scaled = value * scale
+	if minimum then
+		scaled = math.max(scaled, minimum)
+	end
+	instance:SetAttribute(attributeName, scaled)
+end
+
+local function applyExplosionPlaybackBudget(instance: Instance, options)
+	if typeof(options) ~= "table" then
+		return
+	end
+
+	local soundLightOnly = options.soundLightOnly == true
+	local emitCountScale = if typeof(options.emitCountScale) == "number" then math.clamp(options.emitCountScale, 0, 1) else 1
+
+	local function applyToDescendant(descendant: Instance)
+		if emitCountScale < 0.999 then
+			scaleNumericAttribute(descendant, "EmitCount", emitCountScale, 1)
+			scaleNumericAttribute(descendant, "Rate", emitCountScale, 0)
+			scaleNumericAttribute(descendant, "Rate_Start", emitCountScale, 0)
+			scaleNumericAttribute(descendant, "Rate_End", emitCountScale, 0)
+		end
+
+		if not soundLightOnly then
+			return
+		end
+
+		if descendant:IsA("ParticleEmitter") or descendant:IsA("Beam") or descendant:IsA("Trail") then
+			descendant.Enabled = false
+			descendant:SetAttribute("Enabled", false)
+		elseif descendant:IsA("BasePart") then
+			descendant.Transparency = 1
+			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.CanTouch = false
+		end
+	end
+
+	applyToDescendant(instance)
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		applyToDescendant(descendant)
 	end
 end
 
@@ -388,7 +417,7 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 	local resolvedSkinId = BombSkinConfig.DefaultSkinId
 	local usedFallback = false
 	if typeof(options.assetPath) == "table" then
-		template = getByPath(ReplicatedStorage, options.assetPath)
+		template = InstanceUtil.GetByPath(ReplicatedStorage, options.assetPath)
 	else
 		template, resolvedSkinId, usedFallback = BombVisualUtil.GetExplosionTemplate(options.skinId)
 	end
@@ -404,6 +433,7 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 	BombVisualUtil.PlaceEffectInstance(clone, position + EXPLOSION_VISUAL_POSITION_OFFSET)
 	local visualScale = if typeof(options.visualScale) == "number" then math.max(options.visualScale, 0.05) else 1
 	scaleEffectInstance(clone, visualScale)
+	applyExplosionPlaybackBudget(clone, options)
 	clone.Parent = parent
 	result.instance = clone
 
@@ -426,6 +456,9 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 		if soundDuration > 0 then soundDuration + 0.25 else 0
 	)
 	local emitModule = options.emitModule
+	if options.soundLightOnly == true then
+		emitModule = nil
+	end
 	if emitModule and type(emitModule.emit) == "function" then
 		local ok, env = pcall(function()
 			return emitModule.emit(clone)

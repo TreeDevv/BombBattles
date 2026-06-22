@@ -215,6 +215,9 @@ function ForcefieldDome.OnProjectileStep(context: ServerHookContext): AbilityHoo
 
 	return {
 		kind = RESULT_KIND.RedirectProjectile,
+		owner = context.player,
+		sourceType = "Ability",
+		sourceId = "ForcefieldDome",
 		origin = origin,
 		aimDirection = aimDirection,
 		launchSpeed = context.definition.repelLaunchSpeed,

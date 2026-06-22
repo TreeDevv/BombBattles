@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local PlacementSurfaceUtil = require(ReplicatedStorage.Shared.Common.PlacementSurfaceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 
@@ -16,7 +17,7 @@ type FloorPlacement = {
 	position: Vector3,
 	facing: Vector3,
 	normal: Vector3,
-	floor: Instance,
+	floor: Instance?,
 }
 
 type JumpPadRecord = {
@@ -176,6 +177,18 @@ local function getActiveMap(): Instance?
 	return if map and map:IsA("Model") then map else nil
 end
 
+local function getPlacementExcludes(player: Player): { Instance }
+	local excluded = {}
+	if player.Character then
+		table.insert(excluded, player.Character)
+	end
+	local abilityFolder = workspace:FindFirstChild(FOLDER_NAME, true)
+	if abilityFolder then
+		table.insert(excluded, abilityFolder)
+	end
+	return excluded
+end
+
 local function getJumpPadFolder(player: Player): Folder
 	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
 	local abilityFolder = parent:FindFirstChild(FOLDER_NAME)
@@ -242,36 +255,13 @@ local function getRaycastParams(player: Player): RaycastParams
 	return params
 end
 
-local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
-	local distance = math.max(getNumber(definition, "placementDistance", 8), 0)
-	local rayUp = math.max(getNumber(definition, "floorRaycastUp", 8), 0)
-	local rayDown = math.max(getNumber(definition, "floorRaycastDown", 140), 1)
-	local facing = flattenDirection(rootPart.CFrame.LookVector, nil)
-	local target = rootPart.Position + facing * distance
-	local rayOrigin = target + Vector3.yAxis * rayUp
-	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
-	local hit = workspace:Raycast(rayOrigin, rayDirection, getRaycastParams(player))
-	if not hit then
-		return nil
-	end
-	if hit.Normal.Y < getNumber(definition, "minFloorNormalY", 0.6) then
-		return nil
-	end
-	if hasUnsafeTaggedAncestor(hit.Instance) then
-		return nil
-	end
-
-	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
-	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
-		return nil
-	end
-
-	return {
-		position = hit.Position,
-		facing = facing,
-		normal = hit.Normal,
-		floor = hit.Instance,
-	}
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
+	return PlacementSurfaceUtil.ResolveFloorPlacement({
+		rootPart = rootPart,
+		definition = definition,
+		payload = payload,
+		excludeInstances = getPlacementExcludes(player),
+	})
 end
 
 local function getFloorPivot(floorPosition: Vector3, facing: Vector3, normal: Vector3): CFrame
@@ -307,13 +297,13 @@ local function alignCloneToFloor(
 	return finalBoundsCFrame, finalBoundsSize, finalPivot
 end
 
-local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance): FloorPlacement?
+local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance, payload: any): FloorPlacement?
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil
 	end
 
-	local placement = findFloor(player, rootPart, definition)
+	local placement = findFloor(player, rootPart, definition, payload)
 	if not placement then
 		return nil
 	end
@@ -324,37 +314,6 @@ local function validatePlacement(player: Player, definition: AbilityDefinition, 
 
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
 		return nil
-	end
-
-	local params = OverlapParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local excluded = {}
-	if player.Character then
-		table.insert(excluded, player.Character)
-	end
-	local folder = workspace:FindFirstChild(FOLDER_NAME, true)
-	if folder then
-		table.insert(excluded, folder)
-	end
-	params.FilterDescendantsInstances = excluded
-	params.RespectCanCollide = true
-
-	local overlapSize = Vector3.new(
-		math.max(boundsSize.X * 0.9, 0.1),
-		math.max(boundsSize.Y - 0.2, 0.1),
-		math.max(boundsSize.Z * 0.9, 0.1)
-	)
-	for _, part in ipairs(workspace:GetPartBoundsInBox(boundsCFrame + boundsCFrame.UpVector * 0.12, overlapSize, params)) do
-		if part == placement.floor or part:IsDescendantOf(placement.floor) then
-			continue
-		end
-		local model = part:FindFirstAncestorOfClass("Model")
-		if hasUnsafeTaggedAncestor(part) or (model and model:FindFirstChildOfClass("Humanoid")) then
-			return nil
-		end
-		if part.CanCollide and part.Transparency < 1 then
-			return nil
-		end
 	end
 
 	return placement
@@ -665,7 +624,7 @@ function JumpPad.OnActivate(context: ServerActivateContext): AbilityActivationRe
 		return false
 	end
 
-	local placement = validatePlacement(context.player, context.definition, template)
+	local placement = validatePlacement(context.player, context.definition, template, context.payload)
 	if not placement then
 		fireFailure(context.player, "NoSafePlacement", rootPart.Position)
 		return false

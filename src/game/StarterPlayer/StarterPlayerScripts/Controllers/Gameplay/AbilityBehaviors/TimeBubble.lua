@@ -3,6 +3,7 @@ local TweenService = game:GetService("TweenService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 
 type AbilityDefinition = AbilityTypes.AbilityDefinition
 type ClientActivateRequestedContext = AbilityTypes.ClientActivateRequestedContext
@@ -30,9 +31,6 @@ local TimeBubble = {} :: AbilityTypes.ClientBehavior
 
 local VISUAL_FOLDER_NAME = "TimeBubbleVisuals"
 local activeVisuals: { [string]: VisualRecord } = {}
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 
 local function getByPath(root: Instance, path: { string }): Instance?
 	local current: Instance? = root
@@ -102,74 +100,13 @@ local function getVisualFolder(): Folder
 	return folder
 end
 
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[TimeBubble] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[TimeBubble] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[TimeBubble] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
-end
-
 local function emitCenter(root: Instance)
 	local center = root:FindFirstChild("center", true)
 	if not (center and center:IsA("Attachment")) then
 		return
 	end
 
-	local module = getEmitModule()
-	if not (module and ensureEmitModuleInitialized(module) and type(module.emit) == "function") then
-		return
-	end
-
-	local ok, err = pcall(function()
-		module.emit(center)
-	end)
-	if not ok then
-		warn("[TimeBubble] Failed to emit center VFX: " .. tostring(err))
-	end
+	EmitService.Emit(center, "[TimeBubble]")
 end
 
 local function destroyVisual(fieldId: string)

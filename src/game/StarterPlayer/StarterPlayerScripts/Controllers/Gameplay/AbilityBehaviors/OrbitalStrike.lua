@@ -12,6 +12,7 @@ local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 local CameraController = require(script.Parent.Parent:WaitForChild("CameraController"))
 local RoundController = require(script.Parent.Parent:WaitForChild("RoundController"))
@@ -102,10 +103,7 @@ local KEY_DIRECTIONS = {
 }
 
 local heldMoveKeys: { [Enum.KeyCode]: boolean } = {}
-local emitModule = nil
-local emitModuleInitialized = false
 local warnedMissingTemplate = false
-local warnedMissingEmitModule = false
 
 local state: TargetingState = {
 	active = false,
@@ -170,57 +168,6 @@ local function getStrikeTemplate(definition: AbilityDefinition?): Instance?
 		warnedMissingTemplate = true
 	end
 	return nil
-end
-
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[OrbitalStrike] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[OrbitalStrike] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[OrbitalStrike] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
 end
 
 local function getVfxFolder(): Folder
@@ -299,8 +246,7 @@ local function playStrikeVfx(payload: any)
 	clone.Parent = getVfxFolder()
 
 	local cleanupSeconds = math.max(getDefinitionNumber(definition, "strikeVisualCleanupSeconds", 5), 0.25)
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
+	if EmitService.EnsureInitialized("[OrbitalStrike]") then
 		local columnTopY = getPayloadNumber(payload, "columnTopY", position.Y)
 		local columnBottomY = getPayloadNumber(payload, "columnBottomY", position.Y)
 		local depth = math.max(columnTopY - columnBottomY, 0)
@@ -316,11 +262,7 @@ local function playStrikeVfx(payload: any)
 				local offset = math.min(index * step, depth)
 				local stepPosition = Vector3.new(position.X, columnTopY - offset, position.Z)
 				pivotTo(clone, CFrame.new(stepPosition))
-				local ok, err = pcall(function()
-					return module.emit(clone)
-				end)
-				if not ok then
-					warn("[OrbitalStrike] Failed to emit strike VFX: " .. tostring(err))
+				if not EmitService.Emit(clone, "[OrbitalStrike]") then
 					break
 				end
 				if index < stepCount - 1 and interval > 0 then

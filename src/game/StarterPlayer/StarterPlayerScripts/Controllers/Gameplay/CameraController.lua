@@ -12,8 +12,9 @@ local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesCameraController"
 local SHIFT_LOCK_ACTION_NAME = "BombBattlesShiftLockToggle"
-local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 1
+local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 2
 local CAMERA_SPECTATING_ATTR = "Camera_Spectating"
+local FRAME_FOV_ACTIVE_ATTR = "FrameControllerFOVActive"
 local MOUSE_UNLOCK_FRAME_COUNT = 3
 local HUD_FOV_BLUR_NAMES = {
 	HUDWindowBlur = true,
@@ -152,6 +153,10 @@ end
 
 local function getEffectiveShiftLocked(manualShiftLocked: boolean, firstPerson: boolean): boolean
 	return manualShiftLocked or firstPerson
+end
+
+local function isFrameFOVActive(): boolean
+	return LocalPlayer:GetAttribute(FRAME_FOV_ACTIVE_ATTR) == true
 end
 
 local function isHudFOVActive(camera: Camera, extraFOVAllowance: number?): boolean
@@ -915,7 +920,10 @@ function CameraController:_step(dt: number)
 	targetFOV += throwFOVBonus
 	targetFOV += airActionFOVBonus
 
-	if CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera, throwFOVBonus + airActionFOVBonus) then
+	if
+		isFrameFOVActive()
+		or (CameraConfig.DisableWhenHudFOVActive and isHudFOVActive(camera, throwFOVBonus + airActionFOVBonus))
+	then
 		self._currentFOV = camera.FieldOfView
 	else
 		local fovResponsiveness = if airActionFOVBonus > 0

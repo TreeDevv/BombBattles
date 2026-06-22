@@ -3,6 +3,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local EmoteConfig = require(ReplicatedStorage.Shared.Emotes.EmoteConfig)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
+local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
+
+local DataService = require(script.Parent.DataService)
+
+local ORDER_KEY = Schema.EmoteOrder and Schema.EmoteOrder.key or "emoteOrder"
+local FAVORITES_KEY = Schema.FavoriteEmotes and Schema.FavoriteEmotes.key or "favoriteEmotes"
+local MAX_REQUESTS_PER_SECOND = 12
 
 type ActiveEmote = {
 	player: Player,
@@ -30,34 +38,151 @@ local function now(): number
 end
 
 local function ensureRemotesFolder(): Folder
-	local existing = ReplicatedStorage:FindFirstChild(EmoteConfig.RemotesFolderName)
-	if existing and existing:IsA("Folder") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = EmoteConfig.RemotesFolderName
-	folder.Parent = ReplicatedStorage
-	return folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, EmoteConfig.RemotesFolderName)
 end
 
 local function ensureRemote(name: string): RemoteEvent
-	local folder = ensureRemotesFolder()
-	local existing = folder:FindFirstChild(name)
-	if existing and existing:IsA("RemoteEvent") then
-		return existing
-	end
-	if existing then
-		existing:Destroy()
+	return RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), name)
+end
+
+local function tablesArrayMatch(left: { string }, right: any): boolean
+	if typeof(right) ~= "table" or #left ~= #right then
+		return false
 	end
 
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = name
-	remote.Parent = folder
-	return remote
+	for index, emoteId in ipairs(left) do
+		if right[index] ~= emoteId then
+			return false
+		end
+	end
+	return true
+end
+
+local function tablesMapMatch(left: { [string]: boolean }, right: any): boolean
+	if typeof(right) ~= "table" then
+		return false
+	end
+
+	for emoteId, value in pairs(left) do
+		if right[emoteId] ~= value then
+			return false
+		end
+	end
+	for emoteId, value in pairs(right) do
+		if left[emoteId] ~= value then
+			return false
+		end
+	end
+	return true
+end
+
+local function normalizeEmoteOrder(rawOrder: any): ({ string }, boolean)
+	local catalogIds = EmoteConfig.GetCatalogIds()
+	local known: { [string]: boolean } = {}
+	for _, emoteId in ipairs(catalogIds) do
+		known[emoteId] = true
+	end
+
+	local order = {}
+	local seen: { [string]: boolean } = {}
+	local changed = typeof(rawOrder) ~= "table"
+
+	if typeof(rawOrder) == "table" then
+		for _, rawEmoteId in ipairs(rawOrder) do
+			local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
+			if emoteId ~= "" and known[emoteId] and not seen[emoteId] then
+				table.insert(order, emoteId)
+				seen[emoteId] = true
+				if emoteId ~= rawEmoteId then
+					changed = true
+				end
+			else
+				changed = true
+			end
+		end
+	end
+
+	for _, emoteId in ipairs(catalogIds) do
+		if not seen[emoteId] then
+			table.insert(order, emoteId)
+			seen[emoteId] = true
+			changed = true
+		end
+	end
+
+	if not tablesArrayMatch(order, rawOrder) then
+		changed = true
+	end
+
+	return order, changed
+end
+
+local function normalizeFavorites(rawFavorites: any): ({ [string]: boolean }, boolean)
+	local favorites = {}
+	local changed = typeof(rawFavorites) ~= "table"
+
+	if typeof(rawFavorites) == "table" then
+		for rawEmoteId, value in pairs(rawFavorites) do
+			local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
+			if emoteId ~= "" and value == true then
+				favorites[emoteId] = true
+				if emoteId ~= rawEmoteId then
+					changed = true
+				end
+			elseif value ~= nil then
+				changed = true
+			end
+		end
+	end
+
+	if not tablesMapMatch(favorites, rawFavorites) then
+		changed = true
+	end
+
+	return favorites, changed
+end
+
+local function sanitizePlayerEmoteData(player: Player): ({ string }, { [string]: boolean })
+	local data = DataService:Get(player)
+	local rawOrder = if typeof(data) == "table" then data[ORDER_KEY] else nil
+	local rawFavorites = if typeof(data) == "table" then data[FAVORITES_KEY] else nil
+	local order, orderChanged = normalizeEmoteOrder(rawOrder)
+	local favorites, favoritesChanged = normalizeFavorites(rawFavorites)
+
+	if orderChanged then
+		DataService:Set(player, ORDER_KEY, order)
+	end
+	if favoritesChanged then
+		DataService:Set(player, FAVORITES_KEY, favorites)
+	end
+
+	return order, favorites
+end
+
+local function respondInventory(player: Player, request: any, ok: boolean, code: string, message: string?)
+	local remote = requestRemote
+	if not remote then
+		return
+	end
+
+	local action = nil
+	local emoteId = nil
+	if typeof(request) == "table" then
+		action = request.action
+		emoteId = request.emoteId
+	end
+
+	remote:FireClient(player, {
+		action = action,
+		emoteId = emoteId,
+		ok = ok,
+		code = code,
+		message = message,
+	})
+end
+
+local function failInventory(player: Player, request: any, code: string, message: string?)
+	respondInventory(player, request, false, code, message)
 end
 
 local function getCharacterParts(player: Player): (Model?, Humanoid?, BasePart?)
@@ -288,10 +413,12 @@ local function isRateLimited(player: Player): boolean
 	end
 
 	window.count += 1
-	return window.count > 12
+	return window.count > MAX_REQUESTS_PER_SECOND
 end
 
 local function sendSnapshot(player: Player)
+	sanitizePlayerEmoteData(player)
+
 	for activePlayer, state in pairs(activeByPlayer) do
 		if activePlayer.Parent == Players then
 			fireState(player, "Start", {
@@ -301,6 +428,61 @@ local function sendSnapshot(player: Player)
 			})
 		end
 	end
+end
+
+local function swapSlot(player: Player, request: any)
+	local pageIndex = if typeof(request.pageIndex) == "number" then math.floor(request.pageIndex) else 0
+	local slotIndex = if typeof(request.slotIndex) == "number" then math.floor(request.slotIndex) else 0
+	local emoteId = EmoteConfig.NormalizeEmoteId(request.emoteId)
+
+	if pageIndex < 1 or slotIndex < 1 or slotIndex > EmoteConfig.PageSize then
+		failInventory(player, request, "InvalidSlot", "Invalid emote slot.")
+		return
+	end
+	if emoteId == "" then
+		failInventory(player, request, "InvalidEmote", "Invalid emote.")
+		return
+	end
+
+	local order = sanitizePlayerEmoteData(player)
+	local targetIndex = ((pageIndex - 1) * EmoteConfig.PageSize) + slotIndex
+	if targetIndex < 1 or targetIndex > #order then
+		failInventory(player, request, "InvalidSlot", "Invalid emote slot.")
+		return
+	end
+
+	local sourceIndex = nil
+	for index, orderedEmoteId in ipairs(order) do
+		if orderedEmoteId == emoteId then
+			sourceIndex = index
+			break
+		end
+	end
+	if not sourceIndex then
+		failInventory(player, request, "InvalidEmote", "Invalid emote.")
+		return
+	end
+
+	if sourceIndex ~= targetIndex then
+		order[sourceIndex], order[targetIndex] = order[targetIndex], order[sourceIndex]
+		DataService:Set(player, ORDER_KEY, order)
+	end
+
+	respondInventory(player, request, true, "Swapped")
+end
+
+local function toggleFavorite(player: Player, request: any)
+	local emoteId = EmoteConfig.NormalizeEmoteId(request.emoteId)
+	if emoteId == "" then
+		failInventory(player, request, "InvalidEmote", "Invalid emote.")
+		return
+	end
+
+	local _, favorites = sanitizePlayerEmoteData(player)
+	favorites[emoteId] = if favorites[emoteId] == true then nil else true
+	DataService:Set(player, FAVORITES_KEY, favorites)
+
+	respondInventory(player, request, true, "FavoriteToggled")
 end
 
 local function handleRequest(player: Player, request: any)
@@ -318,6 +500,10 @@ local function handleRequest(player: Player, request: any)
 		stopEmote(player, "Client")
 	elseif action == EmoteConfig.Actions.Snapshot then
 		sendSnapshot(player)
+	elseif action == EmoteConfig.Actions.SwapSlots then
+		swapSlot(player, request)
+	elseif action == EmoteConfig.Actions.ToggleFavorite then
+		toggleFavorite(player, request)
 	end
 end
 
@@ -344,6 +530,7 @@ end
 function EmoteService:OnPlayerAdded(player: Player)
 	player:SetAttribute("Emote_ActiveId", "")
 	player:SetAttribute("Emote_StartedAt", 0)
+	sanitizePlayerEmoteData(player)
 end
 
 function EmoteService:OnPlayerRemoving(player: Player)

@@ -57,6 +57,30 @@ function RemoteUtil.EnsureRemoteEvent(folder: Folder, name: string, dedupe: bool
 	return remote
 end
 
+function RemoteUtil.EnsureRemoteFunction(folder: Folder, name: string, dedupe: boolean?): RemoteFunction
+	local selected: RemoteFunction? = nil
+
+	for _, child in ipairs(folder:GetChildren()) do
+		if child.Name ~= name then
+			continue
+		end
+		if child:IsA("RemoteFunction") and not selected then
+			selected = child
+		elseif dedupe == true or not child:IsA("RemoteFunction") then
+			child:Destroy()
+		end
+	end
+
+	if selected then
+		return selected
+	end
+
+	local remote = Instance.new("RemoteFunction")
+	remote.Name = name
+	remote.Parent = folder
+	return remote
+end
+
 function RemoteUtil.GetRemoteEvent(parent: Instance, folderName: string, remoteName: string): RemoteEvent?
 	local folder = parent:FindFirstChild(folderName)
 	if not isClass(folder, "Folder") then
@@ -67,11 +91,28 @@ function RemoteUtil.GetRemoteEvent(parent: Instance, folderName: string, remoteN
 	return if isClass(remote, "RemoteEvent") then remote :: RemoteEvent else nil
 end
 
+function RemoteUtil.GetRemoteFunction(parent: Instance, folderName: string, remoteName: string): RemoteFunction?
+	local folder = parent:FindFirstChild(folderName)
+	if not isClass(folder, "Folder") then
+		return nil
+	end
+
+	local remote = folder:FindFirstChild(remoteName)
+	return if isClass(remote, "RemoteFunction") then remote :: RemoteFunction else nil
+end
+
 function RemoteUtil.EnsureRemoteEventInFolder(parent: Instance, folderName: string, remoteName: string, dedupe: boolean?): RemoteEvent
 	local folder = RemoteUtil.EnsureFolder(parent, folderName, {
 		dedupe = dedupe,
 	})
 	return RemoteUtil.EnsureRemoteEvent(folder, remoteName, dedupe)
+end
+
+function RemoteUtil.EnsureRemoteFunctionInFolder(parent: Instance, folderName: string, remoteName: string, dedupe: boolean?): RemoteFunction
+	local folder = RemoteUtil.EnsureFolder(parent, folderName, {
+		dedupe = dedupe,
+	})
+	return RemoteUtil.EnsureRemoteFunction(folder, remoteName, dedupe)
 end
 
 return RemoteUtil

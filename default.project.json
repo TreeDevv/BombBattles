@@ -77,6 +77,66 @@
         "AbilityBehaviors": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/AbilityBehaviors"
         },
+        "AbilityBehaviorServices": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/AbilityBehaviorServices.lua"
+        },
+        "RoundAdminRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundAdminRuntime.lua"
+        },
+        "RoundMapRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundMapRuntime.lua"
+        },
+        "RoundPlayerStateRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundPlayerStateRuntime.lua"
+        },
+        "RoundCoreRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundCoreRuntime.lua"
+        },
+        "RoundDamageRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundDamageRuntime.lua"
+        },
+        "RoundDeathRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundDeathRuntime.lua"
+        },
+        "RoundVotingRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundVotingRuntime.lua"
+        },
+        "RoundVoidFallRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundVoidFallRuntime.lua"
+        },
+        "RoundAFKRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundAFKRuntime.lua"
+        },
+        "RoundResultsRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundResultsRuntime.lua"
+        },
+        "RoundRespawnRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundRespawnRuntime.lua"
+        },
+        "RoundSpawnRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundSpawnRuntime.lua"
+        },
+        "RoundRagdollRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundRagdollRuntime.lua"
+        },
+        "RoundCharacterRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundCharacterRuntime.lua"
+        },
+        "RoundRespawnTokens": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundRespawnTokens.lua"
+        },
+        "RoundScoreboardState": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundScoreboardState.lua"
+        },
+        "RoundKillFeedRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundKillFeedRuntime.lua"
+        },
+        "RoundReplayRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundReplayRuntime.lua"
+        },
+        "RoundWorldTextRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundWorldTextRuntime.lua"
+        },
         "BombService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombService.lua"
         },
@@ -116,6 +176,21 @@
         "ChatTagService": {
           "$path": "src/game/ServerScriptService/Services/Social/ChatTagService.lua"
         },
+        "GroupRewardService": {
+          "$path": "src/game/ServerScriptService/Services/Social/GroupRewardService.lua"
+        },
+        "FriendRewardService": {
+          "$path": "src/game/ServerScriptService/Services/Social/FriendRewardService.lua"
+        },
+        "PlaytimeRewardService": {
+          "$path": "src/game/ServerScriptService/Services/Social/PlaytimeRewardService.lua"
+        },
+        "DailyRewardService": {
+          "$path": "src/game/ServerScriptService/Services/Social/DailyRewardService.lua"
+        },
+        "InviteRewardService": {
+          "$path": "src/game/ServerScriptService/Services/Social/InviteRewardService.lua"
+        },
         "LikeGoalService": {
           "$path": "src/game/ServerScriptService/Services/Social/LikeGoalService.lua"
         },
@@ -152,9 +227,6 @@
         "RoundService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundService.lua"
         },
-        "TestService": {
-          "$path": "src/game/ServerScriptService/Services/Core/TestService.lua"
-        },
         "WorldTextService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/WorldTextService.lua"
         }
@@ -176,8 +248,26 @@
           "BombController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombController.lua"
           },
+          "BombAnimationRuntime": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombAnimationRuntime.lua"
+          },
+          "BombExplosionRuntime": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombExplosionRuntime.lua"
+          },
+          "BombHeldVisualRuntime": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombHeldVisualRuntime.lua"
+          },
+          "BombHipVisualRuntime": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombHipVisualRuntime.lua"
+          },
+          "BombProjectileVisualRuntime": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombProjectileVisualRuntime.lua"
+          },
           "BobController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BobController.lua"
+          },
+          "EnemyHighlightController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/EnemyHighlightController.lua"
           },
           "BombTrajectoryClient": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombTrajectoryClient.lua"
@@ -206,8 +296,26 @@
           "ChatTagController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Social/ChatTagController.lua"
           },
+          "GroupRewardController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Social/GroupRewardController.lua"
+          },
+          "FriendRewardController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/FriendRewardController.lua"
+          },
+          "PlaytimeRewardController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/PlaytimeRewardController.lua"
+          },
+          "DailyRewardController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/DailyRewardController.lua"
+          },
+          "InviteMenuController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/InviteMenuController.lua"
+          },
           "DataController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/DataController"
+          },
+          "MoneyHudController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/MoneyHudController.lua"
           },
           "FrameController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/FrameController.lua"
@@ -275,6 +383,9 @@
           "TopHUDController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/TopHUDController.lua"
           },
+          "TopbarButtonsController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/TopbarButtonsController.lua"
+          },
           "AdminPanelController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/AdminPanelController.lua"
           },
@@ -298,9 +409,6 @@
           },
           "TeamCoreCrystalController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/TeamCoreCrystalController.lua"
-          },
-          "TestController": {
-            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/TestController.lua"
           },
           "RuntimeProfilerController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Core/RuntimeProfilerController.lua"

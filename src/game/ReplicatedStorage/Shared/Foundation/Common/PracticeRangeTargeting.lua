@@ -27,7 +27,7 @@ function PracticeRangeTargeting.GetClientTargetRoot(
 	activeRoundState: any,
 	roundRoot: Instance?
 ): Instance?
-	if CombatEligibility.IsClientPracticeOnly(player, roundState, activeRoundState) then
+	if CombatEligibility.IsPracticeRangeActive(player) then
 		return PracticeRangeTargeting.GetPracticeRange() or roundRoot
 	end
 

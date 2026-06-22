@@ -2,11 +2,14 @@ local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+
+local AbilityBehaviorServices = require(ServerScriptService.Services.AbilityBehaviorServices)
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
+local PlacementSurfaceUtil = require(ReplicatedStorage.Shared.Common.PlacementSurfaceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundService = require(ServerScriptService.Services.RoundService)
@@ -20,7 +23,7 @@ type FloorPlacement = {
 	position: Vector3,
 	facing: Vector3,
 	normal: Vector3,
-	floor: Instance,
+	floor: Instance?,
 }
 
 type MineRecord = {
@@ -35,7 +38,6 @@ local FOLDER_NAME = "AbilityObjects"
 local MINE_FOLDER_NAME = "MineBomb"
 local OWNER_ATTR = "MineBombOwnerUserId"
 local ACTIVE_MINES: { [Player]: { MineRecord } } = {}
-local bombService = nil
 
 local UNSAFE_TAGS = {
 	RoundConfig.Tags.TeamCore,
@@ -44,20 +46,7 @@ local UNSAFE_TAGS = {
 }
 
 local function getBombService()
-	if bombService then
-		return bombService
-	end
-
-	local serviceModule = ServerScriptService.Services:FindFirstChild("BombService")
-	if serviceModule and serviceModule:IsA("ModuleScript") then
-		local ok, service = pcall(require, serviceModule)
-		if ok and typeof(service) == "table" then
-			bombService = service
-			return bombService
-		end
-	end
-
-	return nil
+	return AbilityBehaviorServices.GetBombService()
 end
 
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
@@ -130,6 +119,18 @@ local function getActiveMap(): Instance?
 	return if map and map:IsA("Model") then map else nil
 end
 
+local function getPlacementExcludes(player: Player): { Instance }
+	local excluded = {}
+	if player.Character then
+		table.insert(excluded, player.Character)
+	end
+	local abilityFolder = workspace:FindFirstChild(FOLDER_NAME, true)
+	if abilityFolder then
+		table.insert(excluded, abilityFolder)
+	end
+	return excluded
+end
+
 local function getMineFolder(player: Player): Folder
 	local parent = PracticeRangeTargeting.GetObjectParentForServer(player, getActiveMap())
 	local abilityFolder = parent:FindFirstChild(FOLDER_NAME)
@@ -197,41 +198,14 @@ local function isOwnerActive(player: Player): boolean
 		and CombatEligibility.HasAliveCharacter(player)
 end
 
-local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
-	local rayUp = math.clamp(getDefinitionNumber(definition, "floorRaycastUp", 1), 0, 1.5)
-	local rayDown = math.max(getDefinitionNumber(definition, "floorRaycastDown", 32), 1)
-	local facing = flattenDirection(rootPart.CFrame.LookVector)
-	local target = rootPart.Position
-	local rayOrigin = target + Vector3.yAxis * rayUp
-	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
-
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local character = player.Character
-	params.FilterDescendantsInstances = if character then { character } else {}
-
-	local hit = workspace:Raycast(rayOrigin, rayDirection, params)
-	if not hit then
-		return nil
-	end
-	if hit.Normal.Y < (definition.minFloorNormalY or 0.65) then
-		return nil
-	end
-	if hasUnsafeTaggedAncestor(hit.Instance) then
-		return nil
-	end
-
-	local targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap())
-	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, targetRoot) then
-		return nil
-	end
-
-	return {
-		position = hit.Position,
-		facing = facing,
-		normal = hit.Normal,
-		floor = hit.Instance,
-	}
+local function findFloor(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
+	return PlacementSurfaceUtil.ResolveFloorPlacement({
+		rootPart = rootPart,
+		definition = definition,
+		payload = payload,
+		excludeInstances = getPlacementExcludes(player),
+		useRootPosition = typeof(payload) ~= "table",
+	})
 end
 
 local function getFloorPivot(floorPosition: Vector3, facing: Vector3, normal: Vector3): CFrame
@@ -321,13 +295,13 @@ local function stripScripts(instance: Instance)
 	end
 end
 
-local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance): FloorPlacement?
+local function validatePlacement(player: Player, definition: AbilityDefinition, template: Instance, payload: any): FloorPlacement?
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil
 	end
 
-	local floor = findFloor(player, rootPart, definition)
+	local floor = findFloor(player, rootPart, definition, payload)
 	if not floor then
 		return nil
 	end
@@ -338,9 +312,6 @@ local function validatePlacement(player: Player, definition: AbilityDefinition, 
 	clone:Destroy()
 
 	if boundsSize.X <= 0 or boundsSize.Y <= 0 or boundsSize.Z <= 0 then
-		return nil
-	end
-	if not isPlacementClear(boundsCFrame, boundsSize, floor.floor, player.Character) then
 		return nil
 	end
 
@@ -576,7 +547,7 @@ function MineBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 		return false
 	end
 
-	local placement = validatePlacement(context.player, definition, template)
+	local placement = validatePlacement(context.player, definition, template, context.payload)
 	if not placement then
 		return false
 	end

@@ -731,7 +731,11 @@ function VoxDestruct.octreeMeshSubtraction(
 				debrisPayload = nil
 			end
 		elseif debrisConfig and debrisConfig.ClientSimulated == true then
-			debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+			if debrisConfig.CompactPayloads == true or debrisConfig.DebrisCompactPayloads == true then
+				debrisPayload = Debris.makeCompactPayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+			else
+				debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+			end
 		else
 			Debris.makeDebris(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
 		end

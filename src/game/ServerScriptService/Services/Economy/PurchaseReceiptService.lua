@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local DataService = require(script.Parent.DataService)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
+local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local RobuxPurchases = require(ReplicatedStorage.Shared.Config.Lists.RobuxPurchases)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 
@@ -28,18 +29,7 @@ local function ensureRemotesFolder(): Folder
 		return remotesFolder
 	end
 
-	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
-	if existing and existing:IsA("Folder") then
-		remotesFolder = existing
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = REMOTES_FOLDER_NAME
-	folder.Parent = ReplicatedStorage
+	local folder = RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
 	remotesFolder = folder
 	return folder
 end
@@ -51,18 +41,7 @@ local function ensurePlayClientSoundRemote(): RemoteEvent
 		return playClientSoundRemote
 	end
 
-	local existing = folder:FindFirstChild(PLAY_CLIENT_SOUND_REMOTE_NAME)
-	if existing and existing:IsA("RemoteEvent") then
-		playClientSoundRemote = existing
-		return existing
-	end
-	if existing then
-		existing:Destroy()
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = PLAY_CLIENT_SOUND_REMOTE_NAME
-	remote.Parent = folder
+	local remote = RemoteUtil.EnsureRemoteEvent(folder, PLAY_CLIENT_SOUND_REMOTE_NAME)
 	playClientSoundRemote = remote
 	return remote
 end

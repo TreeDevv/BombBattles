@@ -87,10 +87,72 @@ return {
 		value = "",
 	},
 
+	EmoteOrder = {
+		key = "emoteOrder",
+		value = {},
+	},
+
+	FavoriteEmotes = {
+		key = "favoriteEmotes",
+		value = {},
+	},
+
 	CrateRollHistory = {
 		key = "crateRollHistory",
 		value = {
 			recent = {},
+		},
+	},
+
+	CrateTokens = {
+		key = "crateTokens",
+		value = {
+			Basic = 0,
+			Premium = 0,
+		},
+	},
+
+	DailyRewards = {
+		key = "dailyRewards",
+		value = {
+			claimedDays = {},
+			nextDay = 1,
+			lastClaimDayKey = "",
+			countryCode = "",
+			utcOffsetMinutes = 0,
+			resetAtUnix = 0,
+			completed = false,
+		},
+	},
+
+	GroupReward = {
+		key = "groupReward",
+		value = {
+			hasBaseline = false,
+			baselineLikes = 0,
+			baselineAtUnix = 0,
+			rewardClaimed = false,
+			claimedAtUnix = 0,
+			joinedViaPrompt = false,
+		},
+	},
+
+	FriendRewards = {
+		key = "friendRewards",
+		value = {
+			totalFriendSeconds = 0,
+			claimedTiers = {},
+		},
+	},
+
+	InviteRewards = {
+		key = "inviteRewards",
+		value = {
+			hasJoined = false,
+			referredInviteProcessed = false,
+			chickenClaimed = false,
+			claimedAtUnix = 0,
+			processedReferredUserIds = {},
 		},
 	},
 

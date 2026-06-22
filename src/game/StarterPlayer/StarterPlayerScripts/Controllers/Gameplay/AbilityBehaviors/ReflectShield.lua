@@ -8,6 +8,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local AbilityPlacementFlow = require(ReplicatedStorage.Shared.Common.AbilityPlacementFlow)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
@@ -619,10 +620,9 @@ end
 function ReflectShield.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	if preview.active then
 		cancelPreview()
-		return true
 	end
 
-	return startPreview(context)
+	return AbilityPlacementFlow.SendInstant(context)
 end
 
 function ReflectShield.OnEffect(context: ClientEffectContext)

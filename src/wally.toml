@@ -10,6 +10,7 @@ exclude = ["Packages", "ServerPackages"]
 expressive-prompts = "miagobble/expressive-prompts@1.1.4"
 ReplicaController = "etheroit/replicacontroller@1.0.0"
 ZonePlus = "streeteenk/zoneplus@3.2.1"
+topbarplus = "legitatx/topbarplus@3.0.5"
 
 [server-dependencies]
 ProfileService = "etheroit/profileservice@1.2.0"

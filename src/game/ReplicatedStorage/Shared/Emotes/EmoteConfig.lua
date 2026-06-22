@@ -10,114 +10,113 @@ EmoteConfig.Actions = table.freeze({
 	Start = "Start",
 	Stop = "Stop",
 	Snapshot = "Snapshot",
+	SwapSlots = "SwapSlots",
+	ToggleFavorite = "ToggleFavorite",
 })
 
 EmoteConfig.PageSize = 8
 EmoteConfig.OpenKeyCode = Enum.KeyCode.B
 EmoteConfig.MaxEmoteIdLength = 64
+EmoteConfig.DefaultRarity = "Rare"
 EmoteConfig.DefaultWalkSpeed = 10
 EmoteConfig.DefaultAutoRotate = true
 EmoteConfig.CancelMoveSpeed = 0.75
 EmoteConfig.MovementCancelGraceSeconds = 0.25
-
-local AUTHORED_ORDER = table.freeze({
-	"Billie",
-	"Break",
-	"Breakdance",
-	"California",
-	"Cat Dance",
-	"Celebration",
-	"Cola",
-	"Conga",
-	"CyberGoth",
-	"Default Dance",
-	"Distraction",
-	"Gambler",
-	"Gangnam Style",
-	"Garry Dance",
-	"Helicopter",
-	"Kazotsky Kick",
-	"Kazotsky Kick Two",
-	"L",
-	"Laugh",
-	"Laugh Two",
-	"Lounge",
-	"Parker",
-	"Penguin Walk",
-	"Reanimated",
-	"Relaxed",
-	"Shuffle",
-	"Shikanoko",
-	"Sit",
-	"Skipping",
-	"Sleep",
-	"T Dance",
-	"T Pose",
-	"Walk",
-	"Whip",
-	"goop",
-})
+EmoteConfig.DefaultAnimationName = "Animation1"
 
 local definitionCache: { [string]: any }? = nil
 local catalogCache: { any }? = nil
+local normalizedIdCache: { [string]: string }? = nil
 
 local function getAssetsRoot(): Instance?
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
 	return assets and assets:FindFirstChild("Emotes") or nil
 end
 
-local function makeDefinition(emoteId: string, asset: Instance?): any
+local function getBehaviorsRoot(): Instance?
+	return script.Parent:FindFirstChild("EmoteBehaviors")
+end
+
+local function makeDefinition(behavior: any, asset: Instance?, fallbackOrder: number): any?
+	if typeof(behavior) ~= "table" or typeof(behavior.id) ~= "string" or behavior.id == "" then
+		return nil
+	end
+
+	local catalogOrder = if typeof(behavior.catalogOrder) == "number" then behavior.catalogOrder else fallbackOrder
 	return table.freeze({
-		id = emoteId,
-		displayName = emoteId,
-		assetName = emoteId,
+		id = behavior.id,
+		displayName = if typeof(behavior.displayName) == "string" then behavior.displayName else behavior.id,
+		assetName = if typeof(behavior.assetName) == "string" then behavior.assetName else behavior.id,
 		asset = asset,
-		animationName = "Animation1",
-		walkSpeed = EmoteConfig.DefaultWalkSpeed,
-		autoRotate = EmoteConfig.DefaultAutoRotate,
+		animationName = if typeof(behavior.animationName) == "string" then behavior.animationName else EmoteConfig.DefaultAnimationName,
+		rarity = if typeof(behavior.rarity) == "string" then behavior.rarity else EmoteConfig.DefaultRarity,
+		catalogOrder = catalogOrder,
+		walkSpeed = if typeof(behavior.walkSpeed) == "number" then behavior.walkSpeed else EmoteConfig.DefaultWalkSpeed,
+		autoRotate = if typeof(behavior.autoRotate) == "boolean" then behavior.autoRotate else EmoteConfig.DefaultAutoRotate,
+		behavior = behavior,
 	})
 end
 
-local function sortedKeys(map: { [string]: boolean }): { string }
-	local ids = {}
-	for id in pairs(map) do
-		table.insert(ids, id)
+local function loadBehavior(child: Instance): any?
+	if not child:IsA("ModuleScript") then
+		return nil
 	end
-	table.sort(ids, function(left, right)
-		return string.lower(left) < string.lower(right)
-	end)
-	return ids
+
+	local ok, behavior = pcall(require, child)
+	if ok and typeof(behavior) == "table" then
+		return behavior
+	end
+
+	warn("[EmoteConfig] Failed to load emote behavior " .. child:GetFullName() .. ": " .. tostring(behavior))
+	return nil
+end
+
+local function sortDefinitions(left: any, right: any): boolean
+	if left.catalogOrder == right.catalogOrder then
+		return string.lower(left.id) < string.lower(right.id)
+	end
+	return left.catalogOrder < right.catalogOrder
 end
 
 local function buildCatalog()
-	local found: { [string]: boolean } = {}
-	local definitions: { [string]: any } = {}
 	local assetsRoot = getAssetsRoot()
-
-	if assetsRoot then
-		for _, child in ipairs(assetsRoot:GetChildren()) do
-			if child:IsA("Folder") or child:IsA("ModuleScript") then
-				found[child.Name] = true
-				definitions[child.Name] = makeDefinition(child.Name, child)
-			end
-		end
-	end
-
-	for _, emoteId in ipairs(AUTHORED_ORDER) do
-		if not definitions[emoteId] then
-			local asset = assetsRoot and assetsRoot:FindFirstChild(emoteId) or nil
-			definitions[emoteId] = makeDefinition(emoteId, asset)
-		end
-		found[emoteId] = true
-	end
-
+	local behaviorsRoot = getBehaviorsRoot()
+	local definitions: { [string]: any } = {}
 	local catalog = {}
-	for _, emoteId in ipairs(sortedKeys(found)) do
-		table.insert(catalog, definitions[emoteId])
+	local normalizedIds: { [string]: string } = {}
+
+	if behaviorsRoot then
+		local fallbackOrder = 0
+		for _, child in ipairs(behaviorsRoot:GetChildren()) do
+			local behavior = loadBehavior(child)
+			if not behavior then
+				continue
+			end
+
+			fallbackOrder += 1
+			local assetName = if typeof(behavior.assetName) == "string" then behavior.assetName else behavior.id
+			local asset = if assetsRoot and typeof(assetName) == "string" then assetsRoot:FindFirstChild(assetName) else nil
+			local definition = makeDefinition(behavior, asset, fallbackOrder)
+			if not definition then
+				continue
+			end
+
+			if definitions[definition.id] then
+				warn("[EmoteConfig] Duplicate emote behavior id " .. definition.id)
+				continue
+			end
+
+			definitions[definition.id] = definition
+			table.insert(catalog, definition)
+			normalizedIds[string.lower(definition.id)] = definition.id
+		end
 	end
+
+	table.sort(catalog, sortDefinitions)
 
 	definitionCache = definitions
 	catalogCache = table.freeze(catalog)
+	normalizedIdCache = normalizedIds
 end
 
 function EmoteConfig.GetAssetsRoot(): Instance?
@@ -131,14 +130,46 @@ function EmoteConfig.GetCatalog(): { any }
 	return catalogCache :: { any }
 end
 
+function EmoteConfig.GetCatalogIds(): { string }
+	local ids = {}
+	for _, definition in ipairs(EmoteConfig.GetCatalog()) do
+		table.insert(ids, definition.id)
+	end
+	return ids
+end
+
+function EmoteConfig.NormalizeEmoteId(emoteId: any): string
+	if typeof(emoteId) ~= "string" then
+		return ""
+	end
+
+	local trimmed = string.gsub(emoteId, "^%s+", "")
+	trimmed = string.gsub(trimmed, "%s+$", "")
+	if trimmed == "" or #trimmed > EmoteConfig.MaxEmoteIdLength then
+		return ""
+	end
+
+	if not definitionCache then
+		buildCatalog()
+	end
+
+	if (definitionCache :: { [string]: any })[trimmed] then
+		return trimmed
+	end
+
+	local normalized = (normalizedIdCache :: { [string]: string })[string.lower(trimmed)]
+	return normalized or ""
+end
+
 function EmoteConfig.GetDefinition(emoteId: any): any?
-	if typeof(emoteId) ~= "string" or emoteId == "" or #emoteId > EmoteConfig.MaxEmoteIdLength then
+	local normalizedEmoteId = EmoteConfig.NormalizeEmoteId(emoteId)
+	if normalizedEmoteId == "" then
 		return nil
 	end
 	if not definitionCache then
 		buildCatalog()
 	end
-	return (definitionCache :: { [string]: any })[emoteId]
+	return (definitionCache :: { [string]: any })[normalizedEmoteId]
 end
 
 function EmoteConfig.IsKnownEmoteId(emoteId: any): boolean
@@ -152,17 +183,19 @@ function EmoteConfig.GetAssetFolder(emoteId: any): Instance?
 	end
 
 	local assetsRoot = getAssetsRoot()
-	return if assetsRoot and typeof(emoteId) == "string" then assetsRoot:FindFirstChild(emoteId) else nil
+	local normalizedEmoteId = EmoteConfig.NormalizeEmoteId(emoteId)
+	return if assetsRoot and normalizedEmoteId ~= "" then assetsRoot:FindFirstChild(normalizedEmoteId) else nil
 end
 
 function EmoteConfig.GetAnimation(emoteId: any): Animation?
+	local definition = EmoteConfig.GetDefinition(emoteId)
 	local asset = EmoteConfig.GetAssetFolder(emoteId)
-	if not asset then
+	if not (definition and asset) then
 		return nil
 	end
 
 	local animations = asset:FindFirstChild("Animations")
-	local animation = animations and animations:FindFirstChild("Animation1")
+	local animation = animations and animations:FindFirstChild(definition.animationName)
 	return if animation and animation:IsA("Animation") then animation else nil
 end
 

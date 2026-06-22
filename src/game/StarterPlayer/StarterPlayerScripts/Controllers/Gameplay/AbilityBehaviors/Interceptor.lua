@@ -1,4 +1,3 @@
-local CollectionService = game:GetService("CollectionService")
 local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -8,9 +7,12 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local AbilityPlacementFlow = require(ReplicatedStorage.Shared.Common.AbilityPlacementFlow)
+local PlacementSurfaceUtil = require(ReplicatedStorage.Shared.Common.PlacementSurfaceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local CameraController = require(script.Parent.Parent:WaitForChild("CameraController"))
 local RoundController = require(script.Parent.Parent:WaitForChild("RoundController"))
 
@@ -32,7 +34,10 @@ type PreviewState = {
 	definition: AbilityDefinition?,
 	ghost: Instance?,
 	valid: boolean,
+	surfacePosition: Vector3?,
+	surfaceNormal: Vector3?,
 	floorPosition: Vector3?,
+	floatingPosition: Vector3?,
 	facing: Vector3?,
 	inputConnection: RBXScriptConnection?,
 }
@@ -89,7 +94,10 @@ local preview: PreviewState = {
 	definition = nil,
 	ghost = nil,
 	valid = false,
+	surfacePosition = nil,
+	surfaceNormal = nil,
 	floorPosition = nil,
+	floatingPosition = nil,
 	facing = nil,
 	inputConnection = nil,
 }
@@ -99,9 +107,6 @@ local PENDING_INTERCEPTS: { [string]: { Vector3 } } = {}
 local HIGHLIGHTS: { [Player]: HighlightRecord } = {}
 local highlightConnection: RBXScriptConnection? = nil
 local lastHighlightStep = 0
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 
 local function getByPath(root: Instance, path: { string }): Instance?
 	local current: Instance? = root
@@ -172,54 +177,6 @@ local function getPivot(instance: Instance): CFrame
 	return (instance :: BasePart).CFrame
 end
 
-local function pivotTo(instance: Instance, cframe: CFrame)
-	if instance:IsA("Model") then
-		instance:PivotTo(cframe)
-	else
-		(instance :: BasePart).CFrame = cframe
-	end
-end
-
-local function getPartAxisExtents(part: BasePart, axis: Vector3, origin: Vector3): (number, number)
-	local halfSize = part.Size * 0.5
-	local minDistance = math.huge
-	local maxDistance = -math.huge
-
-	for _, xSign in ipairs({ -1, 1 }) do
-		for _, ySign in ipairs({ -1, 1 }) do
-			for _, zSign in ipairs({ -1, 1 }) do
-				local corner = part.CFrame:PointToWorldSpace(Vector3.new(
-					halfSize.X * xSign,
-					halfSize.Y * ySign,
-					halfSize.Z * zSign
-				))
-				local distance = (corner - origin):Dot(axis)
-				minDistance = math.min(minDistance, distance)
-				maxDistance = math.max(maxDistance, distance)
-			end
-		end
-	end
-
-	return minDistance, maxDistance
-end
-
-local function getInstanceAxisExtents(instance: Instance, axis: Vector3, origin: Vector3): (number, number)
-	local minDistance = math.huge
-	local maxDistance = -math.huge
-	local foundPart = false
-	for _, part in ipairs(getBaseParts(instance)) do
-		foundPart = true
-		local partMin, partMax = getPartAxisExtents(part, axis, origin)
-		minDistance = math.min(minDistance, partMin)
-		maxDistance = math.max(maxDistance, partMax)
-	end
-
-	if not foundPart then
-		return 0, 0
-	end
-	return minDistance, maxDistance
-end
-
 local function getPreviewFolder(): Folder
 	local existing = workspace:FindFirstChild(PREVIEW_FOLDER_NAME)
 	if existing and existing:IsA("Folder") then
@@ -249,27 +206,6 @@ local function getTargetRoot(): Instance?
 	)
 end
 
-local function hasUnsafeTaggedAncestor(instance: Instance): boolean
-	local current: Instance? = instance
-	while current and current ~= workspace do
-		for _, tagName in ipairs(UNSAFE_TAGS) do
-			if CollectionService:HasTag(current, tagName) then
-				return true
-			end
-		end
-		current = current.Parent
-	end
-	return false
-end
-
-local function flattenDirection(direction: Vector3): Vector3
-	local flat = Vector3.new(direction.X, 0, direction.Z)
-	if flat.Magnitude < 0.05 then
-		return Vector3.zAxis
-	end
-	return flat.Unit
-end
-
 local function getRootPart(): BasePart?
 	local character = Players.LocalPlayer.Character
 	if not character then
@@ -284,105 +220,37 @@ local function getRootPart(): BasePart?
 	return nil
 end
 
-local function findFloor(rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
-	local distance = definition.placementDistance or 8
-	local rayUp = definition.floorRaycastUp or 8
-	local rayDown = definition.floorRaycastDown or 32
-	local facing = flattenDirection(rootPart.CFrame.LookVector)
-	local target = rootPart.Position + facing * distance
-	local rayOrigin = target + Vector3.yAxis * rayUp
-	local rayDirection = Vector3.new(0, -(rayUp + rayDown), 0)
-	local hit = workspace:Raycast(rayOrigin, rayDirection)
-	if not hit then
-		return nil
-	end
-	if hit.Normal.Y < (definition.minFloorNormalY or 0.65) then
-		return nil
-	end
-	if hasUnsafeTaggedAncestor(hit.Instance) then
-		return nil
-	end
-
-	if not PracticeRangeTargeting.IsInTargetRoot(hit.Instance, getTargetRoot()) then
-		return nil
-	end
-
-	return {
-		position = hit.Position,
-		facing = facing,
-		normal = hit.Normal,
-		floor = hit.Instance,
-	}
-end
-
-local function getFloorPivot(floorPosition: Vector3, facing: Vector3, normal: Vector3): CFrame
-	local up = if normal.Magnitude > 0.05 then normal.Unit else Vector3.yAxis
-	local forward = facing - up * facing:Dot(up)
-	if forward.Magnitude < 0.05 then
-		forward = up:Cross(Vector3.xAxis)
-		if forward.Magnitude < 0.05 then
-			forward = up:Cross(Vector3.zAxis)
-		end
-	end
-
-	forward = forward.Unit
-	local right = up:Cross(forward).Unit
-	forward = right:Cross(up).Unit
-	return CFrame.fromMatrix(floorPosition, right, up, -forward)
-end
-
-local function alignGhostToFloor(ghost: Instance, floorPosition: Vector3, facing: Vector3, normal: Vector3): (CFrame, Vector3)
-	local pivot = getFloorPivot(floorPosition, facing, normal)
-	pivotTo(ghost, pivot)
-
-	local bottomOffset = getInstanceAxisExtents(ghost, pivot.UpVector, floorPosition)
-	local finalPivot = pivot - pivot.UpVector * bottomOffset
-	pivotTo(ghost, finalPivot)
-
-	return getBounds(ghost)
-end
-
-local function isProtectedOrCharacter(part: BasePart): boolean
-	if hasUnsafeTaggedAncestor(part) then
-		return true
-	end
-
-	local model = part:FindFirstAncestorOfClass("Model")
-	return model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil
-end
-
-local function isPlacementClear(boundsCFrame: CFrame, boundsSize: Vector3, floor: Instance): boolean
-	local up = boundsCFrame.UpVector
-	local overlapSize = Vector3.new(
-		math.max(boundsSize.X * 0.95, 0.1),
-		math.max(boundsSize.Y - 0.25, 0.1),
-		math.max(boundsSize.Z * 0.95, 0.1)
-	)
-	local overlapCFrame = boundsCFrame + up * 0.18
-
-	local params = OverlapParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
+local function getPlacementExcludes(): { Instance }
 	local exclude = {}
+	local character = Players.LocalPlayer.Character
+	if character then
+		table.insert(exclude, character)
+	end
 	local previewFolder = workspace:FindFirstChild(PREVIEW_FOLDER_NAME)
 	if previewFolder then
 		table.insert(exclude, previewFolder)
 	end
-	params.FilterDescendantsInstances = exclude
-	params.RespectCanCollide = true
+	return exclude
+end
 
-	for _, part in ipairs(workspace:GetPartBoundsInBox(overlapCFrame, overlapSize, params)) do
-		if part == floor or part:IsDescendantOf(floor) then
-			continue
-		end
-		if isProtectedOrCharacter(part) then
-			return false
-		end
-		if part.CanCollide and part.Transparency < 1 then
-			return false
-		end
+local function findSurface(rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
+	local camera = workspace.CurrentCamera
+	if not camera then
+		return nil
 	end
 
-	return true
+	local mouseLocation = UserInputService:GetMouseLocation()
+	local ray = camera:ViewportPointToRay(mouseLocation.X, mouseLocation.Y)
+	return PlacementSurfaceUtil.ResolveAimedSurfacePlacement({
+		rootPart = rootPart,
+		definition = definition,
+		rayOrigin = ray.Origin,
+		rayDirection = ray.Direction,
+		targetRoot = getTargetRoot(),
+		unsafeTags = UNSAFE_TAGS,
+		requirePlacementClear = false,
+		excludeInstances = getPlacementExcludes(),
+	})
 end
 
 local function hidePreviewVfx(ghost: Instance)
@@ -454,7 +322,10 @@ local function cancelPreview()
 	preview.abilityId = ""
 	preview.definition = nil
 	preview.valid = false
+	preview.surfacePosition = nil
+	preview.surfaceNormal = nil
 	preview.floorPosition = nil
+	preview.floatingPosition = nil
 	preview.facing = nil
 end
 
@@ -479,18 +350,25 @@ local function updatePreview()
 		return
 	end
 
-	local floor = findFloor(rootPart, definition)
-	if not floor then
+	local surface = findSurface(rootPart, definition)
+	if not surface then
 		preview.valid = false
 		setGhostColor(ghost, definition, false)
 		return
 	end
 
-	local boundsCFrame, boundsSize = alignGhostToFloor(ghost, floor.position, floor.facing, floor.normal)
-	local valid = isPlacementClear(boundsCFrame, boundsSize, floor.floor)
+	local boundsCFrame, boundsSize = PlacementSurfaceUtil.AlignToFloor(ghost, surface)
+	local valid = PlacementSurfaceUtil.IsPlacementClear({
+		boundsCFrame = boundsCFrame,
+		boundsSize = boundsSize,
+		support = surface.floor,
+		unsafeTags = UNSAFE_TAGS,
+		excludeInstances = getPlacementExcludes(),
+	})
 	preview.valid = valid
-	preview.floorPosition = floor.position
-	preview.facing = floor.facing
+	preview.surfacePosition = surface.position
+	preview.surfaceNormal = surface.normal
+	preview.facing = surface.facing
 	setGhostColor(ghost, definition, valid)
 end
 
@@ -500,7 +378,8 @@ local function commitPreview()
 	end
 
 	preview.controller:SendMessage(preview.slot, AbilityConfig.MessageTypes.Activate, {
-		floorPosition = preview.floorPosition,
+		surfacePosition = preview.surfacePosition,
+		surfaceNormal = preview.surfaceNormal,
 		facing = preview.facing,
 	})
 	cancelPreview()
@@ -519,57 +398,6 @@ local function handleCommitAction(_actionName: string, inputState: Enum.UserInpu
 	return Enum.ContextActionResult.Sink
 end
 
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[Interceptor] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[Interceptor] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[Interceptor] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
-end
-
 local function getEffectData(payload: any): any
 	if typeof(payload) == "table" and typeof(payload.payload) == "table" then
 		return payload.payload
@@ -578,9 +406,21 @@ local function getEffectData(payload: any): any
 end
 
 local function getRuntimeFolder(interceptorId: string): Instance?
-	local abilitiesFolder = workspace:FindFirstChild(ABILITIES_FOLDER_NAME)
-	local interceptorFolder = abilitiesFolder and abilitiesFolder:FindFirstChild(INTERCEPTOR_FOLDER_NAME)
-	return interceptorFolder and interceptorFolder:FindFirstChild(interceptorId)
+	local function findInRoot(root: Instance): Instance?
+		local abilitiesFolder = root:FindFirstChild(ABILITIES_FOLDER_NAME)
+		local interceptorFolder = abilitiesFolder and abilitiesFolder:FindFirstChild(INTERCEPTOR_FOLDER_NAME)
+		return interceptorFolder and interceptorFolder:FindFirstChild(interceptorId)
+	end
+
+	local targetRoot = getTargetRoot()
+	if targetRoot then
+		local folder = findInRoot(targetRoot)
+		if folder then
+			return folder
+		end
+	end
+
+	return findInRoot(workspace)
 end
 
 local function getCenterPiece(folder: Instance): Instance?
@@ -933,17 +773,7 @@ local function faceAttachmentTowardWorldPosition(attachment: Attachment, targetP
 end
 
 local function emitBeamEnd(beamEnd: Attachment)
-	local module = getEmitModule()
-	if not (module and ensureEmitModuleInitialized(module) and type(module.emit) == "function") then
-		return
-	end
-
-	local ok, err = pcall(function()
-		return module.emit(beamEnd)
-	end)
-	if not ok then
-		warn("[Interceptor] Failed to emit intercept VFX: " .. tostring(err))
-	end
+	EmitService.Emit(beamEnd, "[Interceptor]")
 end
 
 local function playIntercept(interceptorId: string, position: Vector3)
@@ -1084,47 +914,20 @@ local function startPreview(context: ClientActivateRequestedContext): boolean
 		return true
 	end
 
-	cancelPreview()
-
-	local ghost = centerTemplate:Clone()
-	ghost.Name = "InterceptorPreview"
-	styleGhost(ghost, context.definition)
-	setGhostColor(ghost, context.definition, false)
-	ghost.Parent = getPreviewFolder()
-
-	preview.active = true
-	preview.controller = context.controller
-	preview.slot = context.slot
-	preview.abilityId = context.abilityId
-	preview.definition = context.definition
-	preview.ghost = ghost
-	preview.valid = false
-
-	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
-	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, updatePreview)
-	updatePreview()
-
-	ContextActionService:UnbindAction(COMMIT_ACTION_NAME)
-	ContextActionService:BindActionAtPriority(
-		COMMIT_ACTION_NAME,
-		handleCommitAction,
-		false,
-		COMMIT_ACTION_PRIORITY,
-		Enum.UserInputType.MouseButton1,
-		Enum.UserInputType.Touch,
-		Enum.KeyCode.ButtonR2
-	)
-
-	preview.inputConnection = UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if isCancelInput(input) then
-			cancelPreview()
-		end
-	end)
-
-	return true
+	return AbilityPlacementFlow.StartPreview({
+		state = preview,
+		abilityName = "Interceptor",
+		previewFolderName = PREVIEW_FOLDER_NAME,
+		renderStepName = RENDER_STEP_NAME,
+		commitActionName = COMMIT_ACTION_NAME,
+		template = centerTemplate,
+		context = context,
+		mode = "Surface",
+		resolveTargetRoot = getTargetRoot,
+		unsafeTags = UNSAFE_TAGS,
+		styleGhost = styleGhost,
+		setGhostColor = setGhostColor,
+	})
 end
 
 function Interceptor.OnActivateRequested(context: ClientActivateRequestedContext): boolean

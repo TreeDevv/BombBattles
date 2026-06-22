@@ -5,6 +5,7 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
+local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local BombController = require(script.Parent.Parent:WaitForChild("BombController"))
 
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -22,9 +23,6 @@ FreezeBomb.HandlesInputState = true
 local activeThrow: ThrowState? = nil
 local predictedCooldownEndsAt = 0
 local previewConnection: RBXScriptConnection? = nil
-local emitModule = nil
-local emitModuleInitialized = false
-local warnedMissingEmitModule = false
 local warnedMissingImpactTemplate = false
 local warnedInvalidImpactTemplate = false
 local warnedMissingZoneTemplate = false
@@ -54,57 +52,6 @@ local function getInstanceByPath(path: any): Instance?
 		current = current:FindFirstChild(name)
 	end
 	return current
-end
-
-local function getEmitModule()
-	if emitModule then
-		return emitModule
-	end
-
-	local packages = ReplicatedStorage:FindFirstChild("Packages")
-	local moduleScript = packages and packages:FindFirstChild("EmitModule")
-	if not (moduleScript and moduleScript:IsA("ModuleScript")) then
-		if not warnedMissingEmitModule then
-			warn("[FreezeBomb] Missing ReplicatedStorage.Packages.EmitModule")
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	local ok, result = pcall(require, moduleScript)
-	if not ok then
-		if not warnedMissingEmitModule then
-			warn("[FreezeBomb] Failed to require EmitModule: " .. tostring(result))
-			warnedMissingEmitModule = true
-		end
-		return nil
-	end
-
-	emitModule = result
-	return emitModule
-end
-
-local function ensureEmitModuleInitialized(module): boolean
-	if emitModuleInitialized then
-		return true
-	end
-	if not module then
-		return false
-	end
-
-	local initFn = module.init or module.Init
-	if type(initFn) == "function" then
-		local ok, err = pcall(function()
-			initFn()
-		end)
-		if not ok then
-			warn("[FreezeBomb] Failed to initialize EmitModule: " .. tostring(err))
-			return false
-		end
-	end
-
-	emitModuleInitialized = true
-	return true
 end
 
 local function getVfxFolder(): Folder
@@ -215,15 +162,7 @@ local function playImpactEffect(position: Vector3, payload: any, definition: Abi
 	local impact = template:Clone()
 	impact.Parent = holder
 
-	local module = getEmitModule()
-	if module and ensureEmitModuleInitialized(module) and type(module.emit) == "function" then
-		local ok, err = pcall(function()
-			module.emit(impact)
-		end)
-		if not ok then
-			warn("[FreezeBomb] Failed to emit impact VFX: " .. tostring(err))
-		end
-	end
+	EmitService.Emit(impact, "[FreezeBomb]")
 
 	local cleanupSeconds = math.max(getDefinitionNumber(definition, "impactVisualCleanupSeconds", 3), 0.25)
 	cleanupVisualAfterDelay(holder, cleanupSeconds)

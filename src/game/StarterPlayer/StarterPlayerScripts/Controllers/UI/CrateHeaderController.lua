@@ -47,6 +47,14 @@ local HIGHLIGHT_STYLES = table.freeze({
 		fillColor = Color3.fromRGB(183, 112, 255),
 		outlineColor = Color3.fromRGB(255, 205, 89),
 	}),
+	FinisherBasic = table.freeze({
+		fillColor = Color3.fromRGB(91, 174, 255),
+		outlineColor = Color3.fromRGB(255, 205, 89),
+	}),
+	FinisherPremium = table.freeze({
+		fillColor = Color3.fromRGB(255, 92, 148),
+		outlineColor = Color3.fromRGB(255, 205, 89),
+	}),
 })
 
 type LabelRecord = {

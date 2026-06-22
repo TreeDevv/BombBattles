@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
 
 local LocalPlayer = Players.LocalPlayer
 local ROUND_ALIVE_ATTR = "RoundAlive"
@@ -59,6 +60,7 @@ type ActiveEffect = {
 	blur: BlurEffect?,
 	blurTween: Tween?,
 	hasStarted: boolean,
+	baseIntensity: number,
 	intensity: number,
 	emitterRates: { [ParticleEmitter]: number },
 }
@@ -244,6 +246,11 @@ local function captureEmitterRates(root: Instance): { [ParticleEmitter]: number 
 	return rates
 end
 
+local function getScaledIntensity(baseIntensity: number): number
+	local settingsScale = PlayerSettings:GetNumberScale("screenEffectsScale")
+	return math.clamp(baseIntensity, 0, 1) * settingsScale
+end
+
 local function updatePartForCamera(part: BasePart, camera: Camera, config: PresetConfig, originalSize: Vector3)
 	if config.screenFit then
 		local depth = math.abs(config.frontOffset.Z)
@@ -290,7 +297,7 @@ function ScreenEffectsController:_applyIntensity(active: ActiveEffect, config: P
 	local intensity = math.clamp(active.intensity, 0, 1)
 	local minRateScale = config.minRateScale or 1
 	local maxRateScale = config.maxRateScale or 1
-	local rateScale = minRateScale + (maxRateScale - minRateScale) * intensity
+	local rateScale = if intensity <= 0 then 0 else minRateScale + (maxRateScale - minRateScale) * intensity
 
 	for emitter, baseRate in pairs(active.emitterRates) do
 		if emitter.Parent then
@@ -300,6 +307,21 @@ function ScreenEffectsController:_applyIntensity(active: ActiveEffect, config: P
 		end
 	end
 
+end
+
+function ScreenEffectsController:_applySettingsScale()
+	if PlayerSettings:GetNumberScale("screenEffectsScale") <= 0 then
+		self:StopAll()
+		return
+	end
+
+	for presetName, active in pairs(self._activeEffects) do
+		local config = PRESETS[presetName]
+		if config then
+			active.intensity = getScaledIntensity(active.baseIntensity)
+			self:_applyIntensity(active, config)
+		end
+	end
 end
 
 function ScreenEffectsController:_startHeartbeat()
@@ -443,6 +465,13 @@ function ScreenEffectsController:Apply(presetName: string, duration: number, opt
 		warn(("[ScreenEffectsController] Status effect preset not found: %s"):format(presetName))
 		return false
 	end
+	local screenEffectsScale = PlayerSettings:GetNumberScale("screenEffectsScale")
+	if screenEffectsScale <= 0 then
+		return false
+	end
+	options = if typeof(options) == "table" then options else {}
+	local baseIntensity = math.clamp(tonumber(options.intensity) or 1, 0, 1)
+	local scaledIntensity = math.clamp(baseIntensity * screenEffectsScale, 0, 1)
 
 	local now = os.clock()
 	local active = self._activeEffects[presetName]
@@ -453,7 +482,8 @@ function ScreenEffectsController:Apply(presetName: string, duration: number, opt
 			active.endTime += duration
 		end
 		if typeof(options) == "table" and typeof(options.intensity) == "number" then
-			active.intensity = math.clamp(options.intensity, 0, 1)
+			active.baseIntensity = baseIntensity
+			active.intensity = scaledIntensity
 			self:_applyIntensity(active, config)
 		end
 		return true
@@ -470,9 +500,8 @@ function ScreenEffectsController:Apply(presetName: string, duration: number, opt
 		blur = nil,
 		blurTween = nil,
 		hasStarted = false,
-		intensity = if typeof(options) == "table" and typeof(options.intensity) == "number"
-			then math.clamp(options.intensity, 0, 1)
-			else 1,
+		baseIntensity = baseIntensity,
+		intensity = scaledIntensity,
 		emitterRates = {},
 	}
 	self._activeEffects[presetName] = active
@@ -499,7 +528,13 @@ function ScreenEffectsController:SetIntensity(presetName: string, intensity: num
 		return false
 	end
 
-	active.intensity = math.clamp(intensity, 0, 1)
+	if PlayerSettings:GetNumberScale("screenEffectsScale") <= 0 then
+		self:Stop(presetName)
+		return false
+	end
+
+	active.baseIntensity = math.clamp(intensity, 0, 1)
+	active.intensity = getScaledIntensity(active.baseIntensity)
 	self:_applyIntensity(active, config)
 	return true
 end
@@ -598,6 +633,14 @@ end
 
 function ScreenEffectsController:OnStart()
 	self:StopAll()
+	if self._settingsConnection then
+		self._settingsConnection:Disconnect()
+	end
+	self._settingsConnection = PlayerSettings.Changed:Connect(function(id)
+		if id == "screenEffectsScale" then
+			self:_applySettingsScale()
+		end
+	end)
 
 	LocalPlayer.CharacterRemoving:Connect(function()
 		if isPendingRoundRespawn() then

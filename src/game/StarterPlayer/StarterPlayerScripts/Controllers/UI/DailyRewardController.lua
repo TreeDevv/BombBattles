@@ -503,6 +503,10 @@ function DailyRewardController:_openMenu()
 	self:_openFrameWithRetry(1)
 end
 
+function DailyRewardController:OpenMenu()
+	self:_openMenu()
+end
+
 function DailyRewardController:_startLocalZone()
 	if self._localZone then
 		return true

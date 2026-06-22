@@ -6,6 +6,7 @@ local TweenService = game:GetService("TweenService")
 
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local CrateRollConfig = require(ReplicatedStorage.Shared.Config.CrateRollConfig)
+local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local LocalPlayer = Players.LocalPlayer
@@ -78,7 +79,10 @@ local RARITY_STYLES = {
 }
 
 type SkinReward = {
-	skinId: string,
+	rewardType: string,
+	itemId: string,
+	skinId: string?,
+	finisherId: string?,
 	displayName: string,
 	rarity: string,
 	iconImage: string?,
@@ -255,13 +259,28 @@ local function getNonEmptyString(value: any): string?
 	return if typeof(value) == "string" and value ~= "" then value else nil
 end
 
-local function getRawRewardSkinId(rawReward: any): string?
-	local rawSkinId = rawReward
+local function getRawRewardType(rawReward: any): string
 	if typeof(rawReward) == "table" then
-		rawSkinId = rawReward.skinId or rawReward.id or rawReward.name
+		local rewardType = getNonEmptyString(rawReward.rewardType)
+		if rewardType == CrateRollConfig.RewardTypes.Finisher or getNonEmptyString(rawReward.finisherId) then
+			return CrateRollConfig.RewardTypes.Finisher
+		end
 	end
 
-	return getNonEmptyString(rawSkinId)
+	return CrateRollConfig.RewardTypes.BombSkin
+end
+
+local function getRawRewardItemId(rawReward: any, rewardType: string): string?
+	local rawItemId = rawReward
+	if typeof(rawReward) == "table" then
+		if rewardType == CrateRollConfig.RewardTypes.Finisher then
+			rawItemId = rawReward.finisherId or rawReward.itemId or rawReward.id or rawReward.name
+		else
+			rawItemId = rawReward.skinId or rawReward.itemId or rawReward.id or rawReward.name
+		end
+	end
+
+	return getNonEmptyString(rawItemId)
 end
 
 local function getRawRewardDisplayName(rawReward: any): string?
@@ -269,7 +288,9 @@ local function getRawRewardDisplayName(rawReward: any): string?
 		return getNonEmptyString(rawReward.displayName)
 			or getNonEmptyString(rawReward.name)
 			or getNonEmptyString(rawReward.id)
+			or getNonEmptyString(rawReward.itemId)
 			or getNonEmptyString(rawReward.skinId)
+			or getNonEmptyString(rawReward.finisherId)
 	end
 
 	return getNonEmptyString(rawReward)
@@ -293,18 +314,27 @@ local function getRawRewardIcon(rawReward: any): string?
 		or getNonEmptyString(rawReward.image)
 end
 
-local function getRawRewardRarity(rawReward: any): string
+local function getRawRewardRarity(rawReward: any): string?
 	if typeof(rawReward) ~= "table" then
-		return "Common"
+		return nil
 	end
 
-	return getNonEmptyString(rawReward.rarity) or "Common"
+	return getNonEmptyString(rawReward.rarity)
+end
+
+local function getDefinitionForRewardType(rewardType: string, itemId: string)
+	return if rewardType == CrateRollConfig.RewardTypes.Finisher
+		then FinisherConfig.GetDefinition(itemId)
+		else BombSkinConfig.GetDefinition(itemId)
 end
 
 local function normalizeReward(rawReward: any): SkinReward
-	local rawSkinId = getRawRewardSkinId(rawReward)
-	local skinId = BombSkinConfig.NormalizeSkinId(rawSkinId)
-	local definition = if skinId ~= "" then BombSkinConfig.GetDefinition(skinId) else nil
+	local rewardType = getRawRewardType(rawReward)
+	local rawItemId = getRawRewardItemId(rawReward, rewardType)
+	local itemId = if rewardType == CrateRollConfig.RewardTypes.Finisher
+		then FinisherConfig.NormalizeFinisherId(rawItemId)
+		else BombSkinConfig.NormalizeSkinId(rawItemId)
+	local definition = if itemId ~= "" then getDefinitionForRewardType(rewardType, itemId) else nil
 	local explicitDisplayName = getRawRewardExplicitDisplayName(rawReward)
 	local fallbackDisplayName = getRawRewardDisplayName(rawReward)
 	local rawIconImage = getRawRewardIcon(rawReward)
@@ -312,68 +342,97 @@ local function normalizeReward(rawReward: any): SkinReward
 
 	if definition then
 		return {
-			skinId = skinId,
+			rewardType = rewardType,
+			itemId = itemId,
+			skinId = if rewardType == CrateRollConfig.RewardTypes.BombSkin then itemId else nil,
+			finisherId = if rewardType == CrateRollConfig.RewardTypes.Finisher then itemId else nil,
 			displayName = explicitDisplayName or definition.displayName,
-			rarity = rarity,
-			iconImage = rawIconImage or definition.iconImage or BombSkinConfig.GetIconImage(skinId),
+			rarity = rarity or definition.rarity or "Common",
+			iconImage = rawIconImage or definition.iconImage,
 		}
 	end
 
-	local fallbackSkinId = rawSkinId or fallbackDisplayName
-	if fallbackSkinId then
+	local fallbackItemId = rawItemId or fallbackDisplayName
+	if fallbackItemId then
 		return {
-			skinId = fallbackSkinId,
-			displayName = explicitDisplayName or fallbackDisplayName or fallbackSkinId,
-			rarity = rarity,
+			rewardType = rewardType,
+			itemId = fallbackItemId,
+			skinId = if rewardType == CrateRollConfig.RewardTypes.BombSkin then fallbackItemId else nil,
+			finisherId = if rewardType == CrateRollConfig.RewardTypes.Finisher then fallbackItemId else nil,
+			displayName = explicitDisplayName or fallbackDisplayName or fallbackItemId,
+			rarity = rarity or "Common",
 			iconImage = rawIconImage
-				or BombSkinConfig.GetIconImage(fallbackSkinId)
-				or BombSkinConfig.GetArchivedIconImage(fallbackSkinId),
+				or (if rewardType == CrateRollConfig.RewardTypes.Finisher
+					then FinisherConfig.GetIconImage(fallbackItemId)
+					else BombSkinConfig.GetIconImage(fallbackItemId) or BombSkinConfig.GetArchivedIconImage(fallbackItemId)),
 		}
 	end
 
-	skinId = BombSkinConfig.DefaultSkinId
-	definition = BombSkinConfig.GetDefinition(skinId)
+	itemId = BombSkinConfig.DefaultSkinId
+	definition = BombSkinConfig.GetDefinition(itemId)
 
 	return {
-		skinId = skinId,
-		displayName = definition and definition.displayName or skinId,
-		rarity = rarity,
-		iconImage = definition and definition.iconImage or BombSkinConfig.GetIconImage(skinId),
+		rewardType = CrateRollConfig.RewardTypes.BombSkin,
+		itemId = itemId,
+		skinId = itemId,
+		displayName = definition and definition.displayName or itemId,
+		rarity = rarity or "Common",
+		iconImage = definition and definition.iconImage or BombSkinConfig.GetIconImage(itemId),
 	}
 end
 
-local function rewardFromSkinId(skinId: string, fallbackRarity: string?): SkinReward
-	local normalizedSkinId = BombSkinConfig.NormalizeSkinId(skinId)
-	if normalizedSkinId == "" then
-		normalizedSkinId = BombSkinConfig.DefaultSkinId
+local function rewardFromItemId(rewardType: string, itemId: string, fallbackRarity: string?): SkinReward
+	local normalizedItemId = if rewardType == CrateRollConfig.RewardTypes.Finisher
+		then FinisherConfig.NormalizeFinisherId(itemId)
+		else BombSkinConfig.NormalizeSkinId(itemId)
+	if normalizedItemId == "" then
+		rewardType = CrateRollConfig.RewardTypes.BombSkin
+		normalizedItemId = BombSkinConfig.DefaultSkinId
 	end
 
-	local definition = BombSkinConfig.GetDefinition(normalizedSkinId)
+	local definition = getDefinitionForRewardType(rewardType, normalizedItemId)
 	return {
-		skinId = normalizedSkinId,
-		displayName = definition and definition.displayName or normalizedSkinId,
+		rewardType = rewardType,
+		itemId = normalizedItemId,
+		skinId = if rewardType == CrateRollConfig.RewardTypes.BombSkin then normalizedItemId else nil,
+		finisherId = if rewardType == CrateRollConfig.RewardTypes.Finisher then normalizedItemId else nil,
+		displayName = definition and definition.displayName or normalizedItemId,
 		rarity = fallbackRarity or (definition and definition.rarity) or "Common",
-		iconImage = definition and definition.iconImage or BombSkinConfig.GetIconImage(normalizedSkinId),
+		iconImage = definition and definition.iconImage,
 	}
 end
 
-local function getRandomRewardExcluding(catalogIds: { string }, rng: Random, excludedSkinId: string?): SkinReward
+local function getRewardCatalogIds(rewardType: string): { string }
+	return if rewardType == CrateRollConfig.RewardTypes.Finisher then FinisherConfig.GetCatalogIds() else BombSkinConfig.GetCatalogIds()
+end
+
+local function getRewardDefinition(rewardType: string, itemId: string)
+	return getDefinitionForRewardType(rewardType, itemId)
+end
+
+local function getRandomRewardExcluding(
+	rewardType: string,
+	catalogIds: { string },
+	rng: Random,
+	excludedItemId: string?
+): SkinReward
 	local candidates = {}
-	for _, skinId in ipairs(catalogIds) do
-		if skinId ~= excludedSkinId then
-			table.insert(candidates, skinId)
+	for _, itemId in ipairs(catalogIds) do
+		if itemId ~= excludedItemId then
+			table.insert(candidates, itemId)
 		end
 	end
 
-	local fallbackSkinId = candidates[rng:NextInteger(1, math.max(1, #candidates))] or BombSkinConfig.DefaultSkinId
-	return rewardFromSkinId(fallbackSkinId)
+	local fallbackItemId = candidates[rng:NextInteger(1, math.max(1, #candidates))] or BombSkinConfig.DefaultSkinId
+	return rewardFromItemId(rewardType, fallbackItemId)
 end
 
 local function getRandomRewardByRarities(
+	rewardType: string,
 	catalogIds: { string },
 	rng: Random,
 	rarities: { string },
-	excludedSkinId: string?
+	excludedItemId: string?
 ): SkinReward
 	local candidates = {}
 	local raritySet = {}
@@ -381,27 +440,27 @@ local function getRandomRewardByRarities(
 		raritySet[rarity] = true
 	end
 
-	for _, skinId in ipairs(catalogIds) do
-		if skinId ~= excludedSkinId then
-			local definition = BombSkinConfig.GetDefinition(skinId)
+	for _, itemId in ipairs(catalogIds) do
+		if itemId ~= excludedItemId then
+			local definition = getRewardDefinition(rewardType, itemId)
 			if definition and raritySet[definition.rarity] then
-				table.insert(candidates, skinId)
+				table.insert(candidates, itemId)
 			end
 		end
 	end
 
 	if #candidates > 0 then
-		return rewardFromSkinId(candidates[rng:NextInteger(1, #candidates)])
+		return rewardFromItemId(rewardType, candidates[rng:NextInteger(1, #candidates)])
 	end
 
-	for _, skinId in ipairs(catalogIds) do
-		if skinId ~= excludedSkinId then
-			table.insert(candidates, skinId)
+	for _, itemId in ipairs(catalogIds) do
+		if itemId ~= excludedItemId then
+			table.insert(candidates, itemId)
 		end
 	end
 
-	local fallbackSkinId = candidates[rng:NextInteger(1, math.max(1, #candidates))] or BombSkinConfig.DefaultSkinId
-	return rewardFromSkinId(fallbackSkinId)
+	local fallbackItemId = candidates[rng:NextInteger(1, math.max(1, #candidates))] or BombSkinConfig.DefaultSkinId
+	return rewardFromItemId(rewardType, fallbackItemId)
 end
 
 local function playFirstAvailableSound(names: { string }, parent: Instance?, playbackSpeed: number?)
@@ -851,38 +910,39 @@ function CrateRollController:_cancelActiveRoll()
 end
 
 function CrateRollController:_buildRewards(winningReward: SkinReward): ({ SkinReward }, number)
-	local catalogIds = BombSkinConfig.GetCatalogIds()
+	local rewardType = winningReward.rewardType or CrateRollConfig.RewardTypes.BombSkin
+	local catalogIds = getRewardCatalogIds(rewardType)
 	local rewards = table.create(CARD_COUNT)
 	local winIndex = self._rng:NextInteger(WIN_INDEX_MIN, WIN_INDEX_MAX)
 	local winRank = getRarityRank(winningReward.rarity)
-	local excludedSkinId = winningReward.skinId
+	local excludedItemId = winningReward.itemId
 
 	for index = 1, CARD_COUNT do
 		if index == winIndex then
 			rewards[index] = winningReward
 		else
-			rewards[index] = getRandomRewardExcluding(catalogIds, self._rng, excludedSkinId)
+			rewards[index] = getRandomRewardExcluding(rewardType, catalogIds, self._rng, excludedItemId)
 		end
 	end
 
 	if winIndex - 2 >= 1 then
-		rewards[winIndex - 2] = getRandomRewardByRarities(catalogIds, self._rng, {
+		rewards[winIndex - 2] = getRandomRewardByRarities(rewardType, catalogIds, self._rng, {
 			getRarityAtRank(math.max(3, winRank - 1)),
 			getRarityAtRank(math.max(3, winRank)),
-		}, excludedSkinId)
+		}, excludedItemId)
 	end
 	if winIndex - 1 >= 1 then
-		rewards[winIndex - 1] = getRandomRewardByRarities(catalogIds, self._rng, {
+		rewards[winIndex - 1] = getRandomRewardByRarities(rewardType, catalogIds, self._rng, {
 			getRarityAtRank(math.min(#RARITY_SEQUENCE, winRank + 1)),
 			getRarityAtRank(math.max(3, winRank)),
 			getRarityAtRank(math.max(3, winRank - 1)),
-		}, excludedSkinId)
+		}, excludedItemId)
 	end
 	if winIndex + 1 <= CARD_COUNT then
-		rewards[winIndex + 1] = getRandomRewardByRarities(catalogIds, self._rng, {
+		rewards[winIndex + 1] = getRandomRewardByRarities(rewardType, catalogIds, self._rng, {
 			getRarityAtRank(math.max(3, winRank)),
 			getRarityAtRank(math.max(3, winRank - 1)),
-		}, excludedSkinId)
+		}, excludedItemId)
 	end
 
 	return rewards, winIndex

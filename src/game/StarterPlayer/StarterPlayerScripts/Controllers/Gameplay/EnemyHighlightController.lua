@@ -3,6 +3,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
+local SettingsConfig = require(ReplicatedStorage.Shared.Config.SettingsConfig)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -127,6 +129,9 @@ function EnemyHighlightController:_shouldHighlight(player: Player): (boolean, Mo
 	if player == LocalPlayer or player.Parent ~= Players then
 		return false, nil, nil
 	end
+	if PlayerSettings:Get("enemyHighlightsEnabled") ~= true then
+		return false, nil, nil
+	end
 	if not isRoundActive() or LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
 		return false, nil, nil
 	end
@@ -145,7 +150,8 @@ function EnemyHighlightController:_shouldHighlight(player: Player): (boolean, Mo
 		return false, nil, nil
 	end
 
-	return true, character, getTeamColor(targetTeamName, player)
+	local overrideColor = SettingsConfig.HexToColor3(PlayerSettings:Get("enemyHighlightColorHex"))
+	return true, character, overrideColor or getTeamColor(targetTeamName, player)
 end
 
 function EnemyHighlightController:_syncPlayer(player: Player)
@@ -300,6 +306,11 @@ function EnemyHighlightController:OnStart()
 	end))
 	self:_trackConnection(RoundController.StateUpdated:Connect(function(key)
 		if key == "state" then
+			self:_syncAll()
+		end
+	end))
+	self:_trackConnection(PlayerSettings.Changed:Connect(function(id)
+		if id == "enemyHighlightsEnabled" or id == "enemyHighlightColorHex" then
 			self:_syncAll()
 		end
 	end))

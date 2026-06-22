@@ -17,6 +17,7 @@ local byModel = {}
 local killFeedRemote: RemoteEvent? = nil
 local replayService = nil
 local worldTextService = nil
+local teamKillRecorder: ((any) -> ())? = nil
 
 local function now(): number
 	return workspace:GetServerTimeNow()
@@ -292,6 +293,9 @@ local function onBotDied(record)
 		position = position,
 	}
 
+	if teamKillRecorder then
+		teamKillRecorder(payload)
+	end
 	recordReplayEvent("PlayerKilled", payload)
 	if killer and killer.teamName and victim.teamName and killer.teamName ~= victim.teamName then
 		fireKillFeed(payload)
@@ -314,6 +318,10 @@ function StudioAICombatants.GetDisplayName(userId: any): string?
 	local key = getUserIdKey(userId)
 	local record = key and byUserId[tonumber(key)]
 	return if record then record.displayName or record.name else nil
+end
+
+function StudioAICombatants.SetTeamKillRecorder(callback)
+	teamKillRecorder = if type(callback) == "function" then callback else nil
 end
 
 function StudioAICombatants.Register(record)
@@ -451,6 +459,9 @@ function StudioAICombatants.ApplyDamage(owner: any, record, damage: number, sour
 	}
 	recordReplayEvent("PlayerDamaged", payload)
 	sendWorldText(WorldTextConstants.Kinds.PlayerDamaged, payload)
+	if killed then
+		onBotDied(record)
+	end
 	return appliedDamage, killed
 end
 

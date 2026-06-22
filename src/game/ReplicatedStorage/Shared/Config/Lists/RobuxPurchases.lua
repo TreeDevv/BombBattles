@@ -10,6 +10,12 @@ local Purchases = {
 			id = 0,
 			crateId = "Premium",
 		},
+		PremiumFinisherCrateRoll = {
+			displayName = "Premium Finisher Crate Roll",
+			price = 99,
+			id = 0,
+			crateId = "FinisherPremium",
+		},
 	},
 
 	Passes = {

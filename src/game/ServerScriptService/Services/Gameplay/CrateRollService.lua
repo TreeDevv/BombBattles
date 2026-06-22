@@ -11,6 +11,8 @@ local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 
 local BombSkinService = require(script.Parent.BombSkinService)
 local DataService = require(script.Parent.DataService)
+local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
+local FinisherService = require(script.Parent.FinisherService)
 local PurchaseReceiptService = require(script.Parent.PurchaseReceiptService)
 
 local REMOTES_FOLDER_NAME = CrateRollConfig.RemotesFolderName
@@ -80,6 +82,8 @@ local function normalizeCrateTokens(value: any): { [string]: number }
 	local tokens = {
 		Basic = 0,
 		Premium = 0,
+		FinisherBasic = 0,
+		FinisherPremium = 0,
 	}
 	if typeof(value) ~= "table" then
 		return tokens
@@ -165,12 +169,15 @@ end
 
 local function getCandidatesByRarity(crateDefinition)
 	local candidatesByRarity = {}
-	for _, skinId in ipairs(BombSkinConfig.GetCatalogIds()) do
-		local definition = BombSkinConfig.GetDefinition(skinId)
+	local rewardType = crateDefinition.rewardType or CrateRollConfig.RewardTypes.BombSkin
+	local config = if rewardType == CrateRollConfig.RewardTypes.Finisher then FinisherConfig else BombSkinConfig
+
+	for _, itemId in ipairs(config.GetCatalogIds()) do
+		local definition = config.GetDefinition(itemId)
 		local rarity = definition and definition.rarity
 		if rarity and (tonumber(crateDefinition.rarityWeights[rarity]) or 0) > 0 then
 			candidatesByRarity[rarity] = candidatesByRarity[rarity] or {}
-			table.insert(candidatesByRarity[rarity], skinId)
+			table.insert(candidatesByRarity[rarity], itemId)
 		end
 	end
 	return candidatesByRarity
@@ -207,7 +214,7 @@ local function pickWeightedRarity(crateDefinition, candidatesByRarity): string?
 	return weightedRarities[#weightedRarities].rarity
 end
 
-local function pickSkinId(crateDefinition): string?
+local function pickRewardId(crateDefinition): string?
 	local candidatesByRarity = getCandidatesByRarity(crateDefinition)
 	local rarity = pickWeightedRarity(crateDefinition, candidatesByRarity)
 	local candidates = rarity and candidatesByRarity[rarity] or nil
@@ -218,6 +225,15 @@ local function pickSkinId(crateDefinition): string?
 	return candidates[rng:NextInteger(1, #candidates)]
 end
 
+local function grantCrateReward(player: Player, crateDefinition, rewardId: string, source: string): (boolean, any)
+	local rewardType = crateDefinition.rewardType or CrateRollConfig.RewardTypes.BombSkin
+	if rewardType == CrateRollConfig.RewardTypes.Finisher then
+		return FinisherService:GrantFinisher(player, rewardId, source)
+	end
+
+	return BombSkinService:GrantSkin(player, rewardId, source)
+end
+
 local function nextRollId(player: Player, crateId: string): string
 	rollSerial += 1
 	return ("%d:%d:%s:%06d"):format(player.UserId, os.time(), crateId, rollSerial)
@@ -225,8 +241,13 @@ end
 
 local function buildRewardPayload(crateDefinition, grantResult, source: string, rollId: string)
 	local definition = grantResult.definition
+	local rewardType = crateDefinition.rewardType or CrateRollConfig.RewardTypes.BombSkin
+	local itemId = grantResult.skinId or grantResult.finisherId
 	local reward = {
+		rewardType = rewardType,
+		itemId = itemId,
 		skinId = grantResult.skinId,
+		finisherId = grantResult.finisherId,
 		displayName = definition.displayName,
 		rarity = definition.rarity,
 		iconImage = definition.iconImage,
@@ -239,7 +260,10 @@ local function buildRewardPayload(crateDefinition, grantResult, source: string, 
 		crateId = crateDefinition.id,
 		crateDisplayName = crateDefinition.displayName,
 		source = source,
+		rewardType = reward.rewardType,
+		itemId = reward.itemId,
 		skinId = reward.skinId,
+		finisherId = reward.finisherId,
 		displayName = reward.displayName,
 		rarity = reward.rarity,
 		iconImage = reward.iconImage,
@@ -258,7 +282,10 @@ local function recordRollHistory(player: Player, rollPayload)
 			rollId = rollPayload.rollId,
 			crateId = rollPayload.crateId,
 			source = rollPayload.source,
+			rewardType = rollPayload.rewardType,
+			itemId = rollPayload.itemId,
 			skinId = rollPayload.skinId,
+			finisherId = rollPayload.finisherId,
 			rarity = rollPayload.rarity,
 			isNew = rollPayload.isNew,
 			copyCount = rollPayload.copyCount,
@@ -275,12 +302,13 @@ local function recordRollHistory(player: Player, rollPayload)
 end
 
 local function grantRoll(player: Player, crateDefinition, source: string): (boolean, any)
-	local skinId = pickSkinId(crateDefinition)
-	if not skinId then
-		return false, "No rollable skins are configured for " .. crateDefinition.displayName
+	local rewardId = pickRewardId(crateDefinition)
+	if not rewardId then
+		local rewardName = if crateDefinition.rewardType == CrateRollConfig.RewardTypes.Finisher then "finishers" else "skins"
+		return false, "No rollable " .. rewardName .. " are configured for " .. crateDefinition.displayName
 	end
 
-	local ok, grantResult = BombSkinService:GrantSkin(player, skinId, source)
+	local ok, grantResult = grantCrateReward(player, crateDefinition, rewardId, source)
 	if not ok then
 		return false, grantResult
 	end
@@ -561,7 +589,7 @@ function CrateRollService:AdminRoll(player: Player, rawCrateId: any): (boolean, 
 	end
 
 	local reward = resultPayload.reward
-	local rewardName = if typeof(reward) == "table" then tostring(reward.displayName or reward.skinId) else "reward"
+	local rewardName = if typeof(reward) == "table" then tostring(reward.displayName or reward.itemId or reward.skinId or reward.finisherId) else "reward"
 	return resultPayload.ok == true, resultPayload.message or resultPayload.code, resultPayload.ok == true and rewardName or nil
 end
 
@@ -593,7 +621,7 @@ function CrateRollService:GrantRewardRoll(player: Player, rawCrateId: any, sourc
 	end
 
 	local reward = resultPayload.reward
-	local rewardName = if typeof(reward) == "table" then tostring(reward.displayName or reward.skinId) else nil
+	local rewardName = if typeof(reward) == "table" then tostring(reward.displayName or reward.itemId or reward.skinId or reward.finisherId) else nil
 	return resultPayload.ok == true, resultPayload.message or resultPayload.code, rewardName
 end
 

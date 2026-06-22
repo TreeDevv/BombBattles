@@ -111,6 +111,8 @@ local function normalizeCrateTokens(value: any): { [string]: number }
 	local tokens = {
 		Basic = 0,
 		Premium = 0,
+		FinisherBasic = 0,
+		FinisherPremium = 0,
 	}
 	if typeof(value) ~= "table" then
 		return tokens

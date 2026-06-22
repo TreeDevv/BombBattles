@@ -48,6 +48,9 @@
         "Formatting": {
           "$path": "src/game/ReplicatedStorage/Shared/Presentation/Formatting"
         },
+        "Maps": {
+          "$path": "src/game/ReplicatedStorage/Shared/Maps"
+        },
         "Replay": {
           "$path": "src/game/ReplicatedStorage/Shared/Replay"
         },
@@ -85,6 +88,9 @@
         },
         "RoundMapRuntime": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundMapRuntime.lua"
+        },
+        "RoundLightingRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundLightingRuntime.lua"
         },
         "RoundPlayerStateRuntime": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundPlayerStateRuntime.lua"
@@ -179,6 +185,9 @@
         "GroupRewardService": {
           "$path": "src/game/ServerScriptService/Services/Social/GroupRewardService.lua"
         },
+        "CodeService": {
+          "$path": "src/game/ServerScriptService/Services/Social/CodeService.lua"
+        },
         "FriendRewardService": {
           "$path": "src/game/ServerScriptService/Services/Social/FriendRewardService.lua"
         },
@@ -199,6 +208,9 @@
         },
         "DataService": {
           "$path": "src/game/ServerScriptService/Services/Core/DataService"
+        },
+        "SettingsService": {
+          "$path": "src/game/ServerScriptService/Services/Core/SettingsService.lua"
         },
         "DiagnosticsService": {
           "$path": "src/game/ServerScriptService/Services/Core/DiagnosticsService.lua"
@@ -278,6 +290,9 @@
           "FinisherController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/FinisherController.lua"
           },
+          "FinisherShowcaseController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/FinisherShowcaseController.lua"
+          },
           "CameraController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/CameraController.lua"
           },
@@ -305,6 +320,9 @@
           "PlaytimeRewardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/PlaytimeRewardController.lua"
           },
+          "CodesController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/CodesController.lua"
+          },
           "DailyRewardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/DailyRewardController.lua"
           },
@@ -317,8 +335,17 @@
           "MoneyHudController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/MoneyHudController.lua"
           },
+          "StatsController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/StatsController.lua"
+          },
+          "CrosshairController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/CrosshairController.lua"
+          },
           "FrameController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/FrameController.lua"
+          },
+          "GameUiVisibilityController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GameUiVisibilityController.lua"
           },
           "ScoreboardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ScoreboardController.lua"
@@ -385,6 +412,9 @@
           },
           "TopbarButtonsController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/TopbarButtonsController.lua"
+          },
+          "SettingsController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/SettingsController.lua"
           },
           "AdminPanelController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/AdminPanelController.lua"

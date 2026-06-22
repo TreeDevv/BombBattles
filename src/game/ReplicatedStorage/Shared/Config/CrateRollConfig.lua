@@ -16,6 +16,11 @@ CrateRollConfig.Actions = table.freeze({
 	RollCash = "RollCash",
 })
 
+CrateRollConfig.RewardTypes = table.freeze({
+	BombSkin = "BombSkin",
+	Finisher = "Finisher",
+})
+
 CrateRollConfig.Rarities = table.freeze({
 	Common = "Common",
 	Rare = "Rare",
@@ -37,6 +42,7 @@ local crates = {
 		id = "Basic",
 		displayName = "Basic Crate",
 		description = "A starter crate with common and rare bomb skins.",
+		rewardType = CrateRollConfig.RewardTypes.BombSkin,
 		cashPrice = 500,
 		rarityWeights = {
 			Common = 70,
@@ -47,6 +53,7 @@ local crates = {
 		id = "Rare",
 		displayName = "Rare Crate",
 		description = "A stronger crate with better rare and epic odds.",
+		rewardType = CrateRollConfig.RewardTypes.BombSkin,
 		cashPrice = 350,
 		rarityWeights = {
 			Common = 20,
@@ -58,7 +65,31 @@ local crates = {
 		id = "Premium",
 		displayName = "Premium Crate",
 		description = "A premium crate with the best epic and legendary odds.",
+		rewardType = CrateRollConfig.RewardTypes.BombSkin,
 		productKey = "PremiumCrateRoll",
+		rarityWeights = {
+			Rare = 65,
+			Epic = 25,
+			Legendary = 10,
+		},
+	},
+	{
+		id = "FinisherBasic",
+		displayName = "Normal Finisher Crate",
+		description = "A starter crate with common and rare finishers.",
+		rewardType = CrateRollConfig.RewardTypes.Finisher,
+		cashPrice = 500,
+		rarityWeights = {
+			Common = 70,
+			Rare = 30,
+		},
+	},
+	{
+		id = "FinisherPremium",
+		displayName = "Premium Finisher Crate",
+		description = "A premium crate with better finisher odds.",
+		rewardType = CrateRollConfig.RewardTypes.Finisher,
+		productKey = "PremiumFinisherCrateRoll",
 		rarityWeights = {
 			Rare = 65,
 			Epic = 25,
@@ -85,6 +116,7 @@ for index, entry in ipairs(crates) do
 		id = entry.id,
 		displayName = entry.displayName,
 		description = entry.description,
+		rewardType = entry.rewardType or CrateRollConfig.RewardTypes.BombSkin,
 		cashPrice = entry.cashPrice,
 		productKey = entry.productKey,
 		rarityWeights = table.freeze(table.clone(entry.rarityWeights or {})),
@@ -136,6 +168,7 @@ function CrateRollConfig.GetCratesPayload()
 			id = definition.id,
 			displayName = definition.displayName,
 			description = definition.description,
+			rewardType = definition.rewardType,
 			cashPrice = definition.cashPrice,
 			productKey = definition.productKey,
 			rarityWeights = table.clone(definition.rarityWeights),

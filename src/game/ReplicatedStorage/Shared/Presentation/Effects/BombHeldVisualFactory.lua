@@ -2,6 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityVisualOverlay = require(ReplicatedStorage.Shared.Effects.AbilityVisualOverlay)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 
 local BombHeldVisualFactory = {}
@@ -11,33 +12,12 @@ local GRIP_ATTACHMENT_NAME = "BombGripAttachment"
 local CONSTRAINT_NAME = "BombGripConstraint"
 local WELD_NAME = "BombHeldWeld"
 
-local function getRightGripAttachment(character: Model?): Attachment?
-	if not character then
-		return nil
-	end
-
-	local rightHand = character:FindFirstChild("RightHand")
-	local rightHandGrip = rightHand and rightHand:FindFirstChild("RightGripAttachment")
-	if rightHandGrip and rightHandGrip:IsA("Attachment") then
-		return rightHandGrip
-	end
-
-	local rightArm = character:FindFirstChild("Right Arm")
-	local rightArmGrip = rightArm and rightArm:FindFirstChild("RightGripAttachment")
-	if rightArmGrip and rightArmGrip:IsA("Attachment") then
-		return rightArmGrip
-	end
-
-	local fallbackGrip = character:FindFirstChild("RightGripAttachment", true)
-	return if fallbackGrip and fallbackGrip:IsA("Attachment") then fallbackGrip else nil
-end
-
 local function getHeldGripOffset(): CFrame
 	return if typeof(BombConfig.HeldGripOffset) == "CFrame" then BombConfig.HeldGripOffset else CFrame.new()
 end
 
 function BombHeldVisualFactory.Create(character: Model, skinId: any, visualScale: number?)
-	local gripAttachment = getRightGripAttachment(character)
+	local gripAttachment = BombThrowOrigin.GetRightGripAttachment(character)
 	if not gripAttachment then
 		return nil
 	end

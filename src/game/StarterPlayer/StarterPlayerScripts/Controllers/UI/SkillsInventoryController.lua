@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local AudioSettings = require(ReplicatedStorage.Shared.Audio.AudioSettings)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 
@@ -174,6 +175,7 @@ local function getClickSound(): Sound
 	clickSound.Name = CLICK_SOUND_NAME
 	clickSound.SoundId = CLICK_SOUND_ID
 	clickSound.Volume = CLICK_SOUND_VOLUME
+	clickSound.SoundGroup = AudioSettings.GetGroup("UI")
 	clickSound.Parent = PlayerGui
 	return clickSound
 end

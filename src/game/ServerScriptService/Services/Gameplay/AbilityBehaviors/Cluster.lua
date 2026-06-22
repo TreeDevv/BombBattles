@@ -6,6 +6,7 @@ local AbilityBehaviorServices = require(ServerScriptService.Services.AbilityBeha
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
@@ -112,7 +113,7 @@ local function getCharacterRoot(player: Player): BasePart?
 end
 
 local function getThrowOrigin(rootPart: BasePart): Vector3
-	return rootPart.CFrame:PointToWorldSpace(BombConfig.ThrowOffset)
+	return BombThrowOrigin.GetOrigin(rootPart)
 end
 
 local function getAimDirectionFromPayload(payload: any, fallbackDirection: Vector3): Vector3

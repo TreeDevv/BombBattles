@@ -3,13 +3,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
-local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
-local ROUND_TEAM_ATTR = "RoundTeam"
 local REMOTES_FOLDER_NAME = "Remotes"
 local KILL_FEED_REMOTE_NAME = "KillFeed"
 local MAX_ENTRIES = 5
@@ -60,16 +58,6 @@ KillFeedController._respawnsDisabledTween = nil :: Tween?
 local function findTextLabel(parent: Instance?, childName: string): TextLabel?
 	local child = if parent then parent:FindFirstChild(childName) else nil
 	return if child and child:IsA("TextLabel") then child else nil
-end
-
-local function getLocalTeamName(): string?
-	local attributeTeam = LocalPlayer:GetAttribute(ROUND_TEAM_ATTR)
-	if typeof(attributeTeam) == "string" and attributeTeam ~= "" then
-		return attributeTeam
-	end
-
-	local team = LocalPlayer.Team
-	return if team then team.Name else nil
 end
 
 local function getPayloadString(payload, primaryKey: string, fallbackKey: string): string
@@ -273,18 +261,7 @@ function KillFeedController:_setRespawnsDisabledBannerVisible(visible: boolean, 
 end
 
 function KillFeedController:_updateRespawnsDisabledBanner(instant: boolean?)
-	local state = RoundController:GetState()
-	local shouldShow = false
-
-	if state and state.state == RoundStates.Active then
-		local teamName = getLocalTeamName()
-		local respawnsEnabled = state.respawnsEnabled
-		if teamName and typeof(respawnsEnabled) == "table" and respawnsEnabled[teamName] == false then
-			shouldShow = true
-		end
-	end
-
-	self:_setRespawnsDisabledBannerVisible(shouldShow, instant)
+	self:_setRespawnsDisabledBannerVisible(false, instant)
 end
 
 function KillFeedController:_captureRespawnsDisabledBanner(banner: Frame?, layer: Frame?)
@@ -578,12 +555,6 @@ function KillFeedController:OnStart()
 			end)
 		end
 	end))
-	self:_trackConnection(LocalPlayer:GetAttributeChangedSignal(ROUND_TEAM_ATTR):Connect(function()
-		self:_updateRespawnsDisabledBanner(false)
-	end))
-	self:_trackConnection(LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function()
-		self:_updateRespawnsDisabledBanner(false)
-	end))
 	self:_trackConnection(RoundController.StateReceived:Connect(function()
 		self:_updateRespawnsDisabledBanner(false)
 	end))
@@ -591,7 +562,7 @@ function KillFeedController:OnStart()
 		if key == "roundId" then
 			self:_clearEntries(true)
 		end
-		if key == "respawnsEnabled" or key == "state" or key == "roundId" then
+		if key == "state" or key == "roundId" then
 			self:_updateRespawnsDisabledBanner(key == "roundId")
 		end
 	end))

@@ -412,12 +412,14 @@ end
 
 function TopHUDController:_syncSpawnerCounts()
 	local state = RoundController:GetState()
-	local coreCounts = state and state.coreCounts
+	local teamKillCounts = state and state.teamKillCounts
 
 	for _, teamName in ipairs(TEAM_ORDER) do
 		local label = self._spawnerLabels[teamName]
 		if label then
-			local count = if typeof(coreCounts) == "table" and typeof(coreCounts[teamName]) == "number" then coreCounts[teamName] else 0
+			local count = if typeof(teamKillCounts) == "table" and typeof(teamKillCounts[teamName]) == "number"
+				then teamKillCounts[teamName]
+				else 0
 			label.Text = tostring(count)
 		end
 	end
@@ -737,7 +739,7 @@ function TopHUDController:OnStart()
 		self:_updateTopVisibility(true)
 	end))
 	self:_trackConnection(RoundController.StateUpdated:Connect(function(key)
-		if key == "coreCounts" then
+		if key == "teamKillCounts" then
 			self:_syncSpawnerCounts()
 		elseif key == "state" or key == "endsAt" or key == "roundId" then
 			self:_deferRosterSync()

@@ -19,9 +19,40 @@ local AUTHORED_ORDER = table.freeze({
 	"Lightning",
 	"Savage",
 	"SoulReaper",
-	"Tornado",
 	"Essence",
 })
+
+local rarityByFinisherId = table.freeze({
+	Atomic = "Common",
+	Confetti = "Common",
+	Evaporation = "Common",
+	Explosion = "Common",
+	Flashbang = "Rare",
+	Frostburst = "Rare",
+	Light = "Rare",
+	Lightning = "Epic",
+	Savage = "Epic",
+	SoulReaper = "Legendary",
+	Essence = "Legendary",
+})
+
+local REMOVED_FINISHER_IDS = table.freeze({
+	Tornado = true,
+})
+
+local icons = {
+	Atomic = "rbxassetid://75997776806570",
+	Confetti = "rbxassetid://79724344709822",
+	Essence = "rbxassetid://133584471585372",
+	Evaporation = "rbxassetid://101858483084552",
+	Explosion = "rbxassetid://123789047398632",
+	Flashbang = "rbxassetid://85856168079516",
+	Frostburst = "rbxassetid://96100402352291",
+	Light = "rbxassetid://101807095901714",
+	Lightning = "rbxassetid://138786882454087",
+	Savage = "rbxassetid://124053141692963",
+	SoulReaper = "rbxassetid://90311611825385",
+}
 
 local function getAliasKey(value: any): string
 	if typeof(value) ~= "string" then
@@ -43,14 +74,14 @@ local function getKnownNames(): { string }
 
 	if assetsRoot then
 		for _, finisherId in ipairs(AUTHORED_ORDER) do
-			if not seen[finisherId] and assetsRoot:FindFirstChild(finisherId) then
+			if not REMOVED_FINISHER_IDS[finisherId] and not seen[finisherId] and assetsRoot:FindFirstChild(finisherId) then
 				table.insert(names, finisherId)
 				seen[finisherId] = true
 			end
 		end
 
 		for _, child in ipairs(assetsRoot:GetChildren()) do
-			if not seen[child.Name] then
+			if not REMOVED_FINISHER_IDS[child.Name] and not seen[child.Name] then
 				table.insert(names, child.Name)
 				seen[child.Name] = true
 			end
@@ -60,7 +91,7 @@ local function getKnownNames(): { string }
 	end
 
 	for _, finisherId in ipairs(AUTHORED_ORDER) do
-		if not seen[finisherId] then
+		if not REMOVED_FINISHER_IDS[finisherId] and not seen[finisherId] then
 			table.insert(names, finisherId)
 			seen[finisherId] = true
 		end
@@ -68,6 +99,12 @@ local function getKnownNames(): { string }
 
 	return names
 end
+
+local catalogOrderByFinisherId = {}
+for index, finisherId in ipairs(AUTHORED_ORDER) do
+	catalogOrderByFinisherId[finisherId] = index
+end
+catalogOrderByFinisherId = table.freeze(catalogOrderByFinisherId)
 
 function FinisherConfig.GetAssetsRoot(): Instance?
 	return getAssetsRoot()
@@ -102,6 +139,15 @@ function FinisherConfig.GetAsset(finisherId: any): Instance?
 	return assetsRoot and assetsRoot:FindFirstChild(normalizedFinisherId) or nil
 end
 
+function FinisherConfig.GetIconImage(finisherId: any): string?
+	local normalizedFinisherId = FinisherConfig.NormalizeFinisherId(finisherId)
+	if normalizedFinisherId == "" then
+		return nil
+	end
+
+	return icons[normalizedFinisherId]
+end
+
 function FinisherConfig.GetDefinition(finisherId: any)
 	local normalizedFinisherId = FinisherConfig.NormalizeFinisherId(finisherId)
 	if normalizedFinisherId == "" then
@@ -117,6 +163,9 @@ function FinisherConfig.GetDefinition(finisherId: any)
 		displayName = normalizedFinisherId,
 		assetName = normalizedFinisherId,
 		asset = asset,
+		rarity = rarityByFinisherId[normalizedFinisherId] or "Common",
+		iconImage = FinisherConfig.GetIconImage(normalizedFinisherId),
+		catalogOrder = catalogOrderByFinisherId[normalizedFinisherId] or math.huge,
 	})
 end
 
@@ -127,5 +176,8 @@ end
 function FinisherConfig.GetCatalogIds(): { string }
 	return getKnownNames()
 end
+
+FinisherConfig.Icons = table.freeze(icons)
+FinisherConfig.Rarities = rarityByFinisherId
 
 return table.freeze(FinisherConfig)

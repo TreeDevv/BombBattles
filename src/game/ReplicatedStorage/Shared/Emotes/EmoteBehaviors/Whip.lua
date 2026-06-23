@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Whip = EmoteEffect.Create("Whip", { catalogOrder = 34 })
+local Whip = EmoteEffect.Create("Whip", { catalogOrder = 34, previewPauseTimeSeconds = 1 })
 
 
 

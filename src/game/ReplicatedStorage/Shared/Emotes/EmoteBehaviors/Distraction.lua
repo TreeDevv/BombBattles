@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Distraction = EmoteEffect.Create("Distraction", { catalogOrder = 11 })
+local Distraction = EmoteEffect.Create("Distraction", { catalogOrder = 11,previewPauseTimeSeconds = 2.5 })
 
 
 

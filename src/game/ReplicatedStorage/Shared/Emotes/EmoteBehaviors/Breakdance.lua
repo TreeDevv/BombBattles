@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Breakdance = EmoteEffect.Create("Breakdance", { catalogOrder = 3 })
+local Breakdance = EmoteEffect.Create("Breakdance", { catalogOrder = 3,previewPauseTimeSeconds = .3 })
 
 function Breakdance:Begin(_character: Model, runtime)
 	runtime:PlaySound(runtime:GetChild(runtime.vfxModule, "Breakdance"), runtime:GetRoot())

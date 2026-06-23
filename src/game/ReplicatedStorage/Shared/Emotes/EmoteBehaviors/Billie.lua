@@ -3,7 +3,7 @@ local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
 
 
-local Billie = EmoteEffect.Create("Billie", { catalogOrder = 1 })
+local Billie = EmoteEffect.Create("Billie", { catalogOrder = 1,previewPauseTimeSeconds = 1.3 })
 
 
 function Billie:Begin(_character: Model, runtime)

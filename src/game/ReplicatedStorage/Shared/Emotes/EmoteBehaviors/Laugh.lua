@@ -1,3 +1,13 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-return EmoteEffect.Create("Laugh", { catalogOrder = 19 })
+local Laugh = EmoteEffect.Create("Laugh", { catalogOrder = 19 })
+
+function Laugh:Begin(_character: Model, runtime)
+	runtime:PlaySound(runtime:GetChild(runtime.vfxModule, "LaughSound"), runtime:GetRoot())
+end
+
+function Laugh:Finish(_character: Model, runtime)
+	runtime:DestroyChild(runtime:GetRoot(), "LaughSound")
+end
+
+return Laugh

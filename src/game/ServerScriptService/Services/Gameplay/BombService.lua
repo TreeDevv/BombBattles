@@ -34,7 +34,7 @@ local HIT_REMOTE_NAME = "Hit"
 local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local KNOCKBACK_UNTIL_ATTR = "Bomb_KnockbackUntil"
-local KNOCKBACK_MOVEMENT_SUPPRESS_SECONDS = 0.25
+local KNOCKBACK_MOVEMENT_SUPPRESS_SECONDS = math.max(tonumber(BombConfig.KnockbackMovementSuppressSeconds) or 0.25, 0)
 local ATTR = BombConfig.Attributes
 local RESULT_KIND = AbilityResult.Kind
 local DEBUG_REPLAY_EVENTS = false
@@ -497,8 +497,57 @@ local function readPositiveNumber(value: any, fallback: number): number
 	return if typeof(value) == "number" and value == value and value > 0 then value else fallback
 end
 
+local function readOptionalPositiveNumber(value: any, fallback: number?): number?
+	return if typeof(value) == "number" and value == value and value > 0 then value else fallback
+end
+
 local function readNonNegativeNumber(value: any, fallback: number): number
 	return if typeof(value) == "number" and value == value and value >= 0 then value else fallback
+end
+
+local function clampMagnitude(vector: Vector3, maxMagnitude: number?): Vector3
+	if not maxMagnitude or maxMagnitude <= 0 then
+		return vector
+	end
+
+	local magnitude = vector.Magnitude
+	if magnitude <= maxMagnitude or magnitude <= 0 then
+		return vector
+	end
+
+	return vector.Unit * maxMagnitude
+end
+
+local function clampKnockbackVelocityDelta(rootPart: BasePart, velocityDelta: Vector3, explosionConfig): Vector3
+	local desiredVelocity = rootPart.AssemblyLinearVelocity + velocityDelta
+	local maxHorizontalSpeed = readOptionalPositiveNumber(
+		explosionConfig.maxKnockbackHorizontalSpeed,
+		BombConfig.KnockbackMaxHorizontalSpeed
+	)
+	local maxVerticalSpeed = readOptionalPositiveNumber(
+		explosionConfig.maxKnockbackVerticalSpeed,
+		BombConfig.KnockbackMaxVerticalSpeed
+	)
+
+	local horizontal = clampMagnitude(Vector3.new(desiredVelocity.X, 0, desiredVelocity.Z), maxHorizontalSpeed)
+	local vertical = desiredVelocity.Y
+	if maxVerticalSpeed then
+		vertical = math.min(vertical, maxVerticalSpeed)
+	end
+
+	return Vector3.new(horizontal.X, vertical, horizontal.Z) - rootPart.AssemblyLinearVelocity
+end
+
+local function clampKnockbackAngularVelocity(rootPart: BasePart, explosionConfig)
+	local maxAngularSpeed = readOptionalPositiveNumber(
+		explosionConfig.maxKnockbackAngularSpeed,
+		BombConfig.KnockbackMaxAngularSpeed
+	)
+	if not maxAngularSpeed then
+		return
+	end
+
+	rootPart.AssemblyAngularVelocity = clampMagnitude(rootPart.AssemblyAngularVelocity, maxAngularSpeed)
 end
 
 local function applyKnockback(character: Model?, rootPart: BasePart, origin: Vector3, distance: number, multiplier: number?, explosionConfig)
@@ -524,8 +573,12 @@ local function applyKnockback(character: Model?, rootPart: BasePart, origin: Vec
 		knockbackVertical * scale,
 		away.Z * knockbackHorizontal * scale
 	)
+	velocityDelta = clampKnockbackVelocityDelta(rootPart, velocityDelta, explosionConfig)
 
-	rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
+	if velocityDelta.Magnitude > 0.001 then
+		rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
+		clampKnockbackAngularVelocity(rootPart, explosionConfig)
+	end
 	markCharacterKnockback(character)
 end
 
@@ -547,6 +600,7 @@ local function resolveExplosionConfig(override)
 		nearRadius = readPositiveNumber(override.nearRadius, BombConfig.NearRadius),
 		outerRadius = readPositiveNumber(override.outerRadius, BombConfig.OuterRadius),
 		terrainRadius = readPositiveNumber(override.terrainRadius, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius),
+		maxTargetsPerExplosion = readOptionalPositiveNumber(override.maxTargetsPerExplosion, nil),
 		forceTerrainSubtract = override.forceTerrainSubtract == true,
 		playerDirectDamage = readNonNegativeNumber(override.playerDirectDamage, BombConfig.PlayerDirectDamage),
 		playerNearDamageMax = readNonNegativeNumber(override.playerNearDamageMax, BombConfig.PlayerNearDamageMax),
@@ -561,6 +615,18 @@ local function resolveExplosionConfig(override)
 		knockbackHorizontal = readNonNegativeNumber(override.knockbackHorizontal, BombConfig.KnockbackHorizontal),
 		knockbackVertical = readNonNegativeNumber(override.knockbackVertical, BombConfig.KnockbackVertical),
 		knockbackMinScale = readNonNegativeNumber(override.knockbackMinScale, BombConfig.KnockbackMinScale),
+		maxKnockbackHorizontalSpeed = readOptionalPositiveNumber(
+			override.maxKnockbackHorizontalSpeed,
+			BombConfig.KnockbackMaxHorizontalSpeed
+		),
+		maxKnockbackVerticalSpeed = readOptionalPositiveNumber(
+			override.maxKnockbackVerticalSpeed,
+			BombConfig.KnockbackMaxVerticalSpeed
+		),
+		maxKnockbackAngularSpeed = readOptionalPositiveNumber(
+			override.maxKnockbackAngularSpeed,
+			BombConfig.KnockbackMaxAngularSpeed
+		),
 		explosionVisualScale = readPositiveNumber(override.explosionVisualScale, 1),
 		chargeScale = readPositiveNumber(override.chargeScale, 1),
 	}
@@ -584,6 +650,7 @@ local function applyExplosionResult(config, result)
 	config.nearRadius = readPositiveNumber(result.nearRadius, config.nearRadius)
 	config.outerRadius = readPositiveNumber(result.outerRadius, config.outerRadius)
 	config.terrainRadius = readPositiveNumber(result.terrainRadius, config.terrainRadius)
+	config.maxTargetsPerExplosion = readOptionalPositiveNumber(result.maxTargetsPerExplosion, config.maxTargetsPerExplosion)
 	if typeof(result.forceTerrainSubtract) == "boolean" then
 		config.forceTerrainSubtract = result.forceTerrainSubtract
 	end
@@ -600,6 +667,18 @@ local function applyExplosionResult(config, result)
 	config.knockbackHorizontal = readNonNegativeNumber(result.knockbackHorizontal, config.knockbackHorizontal)
 	config.knockbackVertical = readNonNegativeNumber(result.knockbackVertical, config.knockbackVertical)
 	config.knockbackMinScale = readNonNegativeNumber(result.knockbackMinScale, config.knockbackMinScale)
+	config.maxKnockbackHorizontalSpeed = readOptionalPositiveNumber(
+		result.maxKnockbackHorizontalSpeed,
+		config.maxKnockbackHorizontalSpeed
+	)
+	config.maxKnockbackVerticalSpeed = readOptionalPositiveNumber(
+		result.maxKnockbackVerticalSpeed,
+		config.maxKnockbackVerticalSpeed
+	)
+	config.maxKnockbackAngularSpeed = readOptionalPositiveNumber(
+		result.maxKnockbackAngularSpeed,
+		config.maxKnockbackAngularSpeed
+	)
 	config.explosionVisualScale = readPositiveNumber(result.explosionVisualScale, config.explosionVisualScale)
 	config.chargeScale = readPositiveNumber(result.chargeScale, config.chargeScale)
 	return config
@@ -967,6 +1046,7 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 			timestamp = impactTimestamp,
 		}, {
 			forceSubtract = explosionConfig.forceTerrainSubtract == true,
+			maxTargetsPerExplosion = explosionConfig.maxTargetsPerExplosion,
 		})
 		RuntimeProfiler.End("Server/BombService/ExplosionDestruction", destructionToken)
 		if isPlayerOwner(owner) then
@@ -999,6 +1079,7 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		explosionVisualScale = explosionConfig.explosionVisualScale,
 		chargeScale = explosionConfig.chargeScale,
 		hitUserIds = hitUserIds,
+		debrisPayloads = if #debrisPayloads > 0 then debrisPayloads else nil,
 	})
 	sendWorldText("BombExploded", owner, position, {
 		projectileId = projectileId,
@@ -1010,12 +1091,6 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		bombSkinId = bombSkinId,
 		chargeScale = explosionConfig.chargeScale,
 	})
-	if #debrisPayloads > 0 then
-		fireEffect("TerrainDebris", {
-			payloads = debrisPayloads,
-		})
-	end
-
 	local ownerIdentity = StudioAICombatants.GetOwnerIdentity(owner)
 	recordReplayEvent("BombExploded", {
 		timestamp = impactTimestamp,

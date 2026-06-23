@@ -535,6 +535,11 @@ local function bindExistingCratePrompts()
 end
 
 local function handlePurchaseProcessed(player: Player, productKey: string, context)
+	local productConfig = getProductConfig(productKey)
+	if productConfig and tonumber(productConfig.crateTokens) ~= nil then
+		return
+	end
+
 	local crateDefinition = CrateRollConfig.GetCrateForProductKey(productKey)
 	if not crateDefinition then
 		return

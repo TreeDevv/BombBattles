@@ -134,13 +134,14 @@ local function createProjectileId(prefix: string, player: Player, index: number?
 	)
 end
 
-local function buildScaledExplosionConfig(scale: number)
+local function buildScaledExplosionConfig(definition: AbilityDefinition, scale: number)
 	scale = math.max(scale, 0)
 	return {
 		innerRadius = BombConfig.InnerRadius * scale,
 		nearRadius = BombConfig.NearRadius * scale,
 		outerRadius = BombConfig.OuterRadius * scale,
 		terrainRadius = (BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius) * scale,
+		maxTargetsPerExplosion = getDefinitionNumber(definition, "miniMaxTargetsPerExplosion", 24),
 		playerDirectDamage = BombConfig.PlayerDirectDamage * scale,
 		playerNearDamageMax = BombConfig.PlayerNearDamageMax * scale,
 		playerNearDamageMin = BombConfig.PlayerNearDamageMin * scale,
@@ -343,7 +344,7 @@ local function spawnMiniBombs(context: ServerHookContext, record: ClusterRecord,
 					playerContactExplodes = false,
 					playerContactImpacts = false,
 				},
-				explosion = buildScaledExplosionConfig(powerScale),
+				explosion = buildScaledExplosionConfig(definition, powerScale),
 				visuals = {
 					visualScale = visualScale,
 				},

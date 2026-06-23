@@ -260,20 +260,6 @@ local function addBlock(blocks, minCorner: Vector3, maxCorner: Vector3)
 	})
 end
 
-local function getSubdivisionSteps(axisHalfSize: number, axisSize: number, minSize: number)
-	if axisSize <= minSize then
-		return {
-			{ offset = 0, halfSize = axisHalfSize },
-		}
-	end
-
-	local childHalfSize = axisHalfSize * 0.5
-	return {
-		{ offset = -childHalfSize, halfSize = childHalfSize },
-		{ offset = childHalfSize, halfSize = childHalfSize },
-	}
-end
-
 local function subdivideAABB(
 	aabbCenter: Vector3,
 	halfSize: Vector3,
@@ -284,16 +270,16 @@ local function subdivideAABB(
 	targetCFrame: CFrame,
 	terrainConfig,
 	sourceInfo,
-	options
+	options,
+	remainingBlocks,
+	removedBlocks
 )
-	local remainingBlocks = {}
-	local removedBlocks = {}
 	local fullSize = halfSize * 2
 	local isTerminal = fullSize.X <= minSize and fullSize.Y <= minSize and fullSize.Z <= minSize
 
 	if Utils.isAABBOutsideSphere(aabbCenter, halfSize, sphereCenter, sphereRadius) then
 		table.insert(remainingBlocks, { center = aabbCenter, size = fullSize })
-		return remainingBlocks, removedBlocks
+		return
 	end
 
 	if isTerminal then
@@ -305,44 +291,42 @@ local function subdivideAABB(
 		else
 			table.insert(remainingBlocks, { center = aabbCenter, size = fullSize })
 		end
-		return remainingBlocks, removedBlocks
+		return
 	end
 
-	local xSteps = getSubdivisionSteps(halfSize.X, fullSize.X, minSize)
-	local ySteps = getSubdivisionSteps(halfSize.Y, fullSize.Y, minSize)
-	local zSteps = getSubdivisionSteps(halfSize.Z, fullSize.Z, minSize)
+	local xCount = if fullSize.X <= minSize then 1 else 2
+	local yCount = if fullSize.Y <= minSize then 1 else 2
+	local zCount = if fullSize.Z <= minSize then 1 else 2
+	local childHalfX = if xCount == 1 then halfSize.X else halfSize.X * 0.5
+	local childHalfY = if yCount == 1 then halfSize.Y else halfSize.Y * 0.5
+	local childHalfZ = if zCount == 1 then halfSize.Z else halfSize.Z * 0.5
 
-	for _, x in ipairs(xSteps) do
-		for _, y in ipairs(ySteps) do
-			for _, z in ipairs(zSteps) do
-				local offset = Vector3.new(x.offset, y.offset, z.offset)
+	for xIndex = 1, xCount do
+		local xOffset = if xCount == 1 then 0 else if xIndex == 1 then -childHalfX else childHalfX
+		for yIndex = 1, yCount do
+			local yOffset = if yCount == 1 then 0 else if yIndex == 1 then -childHalfY else childHalfY
+			for zIndex = 1, zCount do
+				local zOffset = if zCount == 1 then 0 else if zIndex == 1 then -childHalfZ else childHalfZ
+				local offset = Vector3.new(xOffset, yOffset, zOffset)
 				local newCenter = aabbCenter + offset
-				local newHalf = Vector3.new(x.halfSize, y.halfSize, z.halfSize)
-				local subRemaining, subRemoved =
-					subdivideAABB(
-						newCenter,
-						newHalf,
-						sphereCenter,
-						sphereCenterWorld,
-						sphereRadius,
-						minSize,
-						targetCFrame,
-						terrainConfig,
-						sourceInfo,
-						options
-					)
-
-				for _, block in ipairs(subRemaining) do
-					table.insert(remainingBlocks, block)
-				end
-				for _, block in ipairs(subRemoved) do
-					table.insert(removedBlocks, block)
-				end
+				local newHalf = Vector3.new(childHalfX, childHalfY, childHalfZ)
+				subdivideAABB(
+					newCenter,
+					newHalf,
+					sphereCenter,
+					sphereCenterWorld,
+					sphereRadius,
+					minSize,
+					targetCFrame,
+					terrainConfig,
+					sourceInfo,
+					options,
+					remainingBlocks,
+					removedBlocks
+				)
 			end
 		end
 	end
-
-	return remainingBlocks, removedBlocks
 end
 
 local function partitionTargetBlocks(targetSize: Vector3, localSphereCenter: Vector3, sphereRadius: number)
@@ -595,26 +579,21 @@ function VoxDestruct.octreeMeshSubtraction(
 		end
 	else
 		local subdivideToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/SubdivideImpact")
-		local impactRemaining, impactRemoved =
-			subdivideAABB(
-				impactBlock.center,
-				impactBlock.size * 0.5,
-				localSphereCenter,
-				sphereCenterWorld,
-				effectiveSphereRadius,
-				minSize,
-				targetCFrame,
-				terrainConfig,
-				sourceInfo,
-				options
-			)
+		subdivideAABB(
+			impactBlock.center,
+			impactBlock.size * 0.5,
+			localSphereCenter,
+			sphereCenterWorld,
+			effectiveSphereRadius,
+			minSize,
+			targetCFrame,
+			terrainConfig,
+			sourceInfo,
+			options,
+			remainingBlocks,
+			removedBlocks
+		)
 		RuntimeProfiler.End("Server/Destruction/Voxelizer/SubdivideImpact", subdivideToken)
-		for _, block in ipairs(impactRemaining) do
-			table.insert(remainingBlocks, block)
-		end
-		for _, block in ipairs(impactRemoved) do
-			table.insert(removedBlocks, block)
-		end
 	end
 
 	RuntimeProfiler.Count("Server/Destruction/Voxelizer/OutsideBlocks", #outsideBlocks)
@@ -665,9 +644,13 @@ function VoxDestruct.octreeMeshSubtraction(
 	RuntimeProfiler.End("Server/Destruction/Voxelizer/BuildFinalVoxels", uniformToken)
 	RuntimeProfiler.Count("Server/Destruction/Voxelizer/FinalVoxelsBeforeCleanup", #finalVoxels)
 
+	local shouldMergeCleanup = finalVoxelSize ~= nil and finalVoxelSize > minSize
 	local cleanupToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/CleanupVoxels")
-	finalVoxels = Cleanup.cleanupVoxels(finalVoxels, 0.5)
+	finalVoxels = Cleanup.cleanupVoxels(finalVoxels, 0.5, shouldMergeCleanup)
 	RuntimeProfiler.End("Server/Destruction/Voxelizer/CleanupVoxels", cleanupToken)
+	if not shouldMergeCleanup then
+		RuntimeProfiler.Count("Server/Destruction/Voxelizer/CleanupMergeSkipped")
+	end
 	RuntimeProfiler.Count("Server/Destruction/Voxelizer/FinalVoxelsAfterCleanup", #finalVoxels)
 
 	local createToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/CreateVoxelParts")

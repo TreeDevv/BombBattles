@@ -227,13 +227,7 @@ function RuntimeProfiler.Begin(label: string): number?
 	return os.clock()
 end
 
-function RuntimeProfiler.End(label: string, token: number?)
-	if not token then
-		return
-	end
-
-	local endedAt = os.clock()
-	local durationMs = (endedAt - token) * 1000
+local function recordSpanDuration(label: string, durationMs: number, startedAtSeconds: number?)
 	local aggregate = getSpan(label)
 	aggregate.calls += 1
 	aggregate.totalMs += durationMs
@@ -248,17 +242,38 @@ function RuntimeProfiler.End(label: string, token: number?)
 	if isTraceMode() and traceLimit > 0 then
 		table.insert(traces, {
 			label = label,
-			startedAt = token,
+			startedAt = startedAtSeconds or os.clock(),
 			durationMs = durationMs,
 		})
 		if #traces > traceLimit then
 			table.remove(traces, 1)
 		end
 	end
+end
+
+function RuntimeProfiler.End(label: string, token: number?)
+	if not token then
+		return
+	end
+
+	local endedAt = os.clock()
+	local durationMs = (endedAt - token) * 1000
+	recordSpanDuration(label, durationMs, token)
 
 	if microProfilerMarkers then
 		debug.profileend()
 	end
+end
+
+function RuntimeProfiler.RecordDurationMs(label: string, durationMs: number)
+	if not enabled or not isTimingMode() then
+		return
+	end
+	if typeof(label) ~= "string" or label == "" or typeof(durationMs) ~= "number" or durationMs < 0 then
+		return
+	end
+
+	recordSpanDuration(label, durationMs, os.clock() - durationMs / 1000)
 end
 
 function RuntimeProfiler.Profile(label: string, callback, ...)

@@ -1,3 +1,4 @@
+local Lighting = game:GetService("Lighting")
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 
@@ -73,7 +74,7 @@ local function getBlackOverlay(): Frame?
 		return nil
 	end
 
-	screenGui.DisplayOrder = math.max(screenGui.DisplayOrder, 1000)
+	screenGui.DisplayOrder = math.max(screenGui.DisplayOrder, 10000)
 
 	local existing = screenGui:FindFirstChild("BlackFade")
 	if existing and existing:IsA("Frame") then
@@ -88,7 +89,7 @@ local function getBlackOverlay(): Frame?
 	overlay.BorderSizePixel = 0
 	overlay.Position = UDim2.fromScale(0, 0)
 	overlay.Size = UDim2.fromScale(1, 1)
-	overlay.ZIndex = 1000
+	overlay.ZIndex = 10000
 	overlay.Visible = false
 	overlay.Parent = screenGui
 
@@ -255,6 +256,25 @@ function ScreenEffects.FlashColor(color: Color3?, duration: number, initialTrans
 		})
 		activeTween:Play()
 	end)
+end
+
+function ScreenEffects.ImpactFrames(frames: number?, color: Color3?)
+	local resolvedFrames = math.max(math.floor(tonumber(frames) or 1), 1)
+	local correction = Instance.new("ColorCorrectionEffect")
+	correction.TintColor = if typeof(color) == "Color3" then color else Color3.new(1, 1, 1)
+	correction.Contrast = 0
+	correction.Saturation = -1
+	correction.Parent = Lighting
+
+	for _ = 1, resolvedFrames do
+		correction.Contrast = 100
+		task.wait(1 / 50)
+
+		correction.Contrast = -100
+		task.wait(1 / 25)
+	end
+
+	correction:Destroy()
 end
 
 function ScreenEffects.FlashDark(duration: number, initialTransparency: number?)

@@ -11,6 +11,7 @@ local MAX_ANIMATION_LINEAR_SPEED = 220
 local MAX_REPLAY_POSE_JOINTS = 32
 local MIN_REPLAY_CAMERA_FOV = 20
 local MAX_REPLAY_CAMERA_FOV = 120
+local CAMERA_SPECTATING_ATTR = "Camera_Spectating"
 
 local function isFiniteNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
@@ -95,6 +96,9 @@ end
 local function getLocalCameraSnapshot(sampleTime: number)
 	local camera = workspace.CurrentCamera
 	if not camera then
+		return nil
+	end
+	if LocalPlayer:GetAttribute(CAMERA_SPECTATING_ATTR) == true or camera.CameraType == Enum.CameraType.Scriptable then
 		return nil
 	end
 

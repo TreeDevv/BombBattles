@@ -9,14 +9,9 @@ local random = Random.new()
 
 local TEXT_WHIPS = table.freeze({
 	kill = table.freeze({ "ELIMINATED", "KO" }),
-	explosion = table.freeze({ "POW", "BAM", "WHAM", "KAPOW", "BANG" }),
 })
 
 local STYLES = table.freeze({
-	explosion = table.freeze({
-		lifetime = 1,
-		offset = Vector3.new(0, 1.5, 0),
-	}),
 	elimination = table.freeze({
 		lifetime = 1.2,
 		offset = Vector3.new(0, 2.5, 0),
@@ -69,10 +64,7 @@ local function buildDescriptor(event, options)
 
 	local templateName = nil
 	local style = nil
-	if kind == KINDS.BombExploded then
-		templateName = chooseVariant(TEXT_WHIPS.explosion)
-		style = STYLES.explosion
-	elseif kind == KINDS.PlayerKilled then
+	if kind == KINDS.PlayerKilled then
 		templateName = chooseVariant(TEXT_WHIPS.kill)
 		style = STYLES.elimination
 	else

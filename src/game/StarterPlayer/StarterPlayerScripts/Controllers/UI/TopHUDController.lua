@@ -27,6 +27,7 @@ local TOP_SLIDE_TWEEN = TweenInfo.new(0.45, Enum.EasingStyle.Quint, Enum.EasingD
 local RESPAWN_SPIN_TWEEN = TweenInfo.new(8, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut, -1)
 local NUKE_SIZE_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local NUKE_FADE_TWEEN = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local FRAME_UPDATE_INTERVAL = 0.1
 
 type Slot = {
 	root: Frame,
@@ -66,6 +67,7 @@ TopHUDController._nukeShown = false
 TopHUDController._nukeTweens = {} :: { Tween }
 TopHUDController._nukeFaders = {} :: { [Instance]: { property: string, value: number } }
 TopHUDController._respawnSpinTweens = {} :: { Tween }
+TopHUDController._frameUpdateAccumulator = 0
 
 local function findChild(parent: Instance?, childName: string): Instance?
 	return if parent then parent:FindFirstChild(childName) else nil
@@ -713,6 +715,7 @@ end
 function TopHUDController:OnStart()
 	self:_disconnectAll()
 	self._replayTopbarActive = isReplayTopbarVisible(PlayerGui:FindFirstChild("HUD"))
+	self._frameUpdateAccumulator = 0
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		self:_trackPlayer(player)
@@ -747,7 +750,12 @@ function TopHUDController:OnStart()
 			self:_updateTopVisibility(false)
 		end
 	end))
-	self:_trackConnection(RunService.RenderStepped:Connect(function()
+	self:_trackConnection(RunService.RenderStepped:Connect(function(deltaTime)
+		self._frameUpdateAccumulator += deltaTime
+		if self._frameUpdateAccumulator < FRAME_UPDATE_INTERVAL then
+			return
+		end
+		self._frameUpdateAccumulator = 0
 		self:_updateFrame()
 	end))
 	self:_bindReplaySignals()

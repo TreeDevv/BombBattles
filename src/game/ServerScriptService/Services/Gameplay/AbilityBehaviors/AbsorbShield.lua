@@ -307,12 +307,13 @@ local function getActiveRecord(player: Player, currentTime: number): ActiveRecor
 	return record
 end
 
-local function buildExplosionConfig(scale: number)
+local function buildExplosionConfig(definition: AbilityDefinition?, scale: number)
 	return {
 		innerRadius = BombConfig.InnerRadius * scale,
 		nearRadius = BombConfig.NearRadius * scale,
 		outerRadius = BombConfig.OuterRadius * scale,
 		terrainRadius = (BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius) * scale,
+		maxTargetsPerExplosion = getDefinitionNumber(definition, "empoweredMaxTargetsPerExplosion", 72),
 		playerDirectDamage = BombConfig.PlayerDirectDamage * scale,
 		playerNearDamageMax = BombConfig.PlayerNearDamageMax * scale,
 		playerNearDamageMin = BombConfig.PlayerNearDamageMin * scale,
@@ -472,7 +473,7 @@ function AbsorbShield.OnBeforeProjectileLaunch(context: ServerHookContext): Abil
 		physics = {
 			radius = math.max(baseRadius * scale, 0.1),
 		},
-		explosion = buildExplosionConfig(scale),
+			explosion = buildExplosionConfig(context.definition, scale),
 		visuals = {
 			visualScale = BombConfig.ProjectileVisualScale * scale,
 			chargeScale = scale,

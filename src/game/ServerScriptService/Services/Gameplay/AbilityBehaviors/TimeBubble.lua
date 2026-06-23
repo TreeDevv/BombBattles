@@ -260,6 +260,9 @@ function TimeBubble.OnProjectileStep(context: ServerHookContext): AbilityHookRes
 	if not (typeof(payload) == "table" and typeof(payload.projectileId) == "string") then
 		return AbilityResult.Continue()
 	end
+	if payload.owner == context.player then
+		return AbilityResult.Continue()
+	end
 
 	local projectileId = payload.projectileId
 	local capture = CAPTURED_PROJECTILES[projectileId]

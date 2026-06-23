@@ -89,7 +89,7 @@ Notify.Defaults = {
 
 local screenGui: ScreenGui? = nil
 local container: Frame? = nil
-local containerUpdateConnection: RBXScriptConnection? = nil
+local containerUpdateConnections = {} :: { RBXScriptConnection }
 local expiryConnection: RBXScriptConnection? = nil
 local visibleToasts = {} :: { ToastRecord }
 local queuedToasts = {} :: { ToastRecord }
@@ -243,26 +243,32 @@ local function normalizePayload(text: any, opts: any): NotifyPayload
 	}
 end
 
-local function getTopHudBottom(playerGui: PlayerGui): number?
+local function findTopHud(playerGui: PlayerGui): GuiObject?
 	local hud = playerGui:FindFirstChild("HUD")
 	if not hud then
 		return nil
 	end
 
-	local bestBottom = nil
-	for _, descendant in ipairs(hud:GetDescendants()) do
-		if descendant:IsA("GuiObject") and descendant.Visible then
-			local size = descendant.AbsoluteSize
-			if size.X > 0 and size.Y > 0 then
-				local bottom = descendant.AbsolutePosition.Y + size.Y
-				if bottom <= FALLBACK_TOP_PADDING + 48 and (not bestBottom or bottom > bestBottom) then
-					bestBottom = bottom
-				end
-			end
-		end
+	if hud:IsA("LayerCollector") and not hud.Enabled then
+		return nil
 	end
 
-	return bestBottom
+	local top = hud:FindFirstChild("Top")
+	return if top and top:IsA("GuiObject") then top else nil
+end
+
+local function getTopHudBottom(playerGui: PlayerGui): number?
+	local top = findTopHud(playerGui)
+	if not (top and top.Visible) then
+		return nil
+	end
+
+	local size = top.AbsoluteSize
+	if size.X <= 0 or size.Y <= 0 then
+		return nil
+	end
+
+	return top.AbsolutePosition.Y + size.Y
 end
 
 local function updateContainerPosition(playerGui: PlayerGui)
@@ -274,23 +280,76 @@ local function updateContainerPosition(playerGui: PlayerGui)
 	container.Position = UDim2.new(0.5, 0, 0, topPadding)
 end
 
-local function bindContainerPositionUpdates(playerGui: PlayerGui)
-	updateContainerPosition(playerGui)
-	if containerUpdateConnection then
-		containerUpdateConnection:Disconnect()
+local function disconnectContainerPositionUpdates()
+	for _, connection in ipairs(containerUpdateConnections) do
+		connection:Disconnect()
 	end
+	table.clear(containerUpdateConnections)
+end
 
-	containerUpdateConnection = RunService.RenderStepped:Connect(function()
+local function trackContainerPositionConnection(connection: RBXScriptConnection)
+	table.insert(containerUpdateConnections, connection)
+end
+
+local function bindContainerPositionUpdates(playerGui: PlayerGui)
+	disconnectContainerPositionUpdates()
+	updateContainerPosition(playerGui)
+
+	local function updateOrDisconnect()
 		if not (container and container.Parent) then
-			if containerUpdateConnection then
-				containerUpdateConnection:Disconnect()
-				containerUpdateConnection = nil
-			end
+			disconnectContainerPositionUpdates()
 			return
 		end
 
 		updateContainerPosition(playerGui)
-	end)
+	end
+
+	local function rebind()
+		if not (container and container.Parent) then
+			disconnectContainerPositionUpdates()
+			return
+		end
+
+		bindContainerPositionUpdates(playerGui)
+	end
+
+	trackContainerPositionConnection(playerGui.ChildAdded:Connect(function(child)
+		if child.Name == "HUD" then
+			task.defer(rebind)
+		end
+	end))
+
+	trackContainerPositionConnection(playerGui.ChildRemoved:Connect(function(child)
+		if child.Name == "HUD" then
+			task.defer(rebind)
+		end
+	end))
+
+	local hud = playerGui:FindFirstChild("HUD")
+	if hud then
+		trackContainerPositionConnection(hud.ChildAdded:Connect(function(child)
+			if child.Name == "Top" then
+				task.defer(rebind)
+			end
+		end))
+
+		trackContainerPositionConnection(hud.ChildRemoved:Connect(function(child)
+			if child.Name == "Top" then
+				task.defer(rebind)
+			end
+		end))
+	end
+
+	local top = findTopHud(playerGui)
+	if top then
+		trackContainerPositionConnection(top:GetPropertyChangedSignal("Visible"):Connect(updateOrDisconnect))
+		trackContainerPositionConnection(top:GetPropertyChangedSignal("Position"):Connect(updateOrDisconnect))
+		trackContainerPositionConnection(top:GetPropertyChangedSignal("AbsolutePosition"):Connect(updateOrDisconnect))
+		trackContainerPositionConnection(top:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateOrDisconnect))
+		trackContainerPositionConnection(top.AncestryChanged:Connect(function()
+			task.defer(rebind)
+		end))
+	end
 end
 
 local function ensureGui(): Frame?

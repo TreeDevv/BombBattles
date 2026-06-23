@@ -2,13 +2,21 @@ local Mesh = require(script.Parent.Mesh)
 
 local Cleanup = {}
 
-function Cleanup.cleanupVoxels(voxels, minVolume: number)
-	local cleaned = {}
+function Cleanup.cleanupVoxels(voxels, minVolume: number, shouldMerge: boolean?)
+	local cleaned = table.create(#voxels)
+	local removedAny = false
+
 	for _, voxel in ipairs(voxels) do
 		local volume = voxel.size.X * voxel.size.Y * voxel.size.Z
 		if volume >= minVolume then
 			table.insert(cleaned, voxel)
+		else
+			removedAny = true
 		end
+	end
+
+	if shouldMerge == false then
+		return if removedAny then cleaned else voxels
 	end
 
 	return Mesh.greedyMergeBlocks(cleaned)

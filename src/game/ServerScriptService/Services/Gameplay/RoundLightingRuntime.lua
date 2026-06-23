@@ -1,4 +1,7 @@
 local Lighting = game:GetService("Lighting")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 
 local RoundLightingRuntime = {}
 
@@ -31,19 +34,24 @@ end
 
 local function clearManagedLighting()
 	snapshotDefaultLighting()
+	local token = RuntimeProfiler.Begin("Server/Round/Map/ClearLighting")
 	for _, child in ipairs(Lighting:GetChildren()) do
 		if isManagedLightingChild(child) then
 			child:Destroy()
 		end
 	end
+	RuntimeProfiler.End("Server/Round/Map/ClearLighting", token)
 end
 
 local function cloneLightingChildren(sourceFolder: Instance, attributeName: string)
+	local token = RuntimeProfiler.Begin("Server/Round/Map/CloneLightingChildren")
 	for _, child in ipairs(sourceFolder:GetChildren()) do
 		local clone = child:Clone()
 		clone:SetAttribute(attributeName, true)
 		clone.Parent = Lighting
+		RuntimeProfiler.Count("Server/Round/Map/LightingChildrenCloned")
 	end
+	RuntimeProfiler.End("Server/Round/Map/CloneLightingChildren", token)
 end
 
 function RoundLightingRuntime.Initialize()

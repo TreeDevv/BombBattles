@@ -68,16 +68,18 @@ return table.freeze({
 	FacingResponsiveness = 24,
 	FaceCameraDirection = true,
 	DisableHumanoidAutoRotate = true,
+	AirFacingApplyWhileKnockback = false,
 	AirUprightStabilizationEnabled = true,
 	AirUprightMaxTiltDegrees = 2,
 	AirUprightAngularVelocityDamping = 0,
-	AirUprightApplyWhileKnockback = true,
+	AirUprightApplyWhileKnockback = false,
 	SnapGroundStop = true,
 
 	AirMoveSpeed = 18,
 	AirMoveResponsiveness = 10,
 	AirStopResponsiveness = 14,
 	AirControl = table.freeze({
+		ApplyWhileKnockback = false,
 		RisingGravityScale = 0.82,
 		ApexGravityScale = 0.68,
 		FallingGravityScale = 1,
@@ -125,7 +127,8 @@ return table.freeze({
 			Knockback = table.freeze({
 				MinAirTime = 0.2,
 				ModifierDuration = 0.25,
-				SteeringScale = 1.6,
+				SteeringScale = 1,
+				OverspeedBrakeScale = 0.75,
 			}),
 			JumpPad = table.freeze({
 				MinAirTime = 0.24,

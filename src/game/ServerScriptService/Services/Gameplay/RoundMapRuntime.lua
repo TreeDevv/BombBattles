@@ -12,6 +12,7 @@ local DestructionService = require(script.Parent.DestructionService)
 local RoundMapRuntime = {}
 
 local PREPARED_MAPS_FOLDER_NAME = "_PreparedRoundMaps"
+local ACTIVE_MAP_WORLD_OFFSET_ATTR = "RoundMapWorldOffset"
 
 RoundMapRuntime.MapPrepFrameBudgetSeconds = 0.003
 RoundMapRuntime.MapPrepSelectedWaitSeconds = 0.4
@@ -22,17 +23,110 @@ local preparingMapClones: { [string]: boolean } = {}
 local mapPreparationGeneration = 0
 local activeMapScriptCleanup: (() -> ())? = nil
 
+local function recordInstanceStats(prefix: string, root: Instance?)
+	if not RuntimeProfiler.IsEnabled() or not root then
+		return
+	end
+
+	local descendants = root:GetDescendants()
+	local baseParts = 0
+	local unanchoredBaseParts = 0
+	local meshParts = 0
+	local particleEmitters = 0
+	local scripts = 0
+	for _, descendant in ipairs(descendants) do
+		if descendant:IsA("BasePart") then
+			baseParts += 1
+			if not descendant.Anchored then
+				unanchoredBaseParts += 1
+			end
+			if descendant:IsA("MeshPart") then
+				meshParts += 1
+			end
+		elseif descendant:IsA("ParticleEmitter") then
+			particleEmitters += 1
+		elseif descendant:IsA("Script") or descendant:IsA("LocalScript") or descendant:IsA("ModuleScript") then
+			scripts += 1
+		end
+	end
+
+	RuntimeProfiler.Gauge(prefix .. "/Descendants", #descendants)
+	RuntimeProfiler.Gauge(prefix .. "/BaseParts", baseParts)
+	RuntimeProfiler.Gauge(prefix .. "/UnanchoredBaseParts", unanchoredBaseParts)
+	RuntimeProfiler.Gauge(prefix .. "/MeshParts", meshParts)
+	RuntimeProfiler.Gauge(prefix .. "/ParticleEmitters", particleEmitters)
+	RuntimeProfiler.Gauge(prefix .. "/Scripts", scripts)
+end
+
+local function recordPreparationGauges()
+	if not RuntimeProfiler.IsEnabled() then
+		return
+	end
+
+	local preparedCount = 0
+	for _, clone in pairs(preparedMapClones) do
+		if clone and clone.Parent then
+			preparedCount += 1
+		end
+	end
+	local preparingCount = 0
+	for _ in pairs(preparingMapClones) do
+		preparingCount += 1
+	end
+	local queuedCount = 0
+	for _ in pairs(RoundMapRuntime.QueuedMapClones) do
+		queuedCount += 1
+	end
+
+	RuntimeProfiler.Gauge("Server/Round/Map/PreparedCloneCount", preparedCount)
+	RuntimeProfiler.Gauge("Server/Round/Map/PreparingCloneCount", preparingCount)
+	RuntimeProfiler.Gauge("Server/Round/Map/QueuedCloneCount", queuedCount)
+end
+
+local function recordWallDuration(label: string, startedAt: number)
+	RuntimeProfiler.RecordDurationMs(label, (os.clock() - startedAt) * 1000)
+end
+
+local function getActiveMapWorldOffset(): Vector3
+	local offset = RoundConfig.ActiveMapWorldOffset
+	if typeof(offset) == "Vector3" then
+		return offset
+	end
+	return Vector3.zero
+end
+
+local function placeActiveMap(map: Model)
+	local targetOffset = getActiveMapWorldOffset()
+	local appliedOffset = map:GetAttribute(ACTIVE_MAP_WORLD_OFFSET_ATTR)
+	local currentOffset = if typeof(appliedOffset) == "Vector3" then appliedOffset else Vector3.zero
+	local delta = targetOffset - currentOffset
+	if delta.Magnitude <= 0.001 then
+		return
+	end
+
+	map:PivotTo(map:GetPivot() + delta)
+	map:SetAttribute(ACTIVE_MAP_WORLD_OFFSET_ATTR, targetOffset)
+	pcall(function()
+		map.ModelStreamingMode = Enum.ModelStreamingMode.Default
+	end)
+end
+
 local function clearActiveMapScripts()
 	local cleanup = activeMapScriptCleanup
 	activeMapScriptCleanup = nil
 	if cleanup then
+		local token = RuntimeProfiler.Begin("Server/Round/Map/ClearActiveMapScripts")
 		cleanup()
+		RuntimeProfiler.End("Server/Round/Map/ClearActiveMapScripts", token)
 	end
 end
 
 local function bindActiveMapScripts(mapId: string, map: Model)
 	clearActiveMapScripts()
+	local token = RuntimeProfiler.Begin("Server/Round/Map/BindMapScripts")
 	activeMapScriptCleanup = MapScriptRuntime.Bind(mapId, map)
+	RuntimeProfiler.End("Server/Round/Map/BindMapScripts", token)
+	RuntimeProfiler.Count("Server/Round/Map/BindMapScriptsCalls")
 end
 
 local function getStoredMapTemplate(mapId: string, shouldWarn: boolean): Model?
@@ -121,9 +215,13 @@ function RoundMapRuntime.ClearActiveMap()
 	local active = workspace:FindFirstChild(RoundConfig.ActiveMapName)
 	if active then
 		local token = RuntimeProfiler.Begin("Server/Round/Map/ClearActiveMap")
+		recordInstanceStats("Server/Round/Map/ClearedActiveMap", active)
 		active:Destroy()
-		DestructionService:InvalidateTargetCache("MapCleared")
 		RuntimeProfiler.End("Server/Round/Map/ClearActiveMap", token)
+
+		local cacheToken = RuntimeProfiler.Begin("Server/Round/Map/ClearActiveMapInvalidateCache")
+		DestructionService:InvalidateTargetCache("MapCleared")
+		RuntimeProfiler.End("Server/Round/Map/ClearActiveMapInvalidateCache", cacheToken)
 	end
 end
 
@@ -133,11 +231,16 @@ local function destroyPreparedMapClone(mapId: string)
 	preparingMapClones[mapId] = nil
 	RoundMapRuntime.QueuedMapClones[mapId] = nil
 	if clone and clone.Parent then
+		recordInstanceStats("Server/Round/Map/DestroyedPreparedClone", clone)
+		local token = RuntimeProfiler.Begin("Server/Round/Map/DestroyPreparedClone")
 		clone:Destroy()
+		RuntimeProfiler.End("Server/Round/Map/DestroyPreparedClone", token)
+		RuntimeProfiler.Count("Server/Round/Map/PreparedCloneDestroyed")
 	end
 end
 
 function RoundMapRuntime.ClearPreparedMapClones(exceptMapId: string?)
+	local token = RuntimeProfiler.Begin("Server/Round/Map/ClearPreparedClones")
 	if not exceptMapId then
 		mapPreparationGeneration += 1
 	end
@@ -151,6 +254,8 @@ function RoundMapRuntime.ClearPreparedMapClones(exceptMapId: string?)
 			RoundMapRuntime.QueuedMapClones[mapId] = nil
 		end
 	end
+	recordPreparationGauges()
+	RuntimeProfiler.End("Server/Round/Map/ClearPreparedClones", token)
 end
 
 local function prepareMapClone(mapId: string, generation: number): boolean
@@ -173,6 +278,7 @@ local function prepareMapClone(mapId: string, generation: number): boolean
 
 	RoundMapRuntime.QueuedMapClones[mapId] = nil
 	preparingMapClones[mapId] = true
+	recordInstanceStats("Server/Round/Map/PrepareTemplate", template)
 	local cloneToken = RuntimeProfiler.Begin("Server/Round/Map/PrepareClone")
 	local clone = template:Clone()
 	RuntimeProfiler.End("Server/Round/Map/PrepareClone", cloneToken)
@@ -182,14 +288,20 @@ local function prepareMapClone(mapId: string, generation: number): boolean
 		return false
 	end
 	clone.Name = mapId
+	recordInstanceStats("Server/Round/Map/PreparedClone", clone)
+	local parentToken = RuntimeProfiler.Begin("Server/Round/Map/ParentPreparedClone")
 	clone.Parent = getPreparedMapsFolder()
+	RuntimeProfiler.End("Server/Round/Map/ParentPreparedClone", parentToken)
 	preparedMapClones[mapId] = clone
 	preparingMapClones[mapId] = nil
 	RuntimeProfiler.Count("Server/Round/Map/PreparedCloneReady")
+	RuntimeProfiler.Count("Server/Round/Map/PreparedCloneReady/" .. mapId)
+	recordPreparationGauges()
 	return true
 end
 
 function RoundMapRuntime.PrepareVoteMapClones(choices: { { mapId: string } })
+	local token = RuntimeProfiler.Begin("Server/Round/Map/PrepareVoteMapClones")
 	mapPreparationGeneration += 1
 	local generation = mapPreparationGeneration
 	for mapId in pairs(RoundMapRuntime.QueuedMapClones) do
@@ -204,6 +316,9 @@ function RoundMapRuntime.PrepareVoteMapClones(choices: { { mapId: string } })
 			RoundMapRuntime.QueuedMapClones[choice.mapId] = generation
 		end
 	end
+	RuntimeProfiler.Gauge("Server/Round/Map/VoteChoiceCloneQueueSize", #mapIds)
+	recordPreparationGauges()
+	RuntimeProfiler.End("Server/Round/Map/PrepareVoteMapClones", token)
 
 	task.spawn(function()
 		local frameStartedAt = os.clock()
@@ -228,24 +343,32 @@ function RoundMapRuntime.PrepareVoteMapClones(choices: { { mapId: string } })
 end
 
 function RoundMapRuntime.WaitForPreparedMapClone(mapId: string, timeoutSeconds: number): boolean
+	local waitStartedAt = os.clock()
 	local deadline = os.clock() + math.max(timeoutSeconds, 0)
 	while os.clock() < deadline do
 		local clone = preparedMapClones[mapId]
 		if clone and clone.Parent then
 			RuntimeProfiler.Count("Server/Round/Map/SelectedPrepWaitHits")
+			recordWallDuration("Server/Round/Map/WaitForPreparedCloneWall", waitStartedAt)
+			RuntimeProfiler.Gauge("Server/Round/Map/LastSelectedPrepWaitMs", (os.clock() - waitStartedAt) * 1000)
 			return true
 		end
 		if not preparingMapClones[mapId] and RoundMapRuntime.QueuedMapClones[mapId] ~= mapPreparationGeneration then
+			recordWallDuration("Server/Round/Map/WaitForPreparedCloneWall", waitStartedAt)
+			RuntimeProfiler.Gauge("Server/Round/Map/LastSelectedPrepWaitMs", (os.clock() - waitStartedAt) * 1000)
 			return false
 		end
 		RuntimeProfiler.Count("Server/Round/Map/SelectedPrepWaitFrames")
 		RunService.Heartbeat:Wait()
 	end
 	RuntimeProfiler.Count("Server/Round/Map/SelectedPrepWaitTimeouts")
+	recordWallDuration("Server/Round/Map/WaitForPreparedCloneWall", waitStartedAt)
+	RuntimeProfiler.Gauge("Server/Round/Map/LastSelectedPrepWaitMs", (os.clock() - waitStartedAt) * 1000)
 	return false
 end
 
 local function takePreparedMapClone(mapId: string): Model?
+	local token = RuntimeProfiler.Begin("Server/Round/Map/TakePreparedClone")
 	local clone = preparedMapClones[mapId]
 	preparedMapClones[mapId] = nil
 	preparingMapClones[mapId] = nil
@@ -253,12 +376,18 @@ local function takePreparedMapClone(mapId: string): Model?
 	mapPreparationGeneration += 1
 	RoundMapRuntime.ClearPreparedMapClones(mapId)
 	if clone and clone.Parent then
+		RuntimeProfiler.End("Server/Round/Map/TakePreparedClone", token)
+		recordPreparationGauges()
 		return clone
 	end
+	RuntimeProfiler.End("Server/Round/Map/TakePreparedClone", token)
+	recordPreparationGauges()
 	return nil
 end
 
 function RoundMapRuntime.SpawnActiveMap(mapId: string): Model?
+	local spawnStartedAt = os.clock()
+	RuntimeProfiler.Count("Server/Round/Map/Selected/" .. mapId)
 	local template = getStoredMapTemplate(mapId, false)
 
 	RoundMapRuntime.ClearActiveMap()
@@ -267,14 +396,18 @@ function RoundMapRuntime.SpawnActiveMap(mapId: string): Model?
 		local workspaceMap = getWorkspaceAuthoredMap(mapId)
 		if not workspaceMap then
 			warn("[RoundMapRuntime] Missing map source:", mapId)
+			recordWallDuration("Server/Round/Map/SpawnActiveMapWall", spawnStartedAt)
 			return nil
 		end
 
 		RuntimeProfiler.Count("Server/Round/Map/WorkspaceAuthoredMap")
+		recordInstanceStats("Server/Round/Map/WorkspaceAuthoredMap", workspaceMap)
+		placeActiveMap(workspaceMap)
 		local cacheToken = RuntimeProfiler.Begin("Server/Round/Map/RebuildDestructionCache")
 		DestructionService:RebuildTargetCache("WorkspaceMapSelected")
 		RuntimeProfiler.End("Server/Round/Map/RebuildDestructionCache", cacheToken)
 		bindActiveMapScripts(mapId, workspaceMap)
+		recordWallDuration("Server/Round/Map/SpawnActiveMapWall", spawnStartedAt)
 		return workspaceMap
 	end
 
@@ -283,20 +416,25 @@ function RoundMapRuntime.SpawnActiveMap(mapId: string): Model?
 		RuntimeProfiler.Count("Server/Round/Map/PreparedCloneHits")
 	else
 		RuntimeProfiler.Count("Server/Round/Map/PreparedCloneMisses")
+		recordInstanceStats("Server/Round/Map/CloneTemplate", template)
 		local cloneToken = RuntimeProfiler.Begin("Server/Round/Map/CloneTemplate")
 		clone = template:Clone()
 		RuntimeProfiler.End("Server/Round/Map/CloneTemplate", cloneToken)
 	end
 
 	clone.Name = RoundConfig.ActiveMapName
+	placeActiveMap(clone)
+	recordInstanceStats("Server/Round/Map/ActiveMapBeforeParent", clone)
 	local parentToken = RuntimeProfiler.Begin("Server/Round/Map/ParentActiveMap")
 	clone.Parent = workspace
 	RuntimeProfiler.End("Server/Round/Map/ParentActiveMap", parentToken)
+	recordInstanceStats("Server/Round/Map/ActiveMap", clone)
 
 	local cacheToken = RuntimeProfiler.Begin("Server/Round/Map/RebuildDestructionCache")
 	DestructionService:RebuildTargetCache("MapSpawned")
 	RuntimeProfiler.End("Server/Round/Map/RebuildDestructionCache", cacheToken)
 	bindActiveMapScripts(mapId, clone)
+	recordWallDuration("Server/Round/Map/SpawnActiveMapWall", spawnStartedAt)
 	return clone
 end
 

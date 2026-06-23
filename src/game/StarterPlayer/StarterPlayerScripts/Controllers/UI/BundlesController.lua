@@ -10,6 +10,7 @@ local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 
 local BundlePreviewDirector = require(script.Parent.Bundles.BundlePreviewDirector)
 local GameUiVisibilityController = require(script.Parent:WaitForChild("GameUiVisibilityController"))
+local GiftMenuController = require(script.Parent:WaitForChild("GiftMenuController"))
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -609,7 +610,22 @@ function BundlesController:_renderOfferRow(top: Instance, offer, order: number)
 		giftButton.Active = offer.Giftable == true
 		giftButton.Visible = offer.Giftable == true
 		table.insert(self._renderConnections, giftButton.Activated:Connect(function()
-			warn("[BundlesController] Gift flow is disabled for this bundle milestone.")
+			local product = RobuxPurchases.Products[offer.ProductKey]
+			local giftProductKey = product and product.giftProductKey
+			if typeof(giftProductKey) ~= "string" or giftProductKey == "" then
+				giftProductKey = RobuxPurchases.GiftProductsByTargetKey and RobuxPurchases.GiftProductsByTargetKey[offer.ProductKey] or nil
+			end
+			if typeof(giftProductKey) ~= "string" or giftProductKey == "" then
+				warn(("[BundlesController] Gift product missing for %s."):format(tostring(offer.ProductKey)))
+				return
+			end
+
+			local page = self._selectedPageId and BundleCatalog.GetPage(self._selectedPageId) or nil
+			GiftMenuController:OpenForProduct({
+				productKey = offer.ProductKey,
+				giftProductKey = giftProductKey,
+				icon = page and page.CardImage or nil,
+			})
 		end))
 	end
 end

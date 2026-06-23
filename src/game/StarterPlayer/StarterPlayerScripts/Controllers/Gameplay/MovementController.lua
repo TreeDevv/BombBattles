@@ -48,6 +48,8 @@ local LANDING_MODE_LOW = "Low"
 local LANDING_MODE_MEDIUM = "Medium"
 local LANDING_MODE_HIGH = "High"
 local LANDING_MODE_RUNOUT = "Runout"
+local ATTRIBUTE_NUMBER_EPSILON = 0.01
+local ATTRIBUTE_VECTOR_EPSILON = 0.01
 
 type Controls = {
 	GetMoveVector: (Controls) -> Vector3,
@@ -187,6 +189,23 @@ local flattenVelocity = MovementMath.FlattenVelocity
 local directionToYaw = MovementMath.DirectionToYaw
 local yawToDirection = MovementMath.YawToDirection
 
+local function shouldUpdateAttributeValue(currentValue: any, nextValue: any): boolean
+	local valueType = typeof(nextValue)
+	if valueType == "number" then
+		return typeof(currentValue) ~= "number" or math.abs(currentValue - nextValue) >= ATTRIBUTE_NUMBER_EPSILON
+	end
+	if valueType == "Vector3" then
+		return typeof(currentValue) ~= "Vector3" or (currentValue - nextValue).Magnitude >= ATTRIBUTE_VECTOR_EPSILON
+	end
+	return currentValue ~= nextValue
+end
+
+local function setAttributeIfChanged(instance: Instance, attributeName: string, value: any)
+	if shouldUpdateAttributeValue(instance:GetAttribute(attributeName), value) then
+		instance:SetAttribute(attributeName, value)
+	end
+end
+
 local function getTiltDegrees(cframe: CFrame): number
 	local upDot = math.clamp(cframe.UpVector:Dot(Vector3.yAxis), -1, 1)
 	return math.deg(math.acos(upDot))
@@ -296,6 +315,10 @@ local function getBombKnockbackUntil(character: Model?): number
 
 	local knockbackUntil = character:GetAttribute(KNOCKBACK_UNTIL_ATTR)
 	return if typeof(knockbackUntil) == "number" then knockbackUntil else NEVER
+end
+
+local function isBombKnockbackActive(character: Model?, serverNow: number?): boolean
+	return getBombKnockbackUntil(character) > (serverNow or workspace:GetServerTimeNow())
 end
 
 local function getFreezeBombSlowMultiplier(character: Model?): number
@@ -981,10 +1004,16 @@ function MovementController:_calculateAirControlForce(dt: number)
 	}
 end
 
-function MovementController:_updateAirControl(now: number, isGrounded: boolean, dt: number)
+function MovementController:_updateAirControl(now: number, isGrounded: boolean, dt: number, bombKnockbackActive: boolean)
 	local humanoid = self._humanoid
 	if isGrounded or not humanoid or humanoid.Health <= 0 then
 		self:_setAirControlEnabled(false)
+		return
+	end
+
+	if bombKnockbackActive and MovementConfig.AirControl.ApplyWhileKnockback == false then
+		self:_setAirControlEnabled(false)
+		self:_setCCLAirMoveSuppressed(true)
 		return
 	end
 
@@ -2041,15 +2070,15 @@ function MovementController:_snapRootYawToFacingDirection(facingDirection: Vecto
 	return true
 end
 
-function MovementController:_applyAirFacingYaw(isGrounded: boolean): boolean
-	if isGrounded then
+function MovementController:_applyAirFacingYaw(isGrounded: boolean, bombKnockbackActive: boolean): boolean
+	if isGrounded or (bombKnockbackActive and MovementConfig.AirFacingApplyWhileKnockback == false) then
 		return false
 	end
 
 	return self:_snapRootYawToFacingDirection(self._smoothedFacingDirection)
 end
 
-function MovementController:_applyAirUprightStabilization(isGrounded: boolean): (number, Vector3, boolean)
+function MovementController:_applyAirUprightStabilization(isGrounded: boolean, bombKnockbackActive: boolean): (number, Vector3, boolean)
 	local rootPart = self._rootPart
 	local humanoid = self._humanoid
 	if not (rootPart and rootPart.Parent) then
@@ -2066,8 +2095,7 @@ function MovementController:_applyAirUprightStabilization(isGrounded: boolean): 
 		return tiltDegrees, angularVelocity, false
 	end
 
-	local knockbackUntil = getBombKnockbackUntil(self._character)
-	if not MovementConfig.AirUprightApplyWhileKnockback and knockbackUntil > workspace:GetServerTimeNow() then
+	if bombKnockbackActive and MovementConfig.AirUprightApplyWhileKnockback == false then
 		return tiltDegrees, angularVelocity, false
 	end
 
@@ -2099,52 +2127,54 @@ function MovementController:_setDebugAttributes(data)
 		return
 	end
 
-	character:SetAttribute("Movement_Grounded", data.isGrounded)
-	character:SetAttribute("Movement_Sprinting", data.isSprinting)
-	character:SetAttribute("Movement_Crouching", data.isCrouching)
-	character:SetAttribute("Movement_Sliding", data.isSliding)
-	character:SetAttribute("Movement_EffectiveSpeed", data.effectiveSpeed)
-	character:SetAttribute("Movement_FreezeSlowed", data.freezeSlowed)
-	character:SetAttribute("Movement_FreezeSlowMultiplier", data.freezeSlowMultiplier)
-	character:SetAttribute("Movement_MoveMagnitude", data.moveMagnitude)
-	character:SetAttribute("Movement_InCoyoteTime", data.inCoyoteTime)
-	character:SetAttribute("Movement_JumpBuffered", data.jumpBuffered)
-	character:SetAttribute("Movement_LandingSettling", data.landingSettling)
-	character:SetAttribute("Movement_AirJumpCount", self._airJumpCount)
-	character:SetAttribute("Movement_SlidePhase", data.slidePhase)
-	character:SetAttribute("Movement_SlideSpeed", data.slideSpeed)
-	character:SetAttribute("Movement_SlideJumpBurstActive", data.slideJumpBurstActive)
-	character:SetAttribute("Movement_HorizontalSpeed", data.horizontalSpeed)
-	character:SetAttribute("Movement_AirControlActive", data.airControlActive)
-	character:SetAttribute("Movement_AirControlState", data.airControlState)
-	character:SetAttribute("Movement_AirControlGravityScale", data.airControlGravityScale)
-	character:SetAttribute("Movement_AirControlForce", data.airControlForce)
-	character:SetAttribute("Movement_AirControlSteerForce", data.airControlSteerForce)
-	character:SetAttribute("Movement_AirControlBrakeForce", data.airControlBrakeForce)
-	character:SetAttribute("Movement_AirControlFallBrakeForce", data.airControlFallBrakeForce)
-	character:SetAttribute("Movement_AirControlVerticalSpeed", data.airControlVerticalSpeed)
-	character:SetAttribute("Movement_AirControlHorizontalSpeed", data.airControlHorizontalSpeed)
-	character:SetAttribute("Movement_AirControlLaunchSource", data.airControlLaunchSource)
-	character:SetAttribute("Movement_AirControlForceAirborneUntil", data.airControlForceAirborneUntil)
-	character:SetAttribute("Movement_GravityBootsActive", data.gravityBootsActive)
-	character:SetAttribute("Movement_GravityBootsAirSteeringScale", data.gravityBootsAirSteeringScale)
-	character:SetAttribute("Movement_GravityBootsAirBrakeScale", data.gravityBootsAirBrakeScale)
-	character:SetAttribute("Movement_GravityBootsAirGravityScaleMultiplier", data.gravityBootsAirGravityScaleMultiplier)
-	character:SetAttribute("Movement_AirUprightStabilized", data.airUprightStabilized)
-	character:SetAttribute("Movement_AirUprightTiltDegrees", data.airUprightTiltDegrees)
-	character:SetAttribute("Movement_AirUprightAngularVelocity", data.airUprightAngularVelocity)
-	character:SetAttribute("Movement_LandingImpactSpeed", data.landingImpactSpeed)
-	character:SetAttribute("Movement_LandingHorizontalSpeed", data.landingHorizontalSpeed)
-	character:SetAttribute("Movement_LandingSerial", data.landingSerial)
-	character:SetAttribute("Movement_LandingBoostActive", data.landingBoostActive)
-	character:SetAttribute("Movement_LandingMode", data.landingMode)
-	character:SetAttribute("Movement_LandingRecoveryAlpha", data.landingRecoveryAlpha)
-	character:SetAttribute("Movement_LandingInputGraceActive", data.landingInputGraceActive)
-	character:SetAttribute("Movement_LandingRunoutEligible", data.landingRunoutEligible)
+	setAttributeIfChanged(character, "Movement_Grounded", data.isGrounded)
+	setAttributeIfChanged(character, "Movement_Sprinting", data.isSprinting)
+	setAttributeIfChanged(character, "Movement_Crouching", data.isCrouching)
+	setAttributeIfChanged(character, "Movement_Sliding", data.isSliding)
+	setAttributeIfChanged(character, "Movement_EffectiveSpeed", data.effectiveSpeed)
+	setAttributeIfChanged(character, "Movement_FreezeSlowed", data.freezeSlowed)
+	setAttributeIfChanged(character, "Movement_FreezeSlowMultiplier", data.freezeSlowMultiplier)
+	setAttributeIfChanged(character, "Movement_MoveMagnitude", data.moveMagnitude)
+	setAttributeIfChanged(character, "Movement_InCoyoteTime", data.inCoyoteTime)
+	setAttributeIfChanged(character, "Movement_JumpBuffered", data.jumpBuffered)
+	setAttributeIfChanged(character, "Movement_LandingSettling", data.landingSettling)
+	setAttributeIfChanged(character, "Movement_AirJumpCount", self._airJumpCount)
+	setAttributeIfChanged(character, "Movement_SlidePhase", data.slidePhase)
+	setAttributeIfChanged(character, "Movement_SlideSpeed", data.slideSpeed)
+	setAttributeIfChanged(character, "Movement_SlideJumpBurstActive", data.slideJumpBurstActive)
+	setAttributeIfChanged(character, "Movement_HorizontalSpeed", data.horizontalSpeed)
+	setAttributeIfChanged(character, "Movement_BombKnockbackActive", data.bombKnockbackActive)
+	setAttributeIfChanged(character, "Movement_BombKnockbackRemaining", data.bombKnockbackRemaining)
+	setAttributeIfChanged(character, "Movement_AirControlActive", data.airControlActive)
+	setAttributeIfChanged(character, "Movement_AirControlState", data.airControlState)
+	setAttributeIfChanged(character, "Movement_AirControlGravityScale", data.airControlGravityScale)
+	setAttributeIfChanged(character, "Movement_AirControlForce", data.airControlForce)
+	setAttributeIfChanged(character, "Movement_AirControlSteerForce", data.airControlSteerForce)
+	setAttributeIfChanged(character, "Movement_AirControlBrakeForce", data.airControlBrakeForce)
+	setAttributeIfChanged(character, "Movement_AirControlFallBrakeForce", data.airControlFallBrakeForce)
+	setAttributeIfChanged(character, "Movement_AirControlVerticalSpeed", data.airControlVerticalSpeed)
+	setAttributeIfChanged(character, "Movement_AirControlHorizontalSpeed", data.airControlHorizontalSpeed)
+	setAttributeIfChanged(character, "Movement_AirControlLaunchSource", data.airControlLaunchSource)
+	setAttributeIfChanged(character, "Movement_AirControlForceAirborneUntil", data.airControlForceAirborneUntil)
+	setAttributeIfChanged(character, "Movement_GravityBootsActive", data.gravityBootsActive)
+	setAttributeIfChanged(character, "Movement_GravityBootsAirSteeringScale", data.gravityBootsAirSteeringScale)
+	setAttributeIfChanged(character, "Movement_GravityBootsAirBrakeScale", data.gravityBootsAirBrakeScale)
+	setAttributeIfChanged(character, "Movement_GravityBootsAirGravityScaleMultiplier", data.gravityBootsAirGravityScaleMultiplier)
+	setAttributeIfChanged(character, "Movement_AirUprightStabilized", data.airUprightStabilized)
+	setAttributeIfChanged(character, "Movement_AirUprightTiltDegrees", data.airUprightTiltDegrees)
+	setAttributeIfChanged(character, "Movement_AirUprightAngularVelocity", data.airUprightAngularVelocity)
+	setAttributeIfChanged(character, "Movement_LandingImpactSpeed", data.landingImpactSpeed)
+	setAttributeIfChanged(character, "Movement_LandingHorizontalSpeed", data.landingHorizontalSpeed)
+	setAttributeIfChanged(character, "Movement_LandingSerial", data.landingSerial)
+	setAttributeIfChanged(character, "Movement_LandingBoostActive", data.landingBoostActive)
+	setAttributeIfChanged(character, "Movement_LandingMode", data.landingMode)
+	setAttributeIfChanged(character, "Movement_LandingRecoveryAlpha", data.landingRecoveryAlpha)
+	setAttributeIfChanged(character, "Movement_LandingInputGraceActive", data.landingInputGraceActive)
+	setAttributeIfChanged(character, "Movement_LandingRunoutEligible", data.landingRunoutEligible)
 	self:_refreshCCLDebug()
-	character:SetAttribute("Movement_CCLActiveController", self._cclActiveController)
-	character:SetAttribute("Movement_CCLAirMoveMaxForce", self._cclAirMoveMaxForce)
-	character:SetAttribute("Movement_CCLAirMoveSuppressed", self._cclAirMoveSuppressed)
+	setAttributeIfChanged(character, "Movement_CCLActiveController", self._cclActiveController)
+	setAttributeIfChanged(character, "Movement_CCLAirMoveMaxForce", self._cclAirMoveMaxForce)
+	setAttributeIfChanged(character, "Movement_CCLAirMoveSuppressed", self._cclAirMoveSuppressed)
 end
 
 function MovementController:_bindFallingDownStateWatcher(character: Model)
@@ -2300,7 +2330,10 @@ function MovementController:_step(dt: number)
 	self:_consumeExternalAirControlLaunch(now)
 
 	local knockbackUntil = getBombKnockbackUntil(self._character)
-	if knockbackUntil > workspace:GetServerTimeNow() then
+	local serverNow = workspace:GetServerTimeNow()
+	local bombKnockbackRemaining = math.max(knockbackUntil - serverNow, 0)
+	local bombKnockbackActive = isBombKnockbackActive(self._character, serverNow)
+	if bombKnockbackActive then
 		self:_clearSlidePhase()
 		if knockbackUntil ~= self._lastObservedKnockbackUntil then
 			self._lastObservedKnockbackUntil = knockbackUntil
@@ -2467,7 +2500,9 @@ function MovementController:_step(dt: number)
 			self._smoothedFacingYaw = cameraFacingYaw
 			self._smoothedFacingDirection = cameraFacingDirection
 			controllerManager.FacingDirection = cameraFacingDirection
-			self:_snapRootYawToFacingDirection(cameraFacingDirection, true)
+			if not bombKnockbackActive or MovementConfig.AirFacingApplyWhileKnockback ~= false then
+				self:_snapRootYawToFacingDirection(cameraFacingDirection, true)
+			end
 		end
 	else
 		local targetFacingDirection = if hasMoveInput then targetMoveDirection.Unit else Vector3.zero
@@ -2490,10 +2525,10 @@ function MovementController:_step(dt: number)
 		end
 	end
 
-	self:_applyAirFacingYaw(isGrounded)
-	self:_updateAirControl(now, isGrounded, dt)
+	self:_applyAirFacingYaw(isGrounded, bombKnockbackActive)
+	self:_updateAirControl(now, isGrounded, dt, bombKnockbackActive)
 	local airUprightTiltDegrees, airUprightAngularVelocity, airUprightStabilized =
-		self:_applyAirUprightStabilization(isGrounded)
+		self:_applyAirUprightStabilization(isGrounded, bombKnockbackActive)
 
 	self:_setDebugAttributes({
 		isGrounded = isGrounded,
@@ -2511,6 +2546,8 @@ function MovementController:_step(dt: number)
 		slideSpeed = slideSpeed,
 		slideJumpBurstActive = self:_isSlideJumpBurstActive(now),
 		horizontalSpeed = self:_getHorizontalSpeed(),
+		bombKnockbackActive = bombKnockbackActive,
+		bombKnockbackRemaining = bombKnockbackRemaining,
 		airControlActive = self._airControlActive,
 		airControlState = self._airControlState,
 		airControlGravityScale = self._airControlGravityScale,
@@ -2602,6 +2639,8 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	character:SetAttribute("Movement_SlideSpeed", 0)
 	character:SetAttribute("Movement_SlideJumpBurstActive", false)
 	character:SetAttribute("Movement_HorizontalSpeed", self:_getHorizontalSpeed())
+	character:SetAttribute("Movement_BombKnockbackActive", false)
+	character:SetAttribute("Movement_BombKnockbackRemaining", 0)
 	character:SetAttribute("Movement_FreezeSlowed", false)
 	character:SetAttribute("Movement_FreezeSlowMultiplier", 1)
 	character:SetAttribute("Movement_AirControlActive", false)

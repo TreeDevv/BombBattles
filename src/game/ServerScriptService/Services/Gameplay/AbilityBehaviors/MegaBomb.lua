@@ -102,13 +102,14 @@ local function createProjectileId(player: Player): string
 	)
 end
 
-local function buildExplosionConfig(scale: number)
+local function buildExplosionConfig(definition: AbilityDefinition, scale: number)
 	return {
 		megaScale = scale,
 		innerRadius = BombConfig.InnerRadius * scale,
 		nearRadius = BombConfig.NearRadius * scale,
 		outerRadius = BombConfig.OuterRadius * scale,
 		terrainRadius = (BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius) * scale,
+		maxTargetsPerExplosion = getDefinitionNumber(definition, "maxTargetsPerExplosion", 72),
 		playerDirectDamage = BombConfig.PlayerDirectDamage * scale,
 		playerNearDamageMax = BombConfig.PlayerNearDamageMax * scale,
 		playerNearDamageMin = BombConfig.PlayerNearDamageMin * scale,
@@ -169,7 +170,7 @@ function MegaBomb.OnActivate(context: ServerActivateContext): AbilityActivationR
 				directHitExplodes = false,
 				playerContactExplodes = false,
 			},
-			explosion = buildExplosionConfig(scale),
+			explosion = buildExplosionConfig(context.definition, scale),
 			visuals = {
 				visualScale = BombConfig.ProjectileVisualScale * scale,
 				megaScale = scale,

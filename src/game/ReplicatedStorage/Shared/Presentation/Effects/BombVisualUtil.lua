@@ -16,6 +16,7 @@ local ATTACHMENT_NAMES = table.freeze({
 local DEFAULT_EXPLOSION_VFX_PATH = table.freeze({ "Assets", "VFX", "Explosion", "Default" })
 local DEFAULT_EXPLOSION_CLEANUP_SECONDS = 8
 local EXPLOSION_VISUAL_POSITION_OFFSET = Vector3.new(0, -1, 0)
+local SOUND_ONLY_ANCHOR_SIZE = Vector3.new(0.2, 0.2, 0.2)
 
 local warnedMissingAttachments = {}
 
@@ -395,6 +396,56 @@ function BombVisualUtil.PlaySoundDescendants(instance: Instance): (boolean, numb
 	return playedSound, maxDuration
 end
 
+local function playExplosionSoundOnly(parent: Instance, position: Vector3, template: Instance, options): (Instance?, boolean)
+	local sounds = getSoundInstances(template)
+	if #sounds == 0 then
+		return nil, false
+	end
+
+	local anchor = Instance.new("Part")
+	anchor.Name = "BombExplosionSound"
+	anchor.Size = SOUND_ONLY_ANCHOR_SIZE
+	anchor.Transparency = 1
+	anchor.Anchored = true
+	anchor.CanCollide = false
+	anchor.CanQuery = false
+	anchor.CanTouch = false
+	anchor.CFrame = CFrame.new(position + EXPLOSION_VISUAL_POSITION_OFFSET)
+	anchor.Parent = parent
+
+	local playedSound = false
+	local maxDuration = 0
+	for _, sourceSound in ipairs(sounds) do
+		if sourceSound.SoundId == "" then
+			continue
+		end
+
+		local sound = sourceSound:Clone()
+		sound.Looped = false
+		sound.TimePosition = 0
+		sound.Parent = anchor
+		sound:Play()
+		playedSound = true
+		maxDuration = math.max(maxDuration, readSoundDuration(sound))
+	end
+
+	if not playedSound then
+		anchor:Destroy()
+		return nil, false
+	end
+
+	local cleanupSeconds = math.max(
+		tonumber(options and options.cleanupSeconds) or 0,
+		if maxDuration > 0 then maxDuration + 0.25 else 1
+	)
+	task.delay(cleanupSeconds, function()
+		if anchor.Parent then
+			anchor:Destroy()
+		end
+	end)
+	return anchor, true
+end
+
 function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 	local result = {
 		emitted = false,
@@ -426,6 +477,12 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 	result.resolvedSkinId = resolvedSkinId
 	result.usedFallback = usedFallback
 	if not template then
+		return result
+	end
+	if options.soundLightOnly == true then
+		local soundAnchor, playedSound = playExplosionSoundOnly(parent, position, template, options)
+		result.instance = soundAnchor
+		result.playedSound = playedSound
 		return result
 	end
 

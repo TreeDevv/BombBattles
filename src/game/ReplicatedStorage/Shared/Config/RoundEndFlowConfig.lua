@@ -8,6 +8,7 @@ local RoundEndFlowConfig = {
 		FullAnimation = "FullAnimation",
 	}),
 
+	DefaultPOTGIntroCutsceneId = "HollowPurple",
 	POTGAttachmentName = "HighlightIntroPoint",
 	WinnerBeatSeconds = 1.5,
 	ResultsSeconds = 8,

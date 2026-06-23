@@ -207,13 +207,14 @@ local function bindDamageCancel(player: Player, record: ChargeRecord)
 	end)
 end
 
-local function buildExplosionConfig(scale: number)
+local function buildExplosionConfig(definition: AbilityDefinition, scale: number)
 	return {
 		chargeScale = scale,
 		innerRadius = BombConfig.InnerRadius * scale,
 		nearRadius = BombConfig.NearRadius * scale,
 		outerRadius = BombConfig.OuterRadius * scale,
 		terrainRadius = (BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius) * scale,
+		maxTargetsPerExplosion = getDefinitionNumber(definition, "maxTargetsPerExplosion", 72),
 		playerDirectDamage = BombConfig.PlayerDirectDamage * scale,
 		playerNearDamageMax = BombConfig.PlayerNearDamageMax * scale,
 		playerNearDamageMin = BombConfig.PlayerNearDamageMin * scale,
@@ -266,7 +267,7 @@ function ChargeBomb.OnActivate(context: ServerActivateContext): AbilityActivatio
 			physics = {
 				radius = BombConfig.SweepRadius * chargeScale,
 			},
-			explosion = buildExplosionConfig(chargeScale),
+			explosion = buildExplosionConfig(context.definition, chargeScale),
 			visuals = {
 				visualScale = BombConfig.ProjectileVisualScale * chargeScale,
 				chargeScale = chargeScale,

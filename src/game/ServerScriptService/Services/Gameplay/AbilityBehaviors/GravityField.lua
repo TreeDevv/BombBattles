@@ -441,6 +441,9 @@ function GravityField.OnProjectileStep(context: ServerHookContext): AbilityHookR
 	if not (typeof(payload) == "table" and typeof(payload.projectileId) == "string") then
 		return AbilityResult.Continue()
 	end
+	if payload.owner == context.player then
+		return AbilityResult.Continue()
+	end
 
 	local records = ACTIVE_FIELDS[context.player]
 	if not records then

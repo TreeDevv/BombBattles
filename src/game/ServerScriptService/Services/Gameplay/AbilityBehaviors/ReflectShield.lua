@@ -543,6 +543,9 @@ function ReflectShield.OnProjectileStep(context: ServerHookContext): AbilityHook
 	if not (typeof(payload) == "table" and typeof(payload.projectileId) == "string") then
 		return AbilityResult.Continue()
 	end
+	if payload.owner == context.player then
+		return AbilityResult.Continue()
+	end
 
 	local records = ACTIVE_SHIELDS[context.player]
 	if not records then

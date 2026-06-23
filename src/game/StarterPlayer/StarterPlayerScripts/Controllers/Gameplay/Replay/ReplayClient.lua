@@ -12,6 +12,7 @@ local HipBombVisual = require(ReplicatedStorage.Shared.Effects.HipBombVisual)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local EventTextPresenter = require(ReplicatedStorage.Shared.Effects.EventTextPresenter)
+local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 local ReplayMapSimulator = require(script.Parent:WaitForChild("ReplayMapSimulator"))
 local ReplayAssets = require(script.Parent:WaitForChild("ReplayAssets"))
 local ReplayOverlay = require(script.Parent:WaitForChild("ReplayOverlay"))
@@ -61,6 +62,12 @@ ReplayClient._pendingKillReplayKey = nil
 ReplayClient._killReplayFadeSerial = 0
 ReplayClient._visualsEnabled = nil
 ReplayClient._boundRemotes = {}
+ReplayClient._explosionVfxBudget = {
+	windowStartedAt = 0,
+	windowCount = 0,
+	heartbeat = 0,
+	heartbeatCount = 0,
+}
 ReplayClient.ReplayStarted = Signal.new()
 ReplayClient.ReplayEnded = Signal.new()
 
@@ -79,7 +86,7 @@ local MAX_KILL_REPLAY_PLAYER_VISUALS = 6
 local MAX_POTG_REPLAY_PLAYER_VISUALS = 10
 local MAX_EVENT_VISUALS = 160
 local MAX_EVENTS_PER_STEP = 12
-local EXPLOSION_VFX_CLEANUP_SECONDS = 8
+local EXPLOSION_VFX_CLEANUP_SECONDS = 4
 local BURST_MARKER_LIFETIME = 0.45
 local CAMERA_SMOOTH_RESPONSIVENESS = 8
 local CAMERA_DEFAULT_FOV = 72
@@ -96,6 +103,7 @@ local MAX_AVATAR_TEMPLATE_CACHE = 32
 local MAX_REPLAY_POSE_JOINTS = 32
 local MIN_REPLAY_CAMERA_FOV = 20
 local MAX_REPLAY_CAMERA_FOV = 120
+local POTG_REPLAY_END_FADE_SECONDS = 0.25
 local DEBUG_REPLAY_ANIMATION = false
 local DEBUG_REPLAY_POSE_JOINTS = false
 local DEBUG_REPLAY_TIMING = false
@@ -1176,8 +1184,43 @@ local function getExplosionTemplate(bombSkinId: any): Instance?
 end
 
 local function playReplayExplosionVfx(parent: Instance, bombSkinId: any, position: Vector3): (boolean, boolean)
+	local budget = ReplayClient._explosionVfxBudget
+	local now = os.clock()
+	if now - budget.windowStartedAt > 0.35 then
+		budget.windowStartedAt = now
+		budget.windowCount = 0
+	end
+
+	local heartbeat = math.floor(now * 60)
+	if heartbeat ~= budget.heartbeat then
+		budget.heartbeat = heartbeat
+		budget.heartbeatCount = 0
+	end
+
+	local soundLightOnly = false
+	if budget.windowCount >= 3 then
+		RuntimeProfiler.Count("Client/Replay/ExplosionVfxDowngraded/WindowBudget")
+		soundLightOnly = true
+	elseif budget.heartbeatCount >= 1 then
+		RuntimeProfiler.Count("Client/Replay/ExplosionVfxDowngraded/HeartbeatBudget")
+		soundLightOnly = true
+	else
+		budget.windowCount += 1
+		budget.heartbeatCount += 1
+	end
+
+	if not soundLightOnly then
+		local template = getExplosionTemplate(bombSkinId)
+		local estimatedObjects = if template then #template:GetDescendants() + 1 else 1
+		if not reserveReplayObjects(math.min(estimatedObjects, MAX_REPLAY_OBJECTS)) then
+			RuntimeProfiler.Count("Client/Replay/ExplosionVfxDowngraded/ObjectBudget")
+			soundLightOnly = true
+		end
+	end
 	local emitModule = getReplayEmitModule()
-	if emitModule and not ensureReplayEmitModuleInitialized(emitModule) then
+	if soundLightOnly then
+		emitModule = nil
+	elseif emitModule and not ensureReplayEmitModuleInitialized(emitModule) then
 		emitModule = nil
 	end
 
@@ -1188,9 +1231,11 @@ local function playReplayExplosionVfx(parent: Instance, bombSkinId: any, positio
 		emitModule = emitModule,
 		name = "ReplayBombExplosionVFX",
 		cleanupSeconds = EXPLOSION_VFX_CLEANUP_SECONDS,
+		emitCountScale = 0.55,
+		soundLightOnly = soundLightOnly,
 		warnPrefix = "[ReplayClient]",
 	})
-	return result.emitted == true, result.playedSound == true
+	return result.emitted == true or soundLightOnly, result.playedSound == true
 end
 
 local function resolveAbilityDefinition(abilityName: any)
@@ -1399,7 +1444,7 @@ local function getFallbackCameraSubject(): Instance?
 	return character and character:FindFirstChildOfClass("Humanoid") or nil
 end
 
-local function restoreCamera(state)
+local function restoreCamera(state, forceCharacterCamera: boolean?)
 	local camera = workspace.CurrentCamera
 	if not camera then
 		return
@@ -1410,18 +1455,20 @@ local function restoreCamera(state)
 		return
 	end
 
-	local subject = cameraState.cameraSubject
+	local subject = if forceCharacterCamera == true then getFallbackCameraSubject() else cameraState.cameraSubject
 	if not (subject and subject.Parent) then
-		subject = getFallbackCameraSubject()
+		subject = if forceCharacterCamera == true then cameraState.cameraSubject else getFallbackCameraSubject()
 	end
 
 	pcall(function()
 		if subject then
 			camera.CameraSubject = subject
 		end
-		camera.CameraType = cameraState.cameraType or Enum.CameraType.Custom
-		camera.CFrame = cameraState.cframe or camera.CFrame
-		camera.Focus = cameraState.focus or camera.Focus
+		camera.CameraType = if forceCharacterCamera == true then Enum.CameraType.Custom else cameraState.cameraType or Enum.CameraType.Custom
+		if forceCharacterCamera ~= true then
+			camera.CFrame = cameraState.cframe or camera.CFrame
+			camera.Focus = cameraState.focus or camera.Focus
+		end
 		if isFiniteNumber(cameraState.fieldOfView) then
 			camera.FieldOfView = cameraState.fieldOfView
 		end
@@ -1970,16 +2017,16 @@ local function updateVisuals(state, left, right, alpha: number, replayTime: numb
 	end
 end
 
-local function getReplayPayloadType(payload): string?
+function ReplayClient.GetReplayPayloadType(payload): string?
 	return if typeof(payload) == "table" and typeof(payload.type) == "string" then payload.type else nil
 end
 
-local function getReplayPayloadKey(payload): string?
+function ReplayClient.GetReplayPayloadKey(payload): string?
 	if typeof(payload) ~= "table" then
 		return nil
 	end
 
-	local replayType = getReplayPayloadType(payload)
+	local replayType = ReplayClient.GetReplayPayloadType(payload)
 	if typeof(replayType) ~= "string" or replayType == "" then
 		return nil
 	end
@@ -1992,12 +2039,12 @@ local function getReplayPayloadKey(payload): string?
 	}, "|")
 end
 
-local function isSameActiveReplay(activeReplay, payload): boolean
+function ReplayClient.IsSameActiveReplay(activeReplay, payload): boolean
 	if not activeReplay or typeof(payload) ~= "table" then
 		return false
 	end
 
-	local replayType = getReplayPayloadType(payload)
+	local replayType = ReplayClient.GetReplayPayloadType(payload)
 	if
 		activeReplay.replayType ~= replayType
 		or activeReplay.startTime ~= payload.startTime
@@ -2013,7 +2060,7 @@ local function isSameActiveReplay(activeReplay, payload): boolean
 	return activeReplay.victimUserId == payload.victimUserId
 end
 
-local function buildReplaySignalPayloadFromState(state, reason: string)
+function ReplayClient.BuildReplaySignalPayloadFromState(state, reason: string)
 	return {
 		type = state and state.replayType,
 		reason = reason,
@@ -2025,9 +2072,9 @@ local function buildReplaySignalPayloadFromState(state, reason: string)
 	}
 end
 
-local function buildReplaySignalPayloadFromPayload(payload, reason: string)
+function ReplayClient.BuildReplaySignalPayloadFromPayload(payload, reason: string)
 	return {
-		type = getReplayPayloadType(payload),
+		type = ReplayClient.GetReplayPayloadType(payload),
 		reason = reason,
 		playerUserId = if typeof(payload) == "table" then payload.playerUserId else nil,
 		killerUserId = if typeof(payload) == "table" then payload.killerUserId else nil,
@@ -2037,23 +2084,23 @@ local function buildReplaySignalPayloadFromPayload(payload, reason: string)
 	}
 end
 
-local function getPayloadFrameCount(payload): number
+function ReplayClient.GetPayloadFrameCount(payload): number
 	return if typeof(payload) == "table" and typeof(payload.frames) == "table" then #payload.frames else 0
 end
 
-local function warnReplayBuildSkipped(reason: string, payload)
+function ReplayClient.WarnReplayBuildSkipped(reason: string, payload)
 	warn(
 		("[ReplayClient] Replay skipped reason=%s type=%s frames=%d start=%s end=%s"):format(
 			reason,
-			tostring(getReplayPayloadType(payload)),
-			getPayloadFrameCount(payload),
+			tostring(ReplayClient.GetReplayPayloadType(payload)),
+			ReplayClient.GetPayloadFrameCount(payload),
 			tostring(if typeof(payload) == "table" then payload.startTime else nil),
 			tostring(if typeof(payload) == "table" then payload.endTime else nil)
 		)
 	)
 end
 
-local function debugReplayClient(message: string, ...)
+function ReplayClient.DebugReplayClient(message: string, ...)
 	if DEBUG_REPLAY_CLIENT then
 		warn("[ReplayClient] " .. message, ...)
 	end
@@ -2072,7 +2119,7 @@ end
 
 function ReplayClient:_getRemoteBinderDeps()
 	return {
-		debugReplayClient = debugReplayClient,
+		debugReplayClient = ReplayClient.DebugReplayClient,
 		getReplayConstants = getReplayConstants,
 		isFiniteNumber = isFiniteNumber,
 		buildLocalAnimationStatePayload = buildLocalAnimationStatePayload,
@@ -2111,11 +2158,9 @@ function ReplayClient:CancelReplay(reason: string?)
 		state.renderBindingName = nil
 	end
 
-	if state.replayType ~= "POTGReplay" then
-		pcall(function()
-			restoreCamera(state)
-		end)
-	end
+	pcall(function()
+		restoreCamera(state, state.replayType == "POTGReplay")
+	end)
 
 	for _, visual in pairs(state.playerVisuals or {}) do
 		if ReplayCharacterVisualPool.Release(visual) then
@@ -2151,11 +2196,8 @@ function ReplayClient:CancelReplay(reason: string?)
 			state.scene:Destroy()
 		end)
 	end
-	task.defer(function()
-		ReplayMapSimulator.PrewarmReusableScenes()
-	end)
 
-	debugReplayClient(
+	ReplayClient.DebugReplayClient(
 		"Replay ended",
 		state.replayType,
 		"reason",
@@ -2165,7 +2207,7 @@ function ReplayClient:CancelReplay(reason: string?)
 		"end",
 		state.endTime
 	)
-	self.ReplayEnded:Fire(buildReplaySignalPayloadFromState(state, reason or "Canceled"))
+	self.ReplayEnded:Fire(ReplayClient.BuildReplaySignalPayloadFromState(state, reason or "Canceled"))
 end
 
 function ReplayClient:_getStateBuilderDeps()
@@ -2173,7 +2215,7 @@ function ReplayClient:_getStateBuilderDeps()
 		ReplayMapSimulator = ReplayMapSimulator,
 		ReplayCameraController = ReplayCameraController,
 		areReplayVisualsEnabled = areReplayVisualsEnabled,
-		warnReplayBuildSkipped = warnReplayBuildSkipped,
+		warnReplayBuildSkipped = ReplayClient.WarnReplayBuildSkipped,
 		isFiniteNumber = isFiniteNumber,
 		maxReplayDurationSeconds = MAX_REPLAY_DURATION_SECONDS,
 		maxReplayObjects = MAX_REPLAY_OBJECTS,
@@ -2223,15 +2265,15 @@ function ReplayClient:_buildReplayState(payload)
 end
 
 function ReplayClient:_queueKillReplay(payload): boolean
-	if getReplayPayloadType(payload) ~= "KillReplay" then
+	if ReplayClient.GetReplayPayloadType(payload) ~= "KillReplay" then
 		return false
 	end
-	if isSameActiveReplay(self._activeReplay, payload) then
+	if ReplayClient.IsSameActiveReplay(self._activeReplay, payload) then
 		RuntimeProfiler.Count("Client/Replay/DroppedQueuedDuplicate")
 		return true
 	end
 
-	local key = getReplayPayloadKey(payload)
+	local key = ReplayClient.GetReplayPayloadKey(payload)
 	if key and key == self._pendingKillReplayKey then
 		RuntimeProfiler.Count("Client/Replay/DroppedQueuedDuplicate")
 		return true
@@ -2240,7 +2282,7 @@ function ReplayClient:_queueKillReplay(payload): boolean
 	self._pendingKillReplayPayload = payload
 	self._pendingKillReplayKey = key
 	RuntimeProfiler.Count("Client/Replay/QueuedDuringBuild")
-	debugReplayClient("Queued KillReplay during build", tostring(key))
+	ReplayClient.DebugReplayClient("Queued KillReplay during build", tostring(key))
 	return true
 end
 
@@ -2256,7 +2298,7 @@ function ReplayClient:_flushQueuedKillReplay()
 	self._pendingKillReplayPayload = nil
 	self._pendingKillReplayKey = nil
 
-	if isSameActiveReplay(self._activeReplay, payload) then
+	if ReplayClient.IsSameActiveReplay(self._activeReplay, payload) then
 		RuntimeProfiler.Count("Client/Replay/DroppedQueuedDuplicate")
 		return
 	end
@@ -2265,8 +2307,32 @@ function ReplayClient:_flushQueuedKillReplay()
 	self:PlayKillReplay(payload)
 end
 
+function ReplayClient:_beginPOTGReplayEndFade(state, reason: string)
+	if state.potgEndFadeStarted == true or state.ending == true then
+		return
+	end
+	state.potgEndFadeStarted = true
+
+	local fadeStarted = ScreenEffects.FadeToBlack(POTG_REPLAY_END_FADE_SECONDS)
+	local delaySeconds = if fadeStarted then POTG_REPLAY_END_FADE_SECONDS else 0
+	task.delay(delaySeconds, function()
+		if self._activeReplay ~= state then
+			return
+		end
+
+		ScreenEffects.HoldBlack()
+		state.ending = true
+		self:CancelReplay(reason)
+	end)
+end
+
 function ReplayClient:_stepReplay(state, deltaTime: number?)
 	local stepToken = RuntimeProfiler.Begin("Client/Replay/Step")
+	if state.ending == true then
+		RuntimeProfiler.End("Client/Replay/Step", stepToken)
+		return
+	end
+
 	local resolvedDeltaTime = if isFiniteNumber(deltaTime) and deltaTime >= 0 then math.min(deltaTime, 0.1) else 1 / 60
 	state.wallClockElapsed = (state.wallClockElapsed or 0) + resolvedDeltaTime
 	if state.wallClockElapsed > MAX_REPLAY_WALL_SECONDS then
@@ -2315,8 +2381,21 @@ function ReplayClient:_stepReplay(state, deltaTime: number?)
 
 	local destructionPending = typeof(state.destructionEvents) == "table"
 		and state.nextDestructionIndex <= #state.destructionEvents
+	if
+		state.replayType == "POTGReplay"
+		and state.potgEndFadeStarted ~= true
+		and not destructionPending
+		and not hasPendingReplayEvents(state)
+		and state.endTime - state.playhead <= POTG_REPLAY_END_FADE_SECONDS
+	then
+		self:_beginPOTGReplayEndFade(state, "Completed")
+	end
 	if state.playhead >= state.endTime and not destructionPending and not hasPendingReplayEvents(state) then
-		self:CancelReplay("Completed")
+		if state.replayType == "POTGReplay" then
+			self:_beginPOTGReplayEndFade(state, "Completed")
+		else
+			self:CancelReplay("Completed")
+		end
 	end
 	RuntimeProfiler.End("Client/Replay/Step", stepToken)
 end
@@ -2355,8 +2434,8 @@ end
 
 function ReplayClient:PlayReplay(payload): boolean
 	local playToken = RuntimeProfiler.Begin("Client/Replay/PlayReplay")
-	local replayType = getReplayPayloadType(payload)
-	debugReplayClient("PlayReplay called", replayType, "frames", getPayloadFrameCount(payload))
+	local replayType = ReplayClient.GetReplayPayloadType(payload)
+	ReplayClient.DebugReplayClient("PlayReplay called", replayType, "frames", ReplayClient.GetPayloadFrameCount(payload))
 	RuntimeProfiler.Count("Client/Replay/ReceivedFrames", if typeof(payload) == "table" and typeof(payload.frames) == "table" then #payload.frames else 0)
 	RuntimeProfiler.Count("Client/Replay/ReceivedEvents", if typeof(payload) == "table" and typeof(payload.events) == "table" then #payload.events else 0)
 	RuntimeProfiler.Count("Client/Replay/ReceivedDestructionEvents", if typeof(payload) == "table" and typeof(payload.destructionEvents) == "table" then #payload.destructionEvents else 0)
@@ -2371,7 +2450,7 @@ function ReplayClient:PlayReplay(payload): boolean
 		return false
 	end
 
-	if (replayType == "KillReplay" or replayType == "POTGReplay") and isSameActiveReplay(self._activeReplay, payload) then
+	if (replayType == "KillReplay" or replayType == "POTGReplay") and ReplayClient.IsSameActiveReplay(self._activeReplay, payload) then
 		RuntimeProfiler.Count("Client/Replay/SkippedDuplicateReplay")
 		RuntimeProfiler.End("Client/Replay/PlayReplay", playToken)
 		return false
@@ -2392,8 +2471,13 @@ function ReplayClient:PlayReplay(payload): boolean
 			return
 		end
 
+		self._explosionVfxBudget.windowStartedAt = 0
+		self._explosionVfxBudget.windowCount = 0
+		self._explosionVfxBudget.heartbeat = 0
+		self._explosionVfxBudget.heartbeatCount = 0
+
 		started = true
-		debugReplayClient(
+		ReplayClient.DebugReplayClient(
 			"Replay started",
 			state.replayType,
 			"start",
@@ -2413,7 +2497,7 @@ function ReplayClient:PlayReplay(payload): boolean
 			"overlay",
 			state.overlay ~= nil
 		)
-		self.ReplayStarted:Fire(buildReplaySignalPayloadFromState(state, "Started"))
+		self.ReplayStarted:Fire(ReplayClient.BuildReplaySignalPayloadFromState(state, "Started"))
 		RunService:UnbindFromRenderStep(REPLAY_RENDER_STEP_NAME)
 		state.renderBindingName = REPLAY_RENDER_STEP_NAME
 		RunService:BindToRenderStep(REPLAY_RENDER_STEP_NAME, REPLAY_RENDER_PRIORITY, function(deltaTime)
@@ -2442,11 +2526,11 @@ function ReplayClient:PlayReplay(payload): boolean
 		warn("[ReplayClient] Failed to play replay: " .. tostring(err))
 		self:CancelReplay("Error")
 		if replayType then
-			self.ReplayEnded:Fire(buildReplaySignalPayloadFromPayload(payload, "Failed"))
+			self.ReplayEnded:Fire(ReplayClient.BuildReplaySignalPayloadFromPayload(payload, "Failed"))
 		end
 	elseif not started and replayType then
-		debugReplayClient("Replay did not start", replayType)
-		self.ReplayEnded:Fire(buildReplaySignalPayloadFromPayload(payload, "Skipped"))
+		ReplayClient.DebugReplayClient("Replay did not start", replayType)
+		self.ReplayEnded:Fire(ReplayClient.BuildReplaySignalPayloadFromPayload(payload, "Skipped"))
 	end
 
 	RuntimeProfiler.End("Client/Replay/PlayReplay", playToken)
@@ -2471,7 +2555,6 @@ function ReplayClient:ReceiveKillReplay(payload)
 		return true
 	end
 
-	local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 	self._killReplayFadeSerial += 1
 	local serial = self._killReplayFadeSerial
 	task.defer(function()
@@ -2507,7 +2590,6 @@ function ReplayClient:PlayPOTGReplay(payload)
 		return false
 	end
 
-	local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 	if not ScreenEffects.IsBlack(0.01) and ScreenEffects.FadeToBlack(0.2) then
 		task.wait(0.2)
 		RunService.RenderStepped:Wait()
@@ -2540,7 +2622,7 @@ function ReplayClient:_startAnimationStatePublisher(remotesFolder: Instance, con
 end
 
 function ReplayClient:OnStart()
-	debugReplayClient("OnStart")
+	ReplayClient.DebugReplayClient("OnStart")
 	self:_disconnectAll()
 	self:CancelReplay()
 	ReplayAvatarFactory.Start({
@@ -2548,22 +2630,20 @@ function ReplayClient:OnStart()
 		debug = DEBUG_REPLAY_ANIMATION,
 	})
 	ReplayAssets.PrewarmContent(REPLAY_ASSETS_FOLDER_NAME)
-	ReplayMapSimulator.PrewarmTemplates()
-	ReplayMapSimulator.PrewarmReusableScenes()
 
 	local constants = getReplayConstants()
 	if not constants then
-		debugReplayClient("Missing ReplayConstants; remotes not bound")
+		ReplayClient.DebugReplayClient("Missing ReplayConstants; remotes not bound")
 		return
 	end
 
 	local function bindRemotes(remotesFolder: Instance)
 		if not (remotesFolder and remotesFolder:IsA("Folder")) then
-			debugReplayClient("Replay remotes folder unavailable", if remotesFolder then remotesFolder.ClassName else "nil")
+			ReplayClient.DebugReplayClient("Replay remotes folder unavailable", if remotesFolder then remotesFolder.ClassName else "nil")
 			return false
 		end
 
-		debugReplayClient("Binding replay remotes folder", remotesFolder:GetFullName())
+		ReplayClient.DebugReplayClient("Binding replay remotes folder", remotesFolder:GetFullName())
 		for _, remoteName in pairs(constants.REMOTES) do
 			if typeof(remoteName) == "string" and remoteName ~= constants.REMOTES.AnimationState then
 				self:_bindRemote(remotesFolder, remoteName)
@@ -2576,7 +2656,7 @@ function ReplayClient:OnStart()
 
 	local remotesFolder = ReplicatedStorage:FindFirstChild(constants.REMOTES_FOLDER_NAME)
 	if bindRemotes(remotesFolder) then
-		debugReplayClient("Replay remotes bound")
+		ReplayClient.DebugReplayClient("Replay remotes bound")
 		return
 	end
 
@@ -2584,7 +2664,7 @@ function ReplayClient:OnStart()
 	table.insert(self._connections, ReplicatedStorage.ChildAdded:Connect(function(child)
 		if child.Name == constants.REMOTES_FOLDER_NAME then
 			if bindRemotes(child) then
-				debugReplayClient("Replay remotes bound after folder appeared")
+				ReplayClient.DebugReplayClient("Replay remotes bound after folder appeared")
 			end
 		end
 	end))

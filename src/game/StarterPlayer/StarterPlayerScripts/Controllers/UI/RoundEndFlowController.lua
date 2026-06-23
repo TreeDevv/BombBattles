@@ -223,7 +223,9 @@ function RoundEndFlowController:_bindReplaySignals()
 	if ReplayClient.ReplayEnded and type(ReplayClient.ReplayEnded.Connect) == "function" then
 		self:_trackConnection(ReplayClient.ReplayEnded:Connect(function(payload)
 			if typeof(payload) == "table" and payload.type == "POTGReplay" then
-				ScreenEffects.FadeToBlack(0.35)
+				if not ScreenEffects.IsBlack(0.05) then
+					ScreenEffects.FadeToBlack(0.35)
+				end
 			end
 		end))
 	end

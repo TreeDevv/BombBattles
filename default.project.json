@@ -347,6 +347,9 @@
           "GameUiVisibilityController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GameUiVisibilityController.lua"
           },
+          "GiftMenuController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GiftMenuController.lua"
+          },
           "ScoreboardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ScoreboardController.lua"
           },

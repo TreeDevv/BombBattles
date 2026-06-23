@@ -1,5 +1,6 @@
 local RuntimeProfiler = require(game:GetService("ReplicatedStorage").Shared.Common.RuntimeProfiler)
 
+local RoundStates = require(game:GetService("ReplicatedStorage").Shared.Config.RoundStates)
 local ReplayClient = require(script.Parent:WaitForChild("ReplayClient"))
 local ReplayMapSimulator = require(script.Parent:WaitForChild("ReplayMapSimulator"))
 local RoundController = require(script.Parent.Parent:WaitForChild("RoundController"))
@@ -14,15 +15,35 @@ local function normalizeMapId(mapId: any): string?
 	return if typeof(mapId) == "string" and mapId ~= "" then mapId else nil
 end
 
+local ACTIVE_MAP_STATES = {
+	[RoundStates.RoundStarting] = true,
+	[RoundStates.Active] = true,
+	[RoundStates.PlayOfTheGame] = true,
+	[RoundStates.RoundEnding] = true,
+}
+
+local function getActiveReplayMapId(state): string?
+	if typeof(state) ~= "table" or ACTIVE_MAP_STATES[state.state] ~= true then
+		return nil
+	end
+
+	return normalizeMapId(state.selectedMapId)
+end
+
 function ReplayMapPrewarmController:_queueActiveMapPrewarm(mapId: any, _reason: string)
 	local resolvedMapId = normalizeMapId(mapId)
 	if not resolvedMapId then
+		self._activeMapId = nil
+		self._prewarmSerial += 1
+		ReplayMapSimulator.SetActivePrewarmMap(nil)
+		RuntimeProfiler.Count("Client/Replay/MapPrewarmController/ActiveMapPrewarmCleared")
 		return
 	end
 
 	self._activeMapId = resolvedMapId
 	self._prewarmSerial += 1
 	local serial = self._prewarmSerial
+	ReplayMapSimulator.SetActivePrewarmMap(resolvedMapId)
 
 	task.defer(function()
 		if serial ~= self._prewarmSerial then
@@ -41,11 +62,7 @@ function ReplayMapPrewarmController:_queueActiveMapPrewarm(mapId: any, _reason: 
 end
 
 function ReplayMapPrewarmController:_handleRoundState(state)
-	if typeof(state) ~= "table" then
-		return
-	end
-
-	self:_queueActiveMapPrewarm(state.selectedMapId, "StateReceived")
+	self:_queueActiveMapPrewarm(getActiveReplayMapId(state), "StateReceived")
 end
 
 function ReplayMapPrewarmController:_connect(signal, callback)
@@ -63,15 +80,15 @@ function ReplayMapPrewarmController:OnStart()
 		self:_handleRoundState(state)
 	end)
 
-	self:_connect(RoundController.StateUpdated, function(key, value)
-		if key == "selectedMapId" then
-			self:_queueActiveMapPrewarm(value, "StateUpdated")
+	self:_connect(RoundController.StateUpdated, function(key, _value)
+		if key == "selectedMapId" or key == "state" then
+			self:_handleRoundState(RoundController:GetState())
 		end
 	end)
 
 	self:_connect(ReplayClient.ReplayEnded, function(payload)
 		if typeof(payload) == "table" and (payload.type == "KillReplay" or payload.type == "POTGReplay") then
-			self:_queueActiveMapPrewarm(self._activeMapId or RoundController:Get("selectedMapId"), "ReplayEnded")
+			self:_handleRoundState(RoundController:GetState())
 		end
 	end)
 end

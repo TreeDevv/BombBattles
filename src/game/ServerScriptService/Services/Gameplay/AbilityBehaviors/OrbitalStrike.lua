@@ -605,11 +605,13 @@ local function startTerrainColumn(player: Player, definition: AbilityDefinition,
 	task.spawn(function()
 		local transparentCollisionClearance =
 			math.max(getDefinitionNumber(definition, "terrainTransparentCollisionClearance", 0), 0)
+		local maxTargetsPerExplosion = getDefinitionNumber(definition, "terrainColumnMaxTargetsPerStep", 32)
 		for index = 0, stepCount - 1 do
 			local offset = math.min(index * step, depth)
 			DestructionService:DestroySphere(position - Vector3.yAxis * offset, explosionRadius, sourceContext, {
 				forceSubtract = true,
 				transparentCollisionClearance = transparentCollisionClearance,
+				maxTargetsPerExplosion = maxTargetsPerExplosion,
 			})
 			if index < stepCount - 1 and interval > 0 then
 				task.wait(interval)

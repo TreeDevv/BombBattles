@@ -115,6 +115,23 @@ function RoundReplayRuntime.GetConfiguredDuration(value: any, fallback: number):
 	return fallback
 end
 
+function RoundReplayRuntime.GetPOTGIntroCandidate(recipients, debugEnabled: boolean?)
+	local service = RoundReplayRuntime.GetService(debugEnabled)
+	if not (service and type(service.GetPOTGIntroCandidate) == "function") then
+		return nil
+	end
+
+	local candidate = nil
+	local ok, err = pcall(function()
+		candidate = service.GetPOTGIntroCandidate(recipients)
+	end)
+	if debugEnabled and not ok then
+		warn("[RoundReplayRuntime] POTG intro candidate lookup failed:", err)
+	end
+
+	return if ok and typeof(candidate) == "table" then candidate else nil
+end
+
 function RoundReplayRuntime.PlayPOTG(roundPlayers, maxWaitSeconds: number, debugEnabled: boolean?): boolean
 	local service = RoundReplayRuntime.GetService(debugEnabled)
 	if not (service and type(service.PlayPOTG) == "function") then

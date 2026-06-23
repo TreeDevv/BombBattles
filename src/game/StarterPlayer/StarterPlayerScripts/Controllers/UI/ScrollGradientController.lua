@@ -7,10 +7,13 @@ local SCROLL_DURATION_ATTRIBUTE = "ScrollDuration"
 local SCROLL_START_X_ATTRIBUTE = "ScrollStartX"
 local SCROLL_END_X_ATTRIBUTE = "ScrollEndX"
 local SCROLL_VERTICAL_ATTRIBUTE = "ScrollVertical"
+local SCROLL_MAX_DISTANCE_ATTRIBUTE = "ScrollMaxDistance"
 
 local DEFAULT_DURATION = 2
 local DEFAULT_SCROLL_START_X = -1
 local DEFAULT_SCROLL_END_X = 1
+local DEFAULT_BILLBOARD_MAX_DISTANCE = 150
+local BILLBOARD_DISTANCE_CHECK_INTERVAL = 0.25
 local MIN_DURATION = 0.05
 local DEFAULT_SCROLL_DISTANCE = DEFAULT_SCROLL_END_X - DEFAULT_SCROLL_START_X
 local KEYPOINT_EPSILON = 1e-4
@@ -20,6 +23,9 @@ type ScrollRecord = {
 	originalOffset: Vector2,
 	originalColor: ColorSequence,
 	phase: number,
+	billboard: BillboardGui?,
+	billboardActive: boolean,
+	billboardCheckElapsed: number,
 	connections: { RBXScriptConnection },
 }
 
@@ -49,6 +55,48 @@ end
 
 local function getEndX(gradient: UIGradient): number
 	return getNumberAttribute(gradient, SCROLL_END_X_ATTRIBUTE, DEFAULT_SCROLL_END_X)
+end
+
+local function getBillboardMaxDistance(gradient: UIGradient, billboard: BillboardGui): number
+	local distance = getNumberAttribute(gradient, SCROLL_MAX_DISTANCE_ATTRIBUTE, -1)
+	if distance < 0 then
+		distance = getNumberAttribute(billboard, SCROLL_MAX_DISTANCE_ATTRIBUTE, DEFAULT_BILLBOARD_MAX_DISTANCE)
+	end
+
+	return math.max(distance, 0)
+end
+
+local function getInstanceWorldPosition(instance: Instance?): Vector3?
+	if not instance then
+		return nil
+	end
+
+	if instance:IsA("Attachment") then
+		return instance.WorldPosition
+	end
+
+	if instance:IsA("BasePart") then
+		return instance.Position
+	end
+
+	if instance:IsA("Model") then
+		return instance:GetPivot().Position
+	end
+
+	return nil
+end
+
+local function getBillboardWorldPosition(billboard: BillboardGui): Vector3?
+	return getInstanceWorldPosition(billboard.Adornee) or getInstanceWorldPosition(billboard.Parent)
+end
+
+local function isBillboardRenderable(billboard: BillboardGui): boolean
+	return billboard.Enabled and (billboard.Adornee ~= nil or billboard:IsDescendantOf(workspace))
+end
+
+local function getAncestorBillboard(gradient: UIGradient): BillboardGui?
+	local billboard = gradient:FindFirstAncestorWhichIsA("BillboardGui")
+	return if billboard and billboard:IsA("BillboardGui") then billboard else nil
 end
 
 local function hasScrollTagAlias(instance: Instance): boolean
@@ -185,6 +233,27 @@ function ScrollGradientController:_updateGradient(record: ScrollRecord, deltaTim
 		return
 	end
 
+	local billboard = record.billboard
+	if billboard then
+		record.billboardCheckElapsed += deltaTime
+		if record.billboardCheckElapsed >= BILLBOARD_DISTANCE_CHECK_INTERVAL then
+			record.billboardCheckElapsed = 0
+
+			local camera = workspace.CurrentCamera
+			local billboardPosition = getBillboardWorldPosition(billboard)
+			if isBillboardRenderable(billboard) and camera and billboardPosition then
+				local maxDistance = getBillboardMaxDistance(gradient, billboard)
+				record.billboardActive = (camera.CFrame.Position - billboardPosition).Magnitude <= maxDistance
+			else
+				record.billboardActive = false
+			end
+		end
+
+		if not record.billboardActive then
+			return
+		end
+	end
+
 	record.phase = getWrappedTime(record.phase + getPhaseDelta(gradient, deltaTime))
 	gradient.Offset = record.originalOffset
 	gradient.Color = offsetColorSequence(record.originalColor, record.phase)
@@ -243,18 +312,30 @@ function ScrollGradientController:_registerGradient(instance: Instance)
 	if self._records[gradient] then
 		return
 	end
+	local billboard = getAncestorBillboard(gradient)
 
 	local record: ScrollRecord = {
 		gradient = gradient,
 		originalOffset = gradient.Offset,
 		originalColor = gradient.Color,
 		phase = 0,
+		billboard = billboard,
+		billboardActive = billboard == nil,
+		billboardCheckElapsed = BILLBOARD_DISTANCE_CHECK_INTERVAL,
 		connections = {},
 	}
 
 	table.insert(record.connections, gradient.AncestryChanged:Connect(function()
 		if not gradient:IsDescendantOf(game) then
 			self:_unregisterGradient(gradient)
+			return
+		end
+
+		local currentBillboard = getAncestorBillboard(gradient)
+		if currentBillboard ~= record.billboard then
+			record.billboard = currentBillboard
+			record.billboardActive = currentBillboard == nil
+			record.billboardCheckElapsed = BILLBOARD_DISTANCE_CHECK_INTERVAL
 		end
 	end))
 

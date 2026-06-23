@@ -66,6 +66,7 @@ return {
 
 	MapsFolderPath = { "Assets", "Maps" },
 	ActiveMapName = "Map",
+	ActiveMapWorldOffset = Vector3.new(12000, 0, 0),
 
 	Maps = {
 		{

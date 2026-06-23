@@ -1,4 +1,5 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
@@ -11,11 +12,15 @@ type MeshRecord = {
 	finalScale: Vector3,
 	startScale: Vector3,
 }
+type VisualRecord = {
+	instance: Instance,
+	connections: { RBXScriptConnection },
+}
 
 local ForcefieldDome = {} :: AbilityTypes.ClientBehavior
 
 local VISUAL_FOLDER_NAME = "ForcefieldDomeVisuals"
-local ACTIVE_VISUALS: { [Player]: Instance } = {}
+local ACTIVE_VISUALS: { [Player]: VisualRecord } = {}
 
 local function getByPath(root: Instance, path: { string }): Instance?
 	local current: Instance? = root
@@ -96,43 +101,67 @@ local function getVisualFolder(): Folder
 	return folder
 end
 
-local function getPrimaryVisualPart(clone: Instance): BasePart?
-	if clone:IsA("Model") and clone.PrimaryPart then
-		return clone.PrimaryPart
-	end
-	if clone:IsA("BasePart") then
-		return clone
-	end
-	return clone:FindFirstChildWhichIsA("BasePart", true)
-end
-
-local function attachToRoot(clone: Instance, rootPart: BasePart)
-	local visualPart = getPrimaryVisualPart(clone)
-	if not visualPart then
-		return false
-	end
-
-	pivotTo(clone, rootPart.CFrame)
-
-	for _, weld in ipairs(clone:GetDescendants()) do
-		if weld:IsA("WeldConstraint") then
-			weld.Part0 = rootPart
-			if not weld.Part1 then
-				weld.Part1 = visualPart
-			end
-			weld.Enabled = true
+local function removeAuthoredWelds(clone: Instance)
+	for _, descendant in ipairs(clone:GetDescendants()) do
+		if descendant:IsA("WeldConstraint") then
+			descendant:Destroy()
 		end
 	end
+end
 
-	return true
+local function weldPartToRoot(part: BasePart, rootPart: BasePart)
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = "ForcefieldDomeWeld"
+	weld.Part0 = rootPart
+	weld.Part1 = part
+	weld.Parent = part
+end
+
+local function disconnectConnections(connections: { RBXScriptConnection }?)
+	for _, connection in ipairs(connections or {}) do
+		connection:Disconnect()
+	end
 end
 
 local function destroyVisual(player: Player)
-	local visual = ACTIVE_VISUALS[player]
+	local record = ACTIVE_VISUALS[player]
 	ACTIVE_VISUALS[player] = nil
-	if visual and visual.Parent then
-		visual:Destroy()
+	if record then
+		disconnectConnections(record.connections)
+		if record.instance.Parent then
+			record.instance:Destroy()
+		end
 	end
+end
+
+local function bindVisualCleanup(player: Player, rootPart: BasePart, clone: Instance): { RBXScriptConnection }
+	local connections = {}
+
+	local function cleanupIfCurrent()
+		local current = ACTIVE_VISUALS[player]
+		if current and current.instance == clone then
+			destroyVisual(player)
+		end
+	end
+
+	table.insert(connections, rootPart.Destroying:Connect(cleanupIfCurrent))
+	table.insert(connections, rootPart.AncestryChanged:Connect(function()
+		if not rootPart:IsDescendantOf(workspace) then
+			cleanupIfCurrent()
+		end
+	end))
+	table.insert(connections, player.CharacterRemoving:Connect(function(character)
+		if rootPart:IsDescendantOf(character) then
+			cleanupIfCurrent()
+		end
+	end))
+	table.insert(connections, player.AncestryChanged:Connect(function()
+		if not player:IsDescendantOf(Players) then
+			cleanupIfCurrent()
+		end
+	end))
+
+	return connections
 end
 
 local function tweenParts(records, tweenInfo: TweenInfo, transparency: number, shrink: boolean)
@@ -168,14 +197,18 @@ local function playVisual(player: Player, definition: AbilityDefinition, activeE
 
 	local clone = template:Clone()
 	clone.Name = "ForcefieldDome_" .. tostring(player.UserId)
-	if not attachToRoot(clone, rootPart) then
+	local visualParts = getBaseParts(clone)
+	if #visualParts == 0 then
 		clone:Destroy()
 		return
 	end
 
+	pivotTo(clone, rootPart.CFrame)
+	removeAuthoredWelds(clone)
+
 	local startScale = math.clamp(tonumber(definition.startScale) or 0.01, 0.001, 1)
 	local records = {}
-	for _, part in ipairs(getBaseParts(clone)) do
+	for _, part in ipairs(visualParts) do
 		local finalSize = part.Size
 		local finalTransparency = part.Transparency
 		part.Anchored = false
@@ -185,6 +218,7 @@ local function playVisual(player: Player, definition: AbilityDefinition, activeE
 		part.Massless = true
 		part.Transparency = 1
 		part.Size = scaledVector(finalSize, startScale)
+		weldPartToRoot(part, rootPart)
 
 		local meshRecords = {}
 		for _, child in ipairs(part:GetChildren()) do
@@ -210,7 +244,10 @@ local function playVisual(player: Player, definition: AbilityDefinition, activeE
 	end
 
 	clone.Parent = getVisualFolder()
-	ACTIVE_VISUALS[player] = clone
+	ACTIVE_VISUALS[player] = {
+		instance = clone,
+		connections = bindVisualCleanup(player, rootPart, clone),
+	}
 
 	local fadeInSeconds = math.max(tonumber(definition.fadeInSeconds) or 0.18, 0.01)
 	local growthSeconds = math.max(tonumber(definition.growthSeconds) or fadeInSeconds, 0.01)
@@ -235,14 +272,16 @@ local function playVisual(player: Player, definition: AbilityDefinition, activeE
 	local fadeOutSeconds = math.max(tonumber(definition.fadeOutSeconds) or 0.25, 0.01)
 	local delaySeconds = math.max(activeEndsAt - workspace:GetServerTimeNow() - fadeOutSeconds, 0)
 	task.delay(delaySeconds, function()
-		if ACTIVE_VISUALS[player] ~= clone or not clone.Parent then
+		local activeRecord = ACTIVE_VISUALS[player]
+		if not activeRecord or activeRecord.instance ~= clone or not clone.Parent then
 			return
 		end
 
 		local outInfo = TweenInfo.new(fadeOutSeconds, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
 		tweenParts(records, outInfo, 1, true)
 		task.delay(fadeOutSeconds, function()
-			if ACTIVE_VISUALS[player] == clone then
+			local current = ACTIVE_VISUALS[player]
+			if current and current.instance == clone then
 				destroyVisual(player)
 			elseif clone.Parent then
 				clone:Destroy()

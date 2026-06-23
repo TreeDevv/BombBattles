@@ -48,7 +48,7 @@ BundleCatalog.Offers = table.freeze({
 		TierStyle = "Standard",
 		ProductKey = "FatPack",
 		CompareAtPrice = nil,
-		Giftable = false,
+		Giftable = true,
 		Contents = table.freeze({
 			table.freeze({
 				ItemId = "FatBomb",

@@ -13,6 +13,7 @@ local visualRoot: Instance? = nil
 local groupChest: Instance? = nil
 local friendChest: Instance? = nil
 local warnedMissingVisuals = false
+local rebindQueued = false
 local transparencyTweens: { [BasePart]: Tween } = {}
 local originalTransparency: { [BasePart]: number } = {}
 
@@ -22,6 +23,7 @@ local visualTweenInfo = TweenInfo.new(
 	Enum.EasingStyle.Quint,
 	Enum.EasingDirection.Out
 )
+local applyRewardStage: (() -> ())? = nil
 
 local function waitForRemoteEvent(remoteName: string): RemoteEvent?
 	local remotesFolder = ReplicatedStorage:WaitForChild(GroupRewardConfig.RemotesFolderName, 10)
@@ -49,8 +51,7 @@ local function waitForRemoteFunction(remoteName: string): RemoteFunction?
 	return nil
 end
 
-local function waitForPath(root: Instance, pathParts: { string }, timeoutSeconds: number): Instance?
-	local deadline = os.clock() + timeoutSeconds
+local function findPath(root: Instance, pathParts: { string }): Instance?
 	local current: Instance? = root
 
 	for _, childName in ipairs(pathParts) do
@@ -58,14 +59,27 @@ local function waitForPath(root: Instance, pathParts: { string }, timeoutSeconds
 			return nil
 		end
 
-		local remaining = math.max(0.05, deadline - os.clock())
-		current = current:WaitForChild(childName, remaining)
+		current = current:FindFirstChild(childName)
 		if not current then
 			return nil
 		end
 	end
 
 	return current
+end
+
+local function scheduleApplyRewardStage()
+	if rebindQueued then
+		return
+	end
+
+	rebindQueued = true
+	task.defer(function()
+		rebindQueued = false
+		if applyRewardStage then
+			applyRewardStage()
+		end
+	end)
 end
 
 local function getVisualRoot(): Instance?
@@ -78,7 +92,7 @@ local function getVisualRoot(): Instance?
 		return visualRoot
 	end
 
-	visualRoot = waitForPath(Workspace, rootPath, 10)
+	visualRoot = findPath(Workspace, rootPath)
 	return visualRoot
 end
 
@@ -94,8 +108,8 @@ local function resolveVisuals(): (Instance?, Instance?)
 
 	local groupChestName = tostring(visualConfig.GroupChestName or "GroupRewards")
 	local friendChestName = tostring(visualConfig.FriendChestName or "FriendRewards")
-	groupChest = root:WaitForChild(groupChestName, 10)
-	friendChest = root:WaitForChild(friendChestName, 10)
+	groupChest = root:FindFirstChild(groupChestName)
+	friendChest = root:FindFirstChild(friendChestName)
 
 	return groupChest, friendChest
 end
@@ -162,7 +176,7 @@ local function setChestVisible(chest: Instance?, visible: boolean)
 	end
 end
 
-local function applyRewardStage()
+applyRewardStage = function()
 	local groupVisual, friendVisual = resolveVisuals()
 	if not (groupVisual and friendVisual) then
 		if not warnedMissingVisuals then
@@ -251,6 +265,11 @@ function GroupRewardController:OnStart()
 	local stateRequestRemote = waitForRemoteFunction(GroupRewardConfig.StateRequestRemoteName)
 
 	task.spawn(applyRewardStage)
+	Workspace.DescendantAdded:Connect(function(descendant)
+		if descendant.Name == "Lobby" or descendant.Name == "GroupRewards" or descendant.Name == "FriendRewards" then
+			scheduleApplyRewardStage()
+		end
+	end)
 
 	if promptRemote and resultRemote then
 		promptRemote.OnClientEvent:Connect(function(payload)

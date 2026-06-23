@@ -24,6 +24,7 @@ local destructibleAddedConnection: RBXScriptConnection? = nil
 local destructibleRemovedConnection: RBXScriptConnection? = nil
 local unsafeTagConnections: { RBXScriptConnection } = {}
 local taggedRootRecords: { [Instance]: any } = {}
+local lightweightTargetPartConnections: { [BasePart]: { RBXScriptConnection } } = {}
 local targetPartRefCounts: { [BasePart]: number } = {}
 local targetPartIndices: { [BasePart]: number } = {}
 local targetParts: { BasePart } = {}
@@ -31,6 +32,7 @@ local spatialGrid: { [string]: { [BasePart]: boolean } } = {}
 local targetPartGridCells: { [BasePart]: { string } } = {}
 local spatialGridCellCount = 0
 local cachedRootCount = 0
+local lightweightTargetPartCount = 0
 local destructionListeners: { (any) -> () } = {}
 local unsafeRefreshQueued = false
 local bulkUpdateDepth = 0
@@ -246,6 +248,21 @@ local function clearSpatialGrid()
 	spatialGridCellCount = 0
 end
 
+local function isCurrentVoxelPart(instance: Instance): boolean
+	if not instance:IsA("BasePart") then
+		return false
+	end
+
+	local current: Instance? = instance.Parent
+	while current and current ~= workspace do
+		if current.Name == CURRENT_VOXELS_FOLDER_NAME then
+			return true
+		end
+		current = current.Parent
+	end
+	return false
+end
+
 local function addCachedTargetPart(part: BasePart)
 	if not part:IsDescendantOf(workspace) then
 		return
@@ -300,6 +317,42 @@ local function clearRecordParts(record)
 		removeCachedTargetPart(part)
 	end
 	table.clear(record.parts)
+end
+
+local unregisterLightweightTargetPart
+
+local function registerLightweightTargetPart(part: BasePart)
+	if lightweightTargetPartConnections[part] then
+		return
+	end
+	if not part:IsDescendantOf(workspace) or hasUnsafeTaggedAncestor(part) then
+		return
+	end
+
+	addCachedTargetPart(part)
+	lightweightTargetPartCount += 1
+	lightweightTargetPartConnections[part] = {
+		part.Destroying:Connect(function()
+			unregisterLightweightTargetPart(part)
+		end),
+		part.AncestryChanged:Connect(function()
+			if not part:IsDescendantOf(workspace) then
+				unregisterLightweightTargetPart(part)
+			end
+		end),
+	}
+end
+
+unregisterLightweightTargetPart = function(part: BasePart)
+	local connections = lightweightTargetPartConnections[part]
+	if not connections then
+		return
+	end
+
+	removeCachedTargetPart(part)
+	disconnectConnections(connections)
+	lightweightTargetPartConnections[part] = nil
+	lightweightTargetPartCount = math.max(lightweightTargetPartCount - 1, 0)
 end
 
 local function addRecordPart(record, part: BasePart)
@@ -463,11 +516,27 @@ local function rebuildTargetCache(reason: string?)
 	table.clear(targetPartRefCounts)
 	table.clear(targetPartIndices)
 	table.clear(targetParts)
+	local lightweightParts = {}
+	for part in pairs(lightweightTargetPartConnections) do
+		table.insert(lightweightParts, part)
+	end
+	for _, part in ipairs(lightweightParts) do
+		local connections = lightweightTargetPartConnections[part]
+		if connections then
+			disconnectConnections(connections)
+			lightweightTargetPartConnections[part] = nil
+		end
+	end
 	clearSpatialGrid()
 	cachedRootCount = 0
+	lightweightTargetPartCount = 0
 
 	for _, instance in ipairs(CollectionService:GetTagged(DestructionConfig.Tag)) do
-		registerTaggedRoot(instance)
+		if isCurrentVoxelPart(instance) then
+			registerLightweightTargetPart(instance)
+		else
+			registerTaggedRoot(instance)
+		end
 	end
 
 	RuntimeProfiler.Count("Server/Destruction/TargetCacheRebuilds")
@@ -475,6 +544,7 @@ local function rebuildTargetCache(reason: string?)
 		RuntimeProfiler.Count("Server/Destruction/TargetCacheRebuild/" .. reason)
 	end
 	RuntimeProfiler.Gauge("Server/Destruction/DestructibleRoots", cachedRootCount)
+	RuntimeProfiler.Gauge("Server/Destruction/LightweightTargetParts", lightweightTargetPartCount)
 	RuntimeProfiler.Gauge("Server/Destruction/TargetParts", #targetParts)
 	RuntimeProfiler.Gauge("Server/Destruction/SpatialGridCells", spatialGridCellCount)
 	RuntimeProfiler.End("Server/Destruction/RebuildTargetCache", token)
@@ -486,7 +556,11 @@ local function handleTaggedRootAdded(root: Instance)
 		return
 	end
 
-	registerTaggedRoot(root)
+	if isCurrentVoxelPart(root) then
+		registerLightweightTargetPart(root :: BasePart)
+	else
+		registerTaggedRoot(root)
+	end
 end
 
 local function handleTaggedRootRemoved(root: Instance)
@@ -495,6 +569,9 @@ local function handleTaggedRootRemoved(root: Instance)
 		return
 	end
 
+	if root:IsA("BasePart") then
+		unregisterLightweightTargetPart(root)
+	end
 	unregisterTaggedRoot(root)
 end
 
@@ -526,6 +603,7 @@ local function getDestructibleTargets(): { BasePart }
 	end
 
 	RuntimeProfiler.Gauge("Server/Destruction/DestructibleRoots", cachedRootCount)
+	RuntimeProfiler.Gauge("Server/Destruction/LightweightTargetParts", lightweightTargetPartCount)
 	RuntimeProfiler.Gauge("Server/Destruction/TargetParts", #targetParts)
 	RuntimeProfiler.Gauge("Server/Destruction/SpatialGridCells", spatialGridCellCount)
 	RuntimeProfiler.End("Server/Destruction/GetTargets", token)
@@ -637,6 +715,85 @@ local function getCandidateTargets(position: Vector3, radius: number, targets: {
 	RuntimeProfiler.Gauge("Server/Destruction/LastCandidateTargets", #candidates)
 	RuntimeProfiler.End("Server/Destruction/PrefilterTargets", token)
 	return candidates
+end
+
+local function getPartBoundsDistanceSquared(part: BasePart, position: Vector3): number
+	local localPosition = part.CFrame:PointToObjectSpace(position)
+	local halfSize = part.Size * 0.5
+	local dx = math.max(math.abs(localPosition.X) - halfSize.X, 0)
+	local dy = math.max(math.abs(localPosition.Y) - halfSize.Y, 0)
+	local dz = math.max(math.abs(localPosition.Z) - halfSize.Z, 0)
+	return dx * dx + dy * dy + dz * dz
+end
+
+local function getMaxTargetsPerExplosion(options): number?
+	local configured = if typeof(options) == "table" and typeof(options.maxTargetsPerExplosion) == "number"
+		then options.maxTargetsPerExplosion
+		else DestructionConfig.MaxTargetsPerExplosion
+	if typeof(configured) ~= "number" or configured <= 0 then
+		return nil
+	end
+
+	local hardMax = DestructionConfig.HardMaxTargetsPerExplosion
+	if typeof(hardMax) == "number" and hardMax > 0 then
+		configured = math.min(configured, hardMax)
+	end
+	return math.max(math.floor(configured), 1)
+end
+
+local function getCandidateDistanceSquared(part: BasePart, position: Vector3): number
+	return getPartBoundsDistanceSquared(part, position)
+end
+
+local function selectNearestCandidateTargets(position: Vector3, candidates: { BasePart }, maxTargets: number): { BasePart }
+	local selected = {}
+	local distances = {}
+	local selectedCount = 0
+	local worstIndex = 0
+	local worstDistance = -math.huge
+
+	for _, part in ipairs(candidates) do
+		local distance = getCandidateDistanceSquared(part, position)
+		if selectedCount < maxTargets then
+			selectedCount += 1
+			selected[selectedCount] = part
+			distances[selectedCount] = distance
+			if distance > worstDistance then
+				worstDistance = distance
+				worstIndex = selectedCount
+			end
+		elseif distance < worstDistance then
+			selected[worstIndex] = part
+			distances[worstIndex] = distance
+			worstIndex = 1
+			worstDistance = distances[1] or -math.huge
+			for index = 2, selectedCount do
+				local selectedDistance = distances[index]
+				if selectedDistance and selectedDistance > worstDistance then
+					worstDistance = selectedDistance
+					worstIndex = index
+				end
+			end
+		end
+	end
+
+	return selected
+end
+
+local function capCandidateTargets(position: Vector3, candidates: { BasePart }, options): { BasePart }
+	local maxTargets = getMaxTargetsPerExplosion(options)
+	if not maxTargets or #candidates <= maxTargets then
+		return candidates
+	end
+
+	local token = RuntimeProfiler.Begin("Server/Destruction/CapCandidateTargets")
+	local capped = selectNearestCandidateTargets(position, candidates, maxTargets)
+
+	RuntimeProfiler.Count("Server/Destruction/CandidateTargetsCapped")
+	RuntimeProfiler.Count("Server/Destruction/CandidateTargetsSkippedByCap", #candidates - #capped)
+	RuntimeProfiler.Gauge("Server/Destruction/LastCappedCandidateTargets", #capped)
+	RuntimeProfiler.End("Server/Destruction/CapCandidateTargets", token)
+	return capped
 end
 
 local function getPayloadColorKey(color): string
@@ -919,6 +1076,7 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 	local ok, err = pcall(function()
 		local voxelOptions = buildVoxelOptions(options)
 		local candidateTargets = getCandidateTargets(position, destructionRadius, targets, voxelOptions)
+		candidateTargets = capCandidateTargets(position, candidateTargets, voxelOptions)
 		if candidateTargets ~= targets then
 			voxelOptions.prefilteredTargets = true
 		end

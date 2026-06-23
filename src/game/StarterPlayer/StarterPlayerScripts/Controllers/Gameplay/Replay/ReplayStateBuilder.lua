@@ -142,6 +142,7 @@ function ReplayStateBuilder.Build(client, payload, deps)
 	local destructionEvents = deps.ReplayMapSimulator.NormalizeDestructionEvents(
 		mapContext,
 		payload.destructionEvents,
+		startTime,
 		endTime
 	)
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/NormalizeDestructionEvents", normalizeToken)

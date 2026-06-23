@@ -424,13 +424,20 @@ function RoundFlow.firePOTGIntro(recipients: { Player }, winnerTeam: string)
 
 	local endFlowConfig = RoundFlow.getEndFlowConfig()
 	local remote = RoundFlow.ensurePOTGIntroRemote()
+	local potgCandidate = RoundReplayRuntime.GetPOTGIntroCandidate(recipients, DEBUG_REPLAY_EVENTS)
 	local payload = {
 		type = "POTGIntro",
 		roundId = roundId,
 		winnerTeam = winnerTeam,
 		mode = endFlowConfig.CutsceneModes.FullAnimation,
+		cutsceneId = endFlowConfig.DefaultPOTGIntroCutsceneId,
 		cameraCFrame = RoundFlow.getPOTGAttachmentCFrame(),
 	}
+	if potgCandidate then
+		for key, value in pairs(potgCandidate) do
+			payload[key] = value
+		end
+	end
 
 	for _, player in ipairs(recipients) do
 		if player.Parent == Players and roundPlayers[player] == true then
@@ -1326,24 +1333,35 @@ local function bindCore(core: Instance, map: Instance)
 end
 
 local function setupTeamCores(map: Model): boolean
+	local token = RuntimeProfiler.Begin("Server/Round/Map/SetupTeamCores")
 	disconnectCoreConnections()
 	teamCoreInstances = {}
 
 	for _, teamName in ipairs(TEAM_ORDER) do
+		local findToken = RuntimeProfiler.Begin("Server/Round/Map/FindTeamCores")
 		local cores = getTeamCores(teamName, map)
+		RuntimeProfiler.End("Server/Round/Map/FindTeamCores", findToken)
+		RuntimeProfiler.Count("Server/Round/Map/TeamCoreCandidates", #cores)
 		local repairedCores = {}
 		for _, core in ipairs(cores) do
+			local coreToken = RuntimeProfiler.Begin("Server/Round/Map/PrepareTeamCore")
 			local repairedCore = RoundCoreRuntime.RepairEmptyCoreModel(core, teamName)
 			table.insert(repairedCores, RoundCoreRuntime.PrepareCoreForRound(repairedCore, teamName))
+			RuntimeProfiler.End("Server/Round/Map/PrepareTeamCore", coreToken)
 		end
 		teamCoreInstances[teamName] = repairedCores
 
 		for _, core in ipairs(repairedCores) do
+			local bindToken = RuntimeProfiler.Begin("Server/Round/Map/BindTeamCore")
 			bindCore(core, map)
+			RuntimeProfiler.End("Server/Round/Map/BindTeamCore", bindToken)
 		end
 	end
 
+	local syncToken = RuntimeProfiler.Begin("Server/Round/Map/SyncCoreState")
 	syncCoreState()
+	RuntimeProfiler.End("Server/Round/Map/SyncCoreState", syncToken)
+	RuntimeProfiler.End("Server/Round/Map/SetupTeamCores", token)
 	return true
 end
 
@@ -1656,31 +1674,46 @@ function RoundService.AssignTeams(players: { Player })
 end
 
 function RoundService.TeleportTeamsToMap(map: Model): boolean
+	local teleportStartedAt = os.clock()
 	for _, teamName in ipairs(TEAM_ORDER) do
+		local validateToken = RuntimeProfiler.Begin("Server/Round/Map/ValidateTeamSpawns")
 		local spawns = getTeamSpawns(teamName, map)
+		RuntimeProfiler.End("Server/Round/Map/ValidateTeamSpawns", validateToken)
+		RuntimeProfiler.Count("Server/Round/Map/TeamSpawnCandidates", #spawns)
 		if #spawns == 0 then
 			warn("[RoundService] Missing TeamSpawn parts for team:", teamName)
+			RuntimeProfiler.RecordDurationMs("Server/Round/Map/TeleportTeamsWall", (os.clock() - teleportStartedAt) * 1000)
 			return false
 		end
 	end
 
 	for player in pairs(roundPlayers) do
 		local teamName = playerTeams[player]
+		local lookupToken = RuntimeProfiler.Begin("Server/Round/Map/GetPlayerTeamSpawns")
 		local spawns = teamName and getTeamSpawns(teamName, map) or {}
+		RuntimeProfiler.End("Server/Round/Map/GetPlayerTeamSpawns", lookupToken)
 		if #spawns > 0 then
 			if not hasUsableCharacter(player) then
+				local loadStartedAt = os.clock()
 				if
 					not RespawnFlow.safeLoadCharacter(player, "RoundStart")
 					or not RespawnFlow.waitForUsableCharacter(player, ROUND_CHARACTER_READY_TIMEOUT_SECONDS)
 				then
 					warn("[RoundService] Timed out waiting for round character:", player.Name)
+					RuntimeProfiler.RecordDurationMs("Server/Round/Map/LoadRoundCharacterWall", (os.clock() - loadStartedAt) * 1000)
+					RuntimeProfiler.RecordDurationMs("Server/Round/Map/TeleportTeamsWall", (os.clock() - teleportStartedAt) * 1000)
 					return false
 				end
+				RuntimeProfiler.RecordDurationMs("Server/Round/Map/LoadRoundCharacterWall", (os.clock() - loadStartedAt) * 1000)
 			end
+			local moveToken = RuntimeProfiler.Begin("Server/Round/Map/MovePlayerToTeamSpawn")
 			RoundSpawnRuntime.MoveCharacterToTeamSpawn(player, spawns[rng:NextInteger(1, #spawns)], map)
+			RuntimeProfiler.End("Server/Round/Map/MovePlayerToTeamSpawn", moveToken)
+			RuntimeProfiler.Count("Server/Round/Map/TeleportedPlayers")
 		end
 	end
 
+	RuntimeProfiler.RecordDurationMs("Server/Round/Map/TeleportTeamsWall", (os.clock() - teleportStartedAt) * 1000)
 	return true
 end
 
@@ -1909,20 +1942,46 @@ function RoundService:_runRoundLoop()
 		playerTeams = {}
 		RoundService.AssignTeams(roster)
 
-		RoundMapRuntime.WaitForPreparedMapClone(selectedMapId, RoundMapRuntime.MapPrepSelectedWaitSeconds)
+		local selectedMapSetupStartedAt = os.clock()
+		local preparedCloneReady = RoundMapRuntime.WaitForPreparedMapClone(
+			selectedMapId,
+			RoundMapRuntime.MapPrepSelectedWaitSeconds
+		)
+		if preparedCloneReady then
+			RuntimeProfiler.Count("Server/Round/Map/SelectedPreparedCloneReady")
+		else
+			RuntimeProfiler.Count("Server/Round/Map/SelectedPreparedCloneNotReady")
+		end
 
+		local bulkBeginToken = RuntimeProfiler.Begin("Server/Round/Map/BeginBulkUpdate")
 		DestructionService:BeginBulkUpdate("RoundMapSetup")
+		RuntimeProfiler.End("Server/Round/Map/BeginBulkUpdate", bulkBeginToken)
 		local map = spawnActiveMap(selectedMapId)
 		local mapReady = map and setupTeamCores(map)
+		local bulkEndToken = RuntimeProfiler.Begin("Server/Round/Map/EndBulkUpdate")
 		DestructionService:EndBulkUpdate("RoundMapSetup")
+		RuntimeProfiler.End("Server/Round/Map/EndBulkUpdate", bulkEndToken)
 		if map then
+			local lightingToken = RuntimeProfiler.Begin("Server/Round/Map/ApplyLighting")
 			RoundLightingRuntime.ApplyMapLighting(map)
+			RuntimeProfiler.End("Server/Round/Map/ApplyLighting", lightingToken)
 		end
-		if not mapReady or not map or not RoundService.TeleportTeamsToMap(map) then
+		local teleportedToMap = if map then RoundService.TeleportTeamsToMap(map) else false
+		if not mapReady or not map or not teleportedToMap then
+			RuntimeProfiler.RecordDurationMs(
+				"Server/Round/Map/SelectedSetupWall",
+				(os.clock() - selectedMapSetupStartedAt) * 1000
+			)
 			RoundFlow.cancelToWaiting("Round cancelled because map setup is incomplete")
 			continue
 		end
+		local replayMapToken = RuntimeProfiler.Begin("Server/Round/Map/SetReplayRoundMap")
 		setReplayRoundMap(selectedMapId, map)
+		RuntimeProfiler.End("Server/Round/Map/SetReplayRoundMap", replayMapToken)
+		RuntimeProfiler.RecordDurationMs(
+			"Server/Round/Map/SelectedSetupWall",
+			(os.clock() - selectedMapSetupStartedAt) * 1000
+		)
 
 		local roundStartingSeconds = if typeof(RoundConfig.RoundStartingSeconds) == "number"
 			then math.max(RoundConfig.RoundStartingSeconds, 0)

@@ -164,15 +164,55 @@ function RoundCharacterRuntime.BindRoundCharacter(options)
 			return
 		end
 
-		options.connections:Add(player, humanoid.Died:Connect(function()
-			local deathToken = RuntimeProfiler.Begin("Server/Round/Death/HumanoidDied")
-			RuntimeProfiler.Count("Server/Round/Death/HumanoidDiedEvents")
-			options.applyDeathRagdoll(character, "RoundDeath")
+		local deathHandled = false
+		local function handleBoundHumanoidDeath(profilerName: string, countName: string, reason: string, debugLabel: string)
+			if deathHandled then
+				return
+			end
+
+			deathHandled = true
+			local deathToken = RuntimeProfiler.Begin(profilerName)
+			RuntimeProfiler.Count(countName)
+			options.applyDeathRagdoll(character, reason)
 			if options.isRoundActive() then
-				options.debugDeathFlow("Humanoid.Died", player.Name, "roundId", options.getRoundId(), "health", humanoid.Health)
+				options.debugDeathFlow(debugLabel, player.Name, "roundId", options.getRoundId(), "health", humanoid.Health)
 				options.handlePlayerDeath(player)
 			end
-			RuntimeProfiler.End("Server/Round/Death/HumanoidDied", deathToken)
+			RuntimeProfiler.End(profilerName, deathToken)
+		end
+
+		options.connections:Add(player, humanoid.Died:Connect(function()
+			handleBoundHumanoidDeath(
+				"Server/Round/Death/HumanoidDied",
+				"Server/Round/Death/HumanoidDiedEvents",
+				"RoundDeath",
+				"Humanoid.Died"
+			)
+		end))
+
+		options.connections:Add(player, humanoid.HealthChanged:Connect(function(nextHealth: number)
+			if nextHealth > 0 then
+				return
+			end
+
+			task.defer(function()
+				if deathHandled then
+					return
+				end
+				if player.Character ~= character or not humanoid.Parent then
+					return
+				end
+				if humanoid.Health > 0 or not options.isRoundActive() then
+					return
+				end
+
+				handleBoundHumanoidDeath(
+					"Server/Round/Death/HumanoidHealthZeroFallback",
+					"Server/Round/Death/HumanoidHealthZeroFallbackEvents",
+					"RoundHealthZeroFallback",
+					"Humanoid.HealthChangedZero"
+				)
+			end)
 		end))
 	end
 

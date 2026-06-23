@@ -109,6 +109,7 @@ local function getCraterExplosionOverride(definition: AbilityDefinition?)
 	return {
 		abilityId = "CraterBomb",
 		terrainRadius = getDefinitionNumber(definition, "terrainRadius", 30),
+		maxTargetsPerExplosion = getDefinitionNumber(definition, "maxTargetsPerExplosion", 56),
 		explosionVisualScale = getDefinitionNumber(definition, "explosionVisualScale", 1.65),
 		playerDirectDamage = BombConfig.PlayerDirectDamage * playerDamageMultiplier,
 		playerNearDamageMax = BombConfig.PlayerNearDamageMax * playerDamageMultiplier,

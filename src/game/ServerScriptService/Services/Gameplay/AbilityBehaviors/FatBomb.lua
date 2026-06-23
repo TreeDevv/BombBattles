@@ -175,6 +175,7 @@ local function buildExplosionOverride(definition: AbilityDefinition)
 		nearRadius = getDefinitionNumber(definition, "nearRadius", 18),
 		outerRadius = getDefinitionNumber(definition, "outerRadius", 28),
 		terrainRadius = getDefinitionNumber(definition, "terrainRadius", 20),
+		maxTargetsPerExplosion = getDefinitionNumber(definition, "maxTargetsPerExplosion", 64),
 		forceTerrainSubtract = definition.forceTerrainSubtract == true,
 		playerDirectDamage = getDefinitionNumber(definition, "playerDirectDamage", 135),
 		playerNearDamageMax = getDefinitionNumber(definition, "playerNearDamageMax", 110),

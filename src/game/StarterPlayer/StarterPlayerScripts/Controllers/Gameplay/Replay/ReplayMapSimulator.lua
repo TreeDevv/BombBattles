@@ -18,12 +18,14 @@ local SCENE_NAME = "_LocalReplayScene"
 local PREPARED_SCENE_NAME_PREFIX = "_LocalReplayPreparedScene"
 local LOCAL_REPLAY_ATTR = "BombBattlesLocalReplay"
 local REPLAY_ZONE_PIVOT = CFrame.new(30000, 8000, 30000)
-local MAX_DESTRUCTION_EVENTS = 260
-local MAX_DESTRUCTION_EVENTS_PER_STEP = 3
+local MAX_DESTRUCTION_EVENTS = 96
+local MAX_DESTRUCTION_EVENTS_PER_STEP = 1
+local DESTRUCTION_LEAD_SECONDS = 0.75
+local MAX_TARGETS_PER_DESTRUCTION_EVENT = 48
 local MAX_DEBRIS_PARTS_PER_EVENT = 36
 local MAX_DEBRIS_PARTS_PER_REPLAY = 180
-local MAX_PREPARED_MAP_TEMPLATES = 4
-local MAX_PREPARED_REUSABLE_SCENES = 2
+local MAX_PREPARED_MAP_TEMPLATES = 1
+local MAX_PREPARED_REUSABLE_SCENES = 1
 local PREWARM_TARGET_COLLECTION_BUDGET_SECONDS = 0.002
 local DEBRIS_LIFETIME_SCALE = 0.85
 
@@ -37,7 +39,10 @@ local preparedTemplateCache = {}
 local preparedTemplateOrder = {}
 local preparedSceneCache = {}
 local preparedSceneOrder = {}
-local preparedSceneInProgress = {}
+local activePrewarmMapId: string? = nil
+local activePrewarmSerial = 0
+local prewarmWorkerRunning = false
+local prewarmRequested = false
 
 local PRIORITY_ACTIVE = "Active"
 local PRIORITY_BACKGROUND = "Background"
@@ -99,6 +104,10 @@ local function sanitizeMapIdForName(mapId: any): string
 	return string.gsub(raw, "[^%w_%-]", "_")
 end
 
+local function normalizeMapId(mapId: any): string?
+	return if typeof(mapId) == "string" and mapId ~= "" then mapId else nil
+end
+
 local function getPayloadMapId(payload: any): string?
 	if typeof(payload) ~= "table" then
 		return nil
@@ -136,7 +145,6 @@ local function createPreparedScene(mapId: string): Folder
 	scene.Name = ("%s_%s_%s"):format(PREPARED_SCENE_NAME_PREFIX, sanitizeMapIdForName(mapId), getLocalSceneSuffix())
 	scene:SetAttribute(LOCAL_REPLAY_ATTR, true)
 	setReplayIdentityAttributes(scene, mapId, nil)
-	scene.Parent = Workspace
 	return scene
 end
 
@@ -168,36 +176,44 @@ local function destroyDuplicatePreparedScenes(mapId: string, keepScene: Instance
 	end
 end
 
-local function getPreferredMapIds(limit: number?): { string }
-	local ids = {}
-	local seen = {}
-	local maxIds = math.max(math.floor(limit or MAX_PREPARED_REUSABLE_SCENES), 1)
+local function isPreparedSceneName(name: string): boolean
+	return string.sub(name, 1, #PREPARED_SCENE_NAME_PREFIX) == PREPARED_SCENE_NAME_PREFIX
+end
 
-	for _, mapConfig in ipairs(RoundConfig.Maps or {}) do
-		local mapId = if typeof(mapConfig) == "table" then mapConfig.id else nil
-		if typeof(mapId) == "string" and mapId ~= "" and not seen[mapId] then
-			seen[mapId] = true
-			table.insert(ids, mapId)
-			if #ids >= maxIds then
-				return ids
+local function clearPreparedTemplatesExcept(keepMapId: string?)
+	for index = #preparedTemplateOrder, 1, -1 do
+		local mapId = preparedTemplateOrder[index]
+		if mapId ~= keepMapId then
+			table.remove(preparedTemplateOrder, index)
+			local template = preparedTemplateCache[mapId]
+			preparedTemplateCache[mapId] = nil
+			if template then
+				template:Destroy()
 			end
 		end
 	end
+end
 
-	local folder = getMapFolder()
-	if folder then
-		for _, child in ipairs(folder:GetChildren()) do
-			if (child:IsA("Model") or child:IsA("BasePart")) and not seen[child.Name] then
-				seen[child.Name] = true
-				table.insert(ids, child.Name)
-				if #ids >= maxIds then
-					return ids
-				end
-			end
+local function clearPreparedScenesExcept(keepMapId: string?)
+	for index = #preparedSceneOrder, 1, -1 do
+		local mapId = preparedSceneOrder[index]
+		if mapId ~= keepMapId then
+			table.remove(preparedSceneOrder, index)
+			local entry = preparedSceneCache[mapId]
+			preparedSceneCache[mapId] = nil
+			destroyPreparedSceneEntry(entry)
 		end
 	end
 
-	return ids
+	for _, child in ipairs(Workspace:GetChildren()) do
+		if isPreparedSceneName(child.Name) and child:GetAttribute("ReplayMapId") ~= keepMapId then
+			child:Destroy()
+		end
+	end
+end
+
+local function isActivePrewarmRequest(mapId: string, serial: number): boolean
+	return activePrewarmMapId == mapId and activePrewarmSerial == serial
 end
 
 local function pivotInstance(instance: Instance, cframe: CFrame)
@@ -259,7 +275,12 @@ local function rememberPreparedTemplate(mapId: string, clone: Instance)
 end
 
 function ReplayMapSimulator.PrewarmTemplate(mapId: any): boolean
-	if typeof(mapId) ~= "string" or mapId == "" then
+	mapId = normalizeMapId(mapId)
+	if not mapId then
+		return false
+	end
+	if activePrewarmMapId ~= mapId then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/TemplatePrewarmSkippedInactiveMap")
 		return false
 	end
 	local existing = preparedTemplateCache[mapId]
@@ -284,24 +305,17 @@ function ReplayMapSimulator.PrewarmTemplate(mapId: any): boolean
 end
 
 function ReplayMapSimulator.PrewarmTemplates()
-	local folder = getMapFolder()
-	if not folder then
-		return
+	if not activePrewarmMapId then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/TemplatePrewarmSkippedNoActiveMap")
+		return 0
 	end
 
-	task.spawn(function()
-		task.wait(1)
-		for _, child in ipairs(folder:GetChildren()) do
-			if child:IsA("Model") or child:IsA("BasePart") then
-				ReplayMapSimulator.PrewarmTemplate(child.Name)
-				task.wait()
-			end
-		end
-	end)
+	return if ReplayMapSimulator.PrewarmTemplate(activePrewarmMapId) then 1 else 0
 end
 
 local function clonePreparedMapTemplate(mapId: any): Instance?
-	if typeof(mapId) ~= "string" or mapId == "" then
+	mapId = normalizeMapId(mapId)
+	if not mapId then
 		return nil
 	end
 
@@ -536,6 +550,65 @@ local function collectDestructibleTargets(context): ({ BasePart }, boolean)
 	return targets, context.staticUsedFallbackTargets == true
 end
 
+local function getDistanceSquared(part: BasePart, position: Vector3): number
+	local localPosition = part.CFrame:PointToObjectSpace(position)
+	local halfSize = part.Size * 0.5
+	local dx = math.max(math.abs(localPosition.X) - halfSize.X, 0)
+	local dy = math.max(math.abs(localPosition.Y) - halfSize.Y, 0)
+	local dz = math.max(math.abs(localPosition.Z) - halfSize.Z, 0)
+	return dx * dx + dy * dy + dz * dz
+end
+
+local function selectNearestReplayTargets(targets: { BasePart }, position: Vector3, maxTargets: number): { BasePart }
+	local selected = {}
+	local distances = {}
+	local selectedCount = 0
+	local worstIndex = 0
+	local worstDistance = -math.huge
+
+	for _, part in ipairs(targets) do
+		local distance = getDistanceSquared(part, position)
+		if selectedCount < maxTargets then
+			selectedCount += 1
+			selected[selectedCount] = part
+			distances[selectedCount] = distance
+			if distance > worstDistance then
+				worstDistance = distance
+				worstIndex = selectedCount
+			end
+		elseif distance < worstDistance then
+			selected[worstIndex] = part
+			distances[worstIndex] = distance
+			worstIndex = 1
+			worstDistance = distances[1] or -math.huge
+			for index = 2, selectedCount do
+				local selectedDistance = distances[index]
+				if selectedDistance and selectedDistance > worstDistance then
+					worstDistance = selectedDistance
+					worstIndex = index
+				end
+			end
+		end
+	end
+
+	return selected
+end
+
+local function capReplayDestructionTargets(context, targets: { BasePart }, position: Vector3): { BasePart }
+	if #targets <= MAX_TARGETS_PER_DESTRUCTION_EVENT then
+		return targets
+	end
+
+	local capped = selectNearestReplayTargets(targets, position, MAX_TARGETS_PER_DESTRUCTION_EVENT)
+
+	local skipped = #targets - #capped
+	context.replayTargetsSkippedByCap = (context.replayTargetsSkippedByCap or 0) + skipped
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/TargetsCapped")
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/TargetsSkippedByCap", skipped)
+	RuntimeProfiler.Gauge("Client/Replay/MapSimulator/LastCappedTargets", #capped)
+	return capped
+end
+
 function ReplayMapSimulator.TransformPoint(context, point: Vector3): Vector3
 	return context.replayPivot:PointToWorldSpace(context.livePivot:PointToObjectSpace(point))
 end
@@ -750,7 +823,7 @@ function ReplayMapSimulator.TransformEvents(context, events)
 	return events
 end
 
-function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, endTime: number)
+function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, startTimeOrEndTime: number, maybeEndTime: number?)
 	local events = {}
 	if typeof(rawEvents) ~= "table" then
 		if context then
@@ -758,15 +831,22 @@ function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, endTi
 		end
 		return events
 	end
+	local startTime = if isFiniteNumber(maybeEndTime) then startTimeOrEndTime else nil
+	local endTime = if isFiniteNumber(maybeEndTime) then maybeEndTime else startTimeOrEndTime
+	local minTime = if isFiniteNumber(startTime) then startTime - DESTRUCTION_LEAD_SECONDS else nil
+	local skippedBeforeWindow = 0
+	local skippedAfterWindow = 0
 
 	for _, event in ipairs(rawEvents) do
-		if #events >= MAX_DESTRUCTION_EVENTS then
-			break
-		end
 		if typeof(event) ~= "table" or not isFiniteNumber(event.timestamp) then
 			continue
 		end
 		if isFiniteNumber(endTime) and event.timestamp > endTime then
+			skippedAfterWindow += 1
+			continue
+		end
+		if isFiniteNumber(minTime) and event.timestamp < minTime then
+			skippedBeforeWindow += 1
 			continue
 		end
 
@@ -796,9 +876,18 @@ function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, endTi
 		end
 		return left.timestamp < right.timestamp
 	end)
+	while #events > MAX_DESTRUCTION_EVENTS do
+		table.remove(events, 1)
+		skippedBeforeWindow += 1
+	end
 	if context then
 		context.normalizedDestructionEvents = #events
+		context.skippedDestructionEventsBeforeWindow = skippedBeforeWindow
+		context.skippedDestructionEventsAfterWindow = skippedAfterWindow
 	end
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/NormalizedDestructionEvents", #events)
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/SkippedDestructionEventsBeforeWindow", skippedBeforeWindow)
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/SkippedDestructionEventsAfterWindow", skippedAfterWindow)
 	return events
 end
 
@@ -904,6 +993,8 @@ function ReplayMapSimulator.ApplyDestructionEvent(context, event, options): bool
 	if usedFallbackTargets then
 		context.fallbackTargetUses = (context.fallbackTargetUses or 0) + 1
 	end
+	targets = capReplayDestructionTargets(context, targets, event.position)
+	context.lastCappedTargetCount = #targets
 
 	local voxelizeResult = nil
 	local ok, err = pcall(function()
@@ -1079,6 +1170,16 @@ local function findPreparedSceneEvictionIndex(currentMapId: string): number?
 end
 
 local function rememberPreparedScene(mapId: string, scene: Folder, mapContext, priority: any)
+	if activePrewarmMapId ~= mapId then
+		destroyPreparedSceneEntry({
+			scene = scene,
+			mapContext = mapContext,
+		})
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneDiscardedInactiveMap")
+		return
+	end
+
+	clearPreparedScenesExcept(mapId)
 	local existing = preparedSceneCache[mapId]
 	if existing then
 		destroyPreparedSceneEntry(existing)
@@ -1126,7 +1227,7 @@ local function isPreparedSceneEntryUsable(entry, expectedMapId: string): boolean
 		warnPreparedSceneMismatch("entry-map", expectedMapId, entry.mapId)
 		return false
 	end
-	if not (entry.scene and entry.scene.Parent and entry.mapContext) then
+	if not (entry.scene and entry.mapContext) then
 		return false
 	end
 
@@ -1155,89 +1256,170 @@ local function isPreparedSceneEntryUsable(entry, expectedMapId: string): boolean
 	return true
 end
 
+function ReplayMapSimulator.SetActivePrewarmMap(mapId: any): string?
+	local resolvedMapId = normalizeMapId(mapId)
+	if activePrewarmMapId == resolvedMapId then
+		clearPreparedScenesExcept(resolvedMapId)
+		clearPreparedTemplatesExcept(resolvedMapId)
+		return resolvedMapId
+	end
+
+	activePrewarmMapId = resolvedMapId
+	activePrewarmSerial += 1
+	prewarmRequested = resolvedMapId ~= nil and prewarmRequested or false
+	clearPreparedScenesExcept(resolvedMapId)
+	clearPreparedTemplatesExcept(resolvedMapId)
+	RuntimeProfiler.Count(
+		if resolvedMapId
+			then "Client/Replay/MapSimulator/ActivePrewarmMapSet"
+			else "Client/Replay/MapSimulator/ActivePrewarmMapCleared"
+	)
+	return resolvedMapId
+end
+
 function ReplayMapSimulator.PrewarmReusableScene(mapId: any, options): boolean
-	if typeof(mapId) ~= "string" or mapId == "" then
+	mapId = normalizeMapId(mapId)
+	if not mapId then
 		return false
 	end
 	local priority = normalizePrewarmPriority(if typeof(options) == "table" then options.priority else nil)
-	local existing = preparedSceneCache[mapId]
-	if existing then
-		existing.priority = if priority == PRIORITY_ACTIVE then PRIORITY_ACTIVE else normalizePrewarmPriority(existing.priority)
-		RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmCacheHit")
-		return true
-	end
-	if preparedSceneInProgress[mapId] then
-		if priority == PRIORITY_ACTIVE then
-			preparedSceneInProgress[mapId].priority = PRIORITY_ACTIVE
-		end
-		return true
-	end
-	if not getMapTemplate(mapId) then
+	if priority ~= PRIORITY_ACTIVE then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/BackgroundScenePrewarmSkipped")
 		return false
 	end
 
-	preparedSceneInProgress[mapId] = {
-		priority = priority,
-	}
-	RuntimeProfiler.Count(
-		if priority == PRIORITY_ACTIVE
-			then "Client/Replay/MapSimulator/ActiveReusableScenePrewarmQueued"
-			else "Client/Replay/MapSimulator/ReusableScenePrewarmQueued"
-	)
+	ReplayMapSimulator.SetActivePrewarmMap(mapId)
+	clearPreparedScenesExcept(mapId)
+	clearPreparedTemplatesExcept(mapId)
+
+	local existing = preparedSceneCache[mapId]
+	if existing then
+		existing.priority = PRIORITY_ACTIVE
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmCacheHit")
+		return true
+	end
+
+	prewarmRequested = true
+	if prewarmWorkerRunning then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveScenePrewarmCoalesced")
+		return true
+	end
+
+	prewarmWorkerRunning = true
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveReusableScenePrewarmQueued")
 	task.spawn(function()
-		task.wait()
-		local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmReusableScene")
-		local ok, err = pcall(function()
-			local record = preparedSceneInProgress[mapId]
-			local effectivePriority = normalizePrewarmPriority(if typeof(record) == "table" then record.priority else priority)
-			ReplayMapSimulator.PrewarmTemplate(mapId)
+		while prewarmRequested do
+			prewarmRequested = false
 			task.wait()
-			local scene = createPreparedScene(mapId)
-			local mapContext = ReplayMapSimulator.Create(scene, {
-				mapId = mapId,
-				mapPivot = CFrame.new(),
-			})
-			if not (mapContext and mapContext.mapRoot) then
-				scene:Destroy()
-				return
+
+			local targetMapId = activePrewarmMapId
+			if not targetMapId then
+				RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveScenePrewarmSkippedNoActiveMap")
+				continue
 			end
-			task.wait()
-			prewarmStaticDestructibleTargets(mapContext)
-			rememberPreparedScene(mapId, scene, mapContext, effectivePriority)
-			RuntimeProfiler.Count(
-				if effectivePriority == PRIORITY_ACTIVE
-					then "Client/Replay/MapSimulator/PrewarmedActiveReusableScenes"
-					else "Client/Replay/MapSimulator/PrewarmedReusableScenes"
-			)
-		end)
-		preparedSceneInProgress[mapId] = nil
-		RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmReusableScene", token)
-		if not ok then
-			warn("[ReplayMapSimulator] Failed to prewarm reusable replay scene: " .. tostring(err))
+
+			clearPreparedScenesExcept(targetMapId)
+			clearPreparedTemplatesExcept(targetMapId)
+
+			local cached = preparedSceneCache[targetMapId]
+			if cached and isPreparedSceneEntryUsable(cached, targetMapId) then
+				RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmCacheHit")
+				continue
+			end
+
+			if not getMapTemplate(targetMapId) then
+				RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveScenePrewarmMissingTemplate")
+				continue
+			end
+
+			local serial = activePrewarmSerial
+			local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmReusableScene")
+			local ok, err = pcall(function()
+				ReplayMapSimulator.PrewarmTemplate(targetMapId)
+				task.wait()
+				if not isActivePrewarmRequest(targetMapId, serial) then
+					RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveScenePrewarmCanceled")
+					return
+				end
+
+				local scene = createPreparedScene(targetMapId)
+				local mapContext = ReplayMapSimulator.Create(scene, {
+					mapId = targetMapId,
+					mapPivot = CFrame.new(),
+				})
+				if not isActivePrewarmRequest(targetMapId, serial) then
+					destroyPreparedSceneEntry({
+						scene = scene,
+						mapContext = mapContext,
+					})
+					RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveScenePrewarmCanceled")
+					return
+				end
+				if not (mapContext and mapContext.mapRoot) then
+					scene:Destroy()
+					return
+				end
+
+				task.wait()
+				if not isActivePrewarmRequest(targetMapId, serial) then
+					destroyPreparedSceneEntry({
+						scene = scene,
+						mapContext = mapContext,
+					})
+					RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveScenePrewarmCanceled")
+					return
+				end
+
+				prewarmStaticDestructibleTargets(mapContext)
+				if not isActivePrewarmRequest(targetMapId, serial) then
+					destroyPreparedSceneEntry({
+						scene = scene,
+						mapContext = mapContext,
+					})
+					RuntimeProfiler.Count("Client/Replay/MapSimulator/ActiveScenePrewarmCanceled")
+					return
+				end
+
+				rememberPreparedScene(targetMapId, scene, mapContext, PRIORITY_ACTIVE)
+				clearPreparedTemplatesExcept(nil)
+				RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmedActiveReusableScenes")
+			end)
+			RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmReusableScene", token)
+			if not ok then
+				warn("[ReplayMapSimulator] Failed to prewarm reusable replay scene: " .. tostring(err))
+			end
+		end
+		prewarmWorkerRunning = false
+		if prewarmRequested then
+			ReplayMapSimulator.PrewarmActiveScene(activePrewarmMapId)
 		end
 	end)
 	return true
 end
 
 function ReplayMapSimulator.PrewarmActiveScene(mapId: any): boolean
+	mapId = normalizeMapId(mapId)
+	if not mapId then
+		ReplayMapSimulator.SetActivePrewarmMap(nil)
+		return false
+	end
+
 	return ReplayMapSimulator.PrewarmReusableScene(mapId, {
 		priority = PRIORITY_ACTIVE,
 	})
 end
 
-function ReplayMapSimulator.PrewarmReusableScenes(limit: number?): number
-	local queued = 0
-	for _, mapId in ipairs(getPreferredMapIds(limit)) do
-		if ReplayMapSimulator.PrewarmReusableScene(mapId, {
-			priority = PRIORITY_BACKGROUND,
-		}) then
-			queued += 1
-		end
+function ReplayMapSimulator.PrewarmReusableScenes(_limit: number?): number
+	if not activePrewarmMapId then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmSkippedNoActiveMap")
+		return 0
 	end
-	if queued > 0 then
-		RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmQueued", queued)
+
+	if ReplayMapSimulator.PrewarmActiveScene(activePrewarmMapId) then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/ReusableScenePrewarmQueued", 1)
+		return 1
 	end
-	return queued
+	return 0
 end
 
 function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
@@ -1274,6 +1456,7 @@ function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
 	entry.scene.Name = SCENE_NAME
 	entry.scene:SetAttribute(LOCAL_REPLAY_ATTR, true)
 	setReplayIdentityAttributes(entry.scene, mapId, roundId)
+	entry.scene.Parent = Workspace
 	entry.mapContext.livePivot = if typeof(payload) == "table" and isFiniteCFrame(payload.mapPivot)
 		then payload.mapPivot
 		else CFrame.new()
@@ -1311,12 +1494,16 @@ function ReplayMapSimulator.GetDebugInfo(context)
 	return {
 		mapId = context.mapId,
 		normalizedDestructionEvents = context.normalizedDestructionEvents or 0,
+		skippedDestructionEventsBeforeWindow = context.skippedDestructionEventsBeforeWindow or 0,
+		skippedDestructionEventsAfterWindow = context.skippedDestructionEventsAfterWindow or 0,
 		appliedDestructionEvents = context.appliedDestructionEvents or 0,
 		targetFailures = context.targetFailures or 0,
 		applyFailures = context.applyFailures or 0,
 		fallbackTargetUses = context.fallbackTargetUses or 0,
 		targetsHit = context.targetsHit or 0,
 		lastTargetCount = context.lastTargetCount or 0,
+		lastCappedTargetCount = context.lastCappedTargetCount or 0,
+		replayTargetsSkippedByCap = context.replayTargetsSkippedByCap or 0,
 		debrisPartCount = context.debrisPartCount or 0,
 		debrisPayloadBlocks = context.debrisPayloadBlocks or 0,
 		debrisSpawnAttempts = context.debrisSpawnAttempts or 0,

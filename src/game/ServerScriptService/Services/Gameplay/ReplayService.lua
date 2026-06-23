@@ -45,6 +45,8 @@ local DEBUG_REPLAY_DESTRUCTION_LEAD_SECONDS = 0.5
 local MAX_DEBRIS_PAYLOADS_PER_DESTRUCTION_EVENT = 8
 local MAX_DEBRIS_BLOCKS_PER_DESTRUCTION_EVENT = 72
 local MAX_RANDOM_SEED = 2147483647
+local STORE_RECORDED_DEBRIS_PAYLOADS_BY_DEFAULT = false
+local MAX_ARCHIVED_POTG_CLIPS = 16
 
 local initialized = false
 local running = false
@@ -81,6 +83,9 @@ local optimizedReplayPayloads = setmetatable({}, { __mode = "k" })
 local debugKillReplaySend = nil
 local sendKillReplayForEvent = nil
 local bombProjectileService = nil
+local archivedPOTGClipsByKey = {}
+local archivedPOTGClipOrder = {}
+local scheduledPOTGArchivesByKey = {}
 
 local isFiniteNumber = ReplayUtil.IsFiniteNumber
 local isFiniteCFrame = ReplayUtil.IsFiniteCFrame
@@ -1073,6 +1078,16 @@ local function debugPOTGReplaySend(status: string, payload, extra)
 		reason = if typeof(payload) == "table" then payload.reason else nil,
 		roundId = if typeof(payload) == "table" then payload.roundId else nil,
 		mapId = if typeof(payload) == "table" then payload.mapId else nil,
+		clipSource = if typeof(extra) == "table" and typeof(extra.clipSource) == "string"
+			then extra.clipSource
+			elseif typeof(payload) == "table" then payload.potgClipSource
+			else nil,
+		candidateStartTime = if typeof(extra) == "table" then extra.candidateStartTime else nil,
+		candidateEndTime = if typeof(extra) == "table" then extra.candidateEndTime else nil,
+		candidatePrimaryEventTime = if typeof(extra) == "table" then extra.candidatePrimaryEventTime else nil,
+		candidatePlayerUserId = if typeof(extra) == "table" then extra.candidatePlayerUserId else nil,
+		candidateScore = if typeof(extra) == "table" then extra.candidateScore else nil,
+		candidateReason = if typeof(extra) == "table" then extra.candidateReason else nil,
 		sentPlayers = if typeof(extra) == "table" then extra.sentPlayers else nil,
 		skippedPlayers = if typeof(extra) == "table" then extra.skippedPlayers else nil,
 		optimization = lastClipOptimizationDebug,
@@ -1084,8 +1099,9 @@ local function debugPOTGReplaySend(status: string, payload, extra)
 	end
 
 	warn(
-		("[ReplayService] POTG %s round=%s map=%s start=%.3f end=%.3f frames=%d events=%d player=%s score=%s sent=%s skipped=%s reason=%s"):format(
+		("[ReplayService] POTG %s source=%s round=%s map=%s start=%.3f end=%.3f frames=%d events=%d player=%s score=%s sent=%s skipped=%s reason=%s"):format(
 			status,
+			tostring(summary.clipSource),
 			tostring(summary.roundId),
 			tostring(summary.mapId),
 			summary.startTime,
@@ -1648,6 +1664,130 @@ local function buildSendablePOTGReplayPayload(candidate, allowFallbackClip: bool
 	return payload, nil
 end
 
+local function getPOTGArchiveKey(candidate): string?
+	if typeof(candidate) ~= "table" then
+		return nil
+	end
+	if not (isFiniteNumber(candidate.playerUserId) and isFiniteNumber(candidate.primaryEventTime)) then
+		return nil
+	end
+
+	local roundKey = if isFiniteNumber(candidate.roundId) then math.floor(candidate.roundId) else currentRoundId
+	local eventMillis = math.floor(candidate.primaryEventTime * 1000 + 0.5)
+	local startMillis = if isFiniteNumber(candidate.startTime) then math.floor(candidate.startTime * 1000 + 0.5) else 0
+	local endMillis = if isFiniteNumber(candidate.endTime) then math.floor(candidate.endTime * 1000 + 0.5) else 0
+	return table.concat({
+		tostring(roundKey),
+		tostring(math.floor(candidate.playerUserId)),
+		tostring(eventMillis),
+		tostring(startMillis),
+		tostring(endMillis),
+		tostring(candidate.score),
+		tostring(candidate.reason),
+	}, "|")
+end
+
+local function copyPOTGCandidate(candidate)
+	if typeof(candidate) ~= "table" then
+		return nil
+	end
+
+	local copy = table.clone(candidate)
+	if typeof(candidate.eventTypes) == "table" then
+		copy.eventTypes = table.clone(candidate.eventTypes)
+	end
+	return copy
+end
+
+local function trimArchivedPOTGClips()
+	while #archivedPOTGClipOrder > MAX_ARCHIVED_POTG_CLIPS do
+		local oldKey = table.remove(archivedPOTGClipOrder, 1)
+		if oldKey then
+			archivedPOTGClipsByKey[oldKey] = nil
+			scheduledPOTGArchivesByKey[oldKey] = nil
+		end
+	end
+end
+
+local function archivePOTGCandidatePayload(candidate, key: string, generation: number)
+	if generation ~= roundStorageGeneration then
+		scheduledPOTGArchivesByKey[key] = nil
+		return
+	end
+	if archivedPOTGClipsByKey[key] then
+		scheduledPOTGArchivesByKey[key] = nil
+		return
+	end
+
+	local candidateCopy = copyPOTGCandidate(candidate)
+	local payload, failure = buildSendablePOTGReplayPayload(candidateCopy, false)
+	scheduledPOTGArchivesByKey[key] = nil
+	if not payload then
+		RuntimeProfiler.Count("Server/Replay/POTGArchiveBuildFailed")
+		debugPOTGReplaySend("archive-" .. (failure or "failed"), nil, {
+			clipSource = "archive",
+			candidateStartTime = if candidateCopy then candidateCopy.startTime else nil,
+			candidateEndTime = if candidateCopy then candidateCopy.endTime else nil,
+			candidatePrimaryEventTime = if candidateCopy then candidateCopy.primaryEventTime else nil,
+			candidatePlayerUserId = if candidateCopy then candidateCopy.playerUserId else nil,
+			candidateScore = if candidateCopy then candidateCopy.score else nil,
+			candidateReason = if candidateCopy then candidateCopy.reason else nil,
+		})
+		return
+	end
+
+	payload.potgClipSource = "archived"
+	archivedPOTGClipsByKey[key] = {
+		payload = payload,
+		candidate = candidateCopy,
+		archivedAt = workspace:GetServerTimeNow(),
+	}
+	table.insert(archivedPOTGClipOrder, key)
+	trimArchivedPOTGClips()
+	RuntimeProfiler.Count("Server/Replay/POTGArchivedClips")
+end
+
+local function schedulePOTGCandidateArchive(candidate)
+	local key = getPOTGArchiveKey(candidate)
+	if not key or archivedPOTGClipsByKey[key] or scheduledPOTGArchivesByKey[key] then
+		return false
+	end
+	if not (typeof(candidate) == "table" and isFiniteNumber(candidate.endTime)) then
+		return false
+	end
+
+	local candidateCopy = copyPOTGCandidate(candidate)
+	local generation = roundStorageGeneration
+	scheduledPOTGArchivesByKey[key] = true
+	local waitSeconds = math.max(candidateCopy.endTime - workspace:GetServerTimeNow(), 0)
+	task.delay(waitSeconds + ReplayConstants.SAMPLE_INTERVAL, function()
+		archivePOTGCandidatePayload(candidateCopy, key, generation)
+	end)
+	RuntimeProfiler.Count("Server/Replay/POTGArchiveScheduled")
+	return true
+end
+
+local function schedulePOTGCandidateArchives(candidates)
+	if typeof(candidates) ~= "table" then
+		return
+	end
+
+	for _, candidate in ipairs(candidates) do
+		schedulePOTGCandidateArchive(candidate)
+	end
+end
+
+local function getArchivedPOTGPayload(candidate)
+	local key = getPOTGArchiveKey(candidate)
+	local archived = key and archivedPOTGClipsByKey[key]
+	local payload = if typeof(archived) == "table" then archived.payload else nil
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+	payload.potgClipSource = "archived"
+	return payload
+end
+
 local function getPOTGRecipients(recipients)
 	if typeof(recipients) ~= "table" then
 		return Players:GetPlayers()
@@ -1823,6 +1963,23 @@ local function buildFallbackPOTGCandidate(recipients)
 	}
 end
 
+local function buildPOTGIntroCandidatePayload(candidate)
+	if typeof(candidate) ~= "table" or not isFiniteNumber(candidate.playerUserId) then
+		return nil
+	end
+
+	local playerUserId = math.floor(candidate.playerUserId)
+	return {
+		potgPlayerUserId = playerUserId,
+		potgPlayerName = candidate.playerName,
+		potgPlayerDisplayName = candidate.playerDisplayName or candidate.playerName or tostring(playerUserId),
+		potgPlayerTeam = candidate.playerTeam,
+		potgPlayerIsNPC = candidate.playerIsNPC == true,
+		potgReason = candidate.reason,
+		potgScore = candidate.score,
+	}
+end
+
 local function clearPOTGSendInProgress(token: number)
 	if token == potgSendToken then
 		potgSendInProgress = false
@@ -1858,6 +2015,9 @@ local function resetReplayRoundStorage(roundId: any)
 	table.clear(lastAnimationStateAtByUserId)
 	table.clear(recentKillReplayEventsByVictimUserId)
 	table.clear(lastKillReplayRequestAtByUserId)
+	table.clear(archivedPOTGClipsByKey)
+	table.clear(archivedPOTGClipOrder)
+	table.clear(scheduledPOTGArchivesByKey)
 	accumulator = 0
 	sampleCount = 0
 	lastSampleTime = 0
@@ -2008,6 +2168,8 @@ function ReplayService.RecordEvent(first, second, third)
 			end)
 			if DEBUG_POTG_EVENTS and not ok then
 				warn("[ReplayService] POTG event failed:", eventType, err)
+			elseif ok then
+				schedulePOTGCandidateArchives(POTGService.GetDebugCandidates())
 			end
 		end
 		RuntimeProfiler.End("Server/Replay/RecordEvent/POTG", potgToken)
@@ -2092,8 +2254,12 @@ function ReplayService.RecordMapDestruction(first, second)
 		sourceId = payload.sourceId,
 		bombId = payload.bombId,
 		ownerUserId = payload.ownerUserId,
-		debrisPayloads = copyDebrisPayloads(payload.debrisPayloads),
 	}
+	if payload.storeReplayDebrisPayloads == true or STORE_RECORDED_DEBRIS_PAYLOADS_BY_DEFAULT then
+		event.debrisPayloads = copyDebrisPayloads(payload.debrisPayloads)
+	elseif typeof(payload.debrisPayloads) == "table" then
+		RuntimeProfiler.Count("Server/Replay/MapDestructionDebrisPayloadCopySkipped")
+	end
 	table.insert(roundDestructionEvents, event)
 	while #roundDestructionEvents > MAX_ROUND_DESTRUCTION_EVENTS do
 		table.remove(roundDestructionEvents, 1)
@@ -2125,6 +2291,8 @@ function ReplayService.GetRecentDebugInfo(_self)
 		lastKillReplay = lastKillReplayDebug,
 		lastPOTGReplay = lastPOTGReplayDebug,
 		lastClipOptimization = lastClipOptimizationDebug,
+		archivedPOTGClips = countDictionaryEntries(archivedPOTGClipsByKey),
+		scheduledPOTGArchives = countDictionaryEntries(scheduledPOTGArchivesByKey),
 		animationStatePlayers = countDictionaryEntries(latestAnimationStateByUserId),
 		visualSamplePlayers = countDictionaryEntries(clientReplaySamplesByUserId),
 		visualSampleRecords = countClientReplaySampleRecords(),
@@ -2152,6 +2320,12 @@ end
 
 function ReplayService.GetPOTGDebugCandidates(_self)
 	return POTGService.GetDebugCandidates()
+end
+
+function ReplayService.GetPOTGIntroCandidate(first, second)
+	local recipients = unwrapOptionalSelf(first, second)
+	local candidate = POTGService.GetBestCandidate() or buildFallbackPOTGCandidate(recipients)
+	return buildPOTGIntroCandidatePayload(candidate)
 end
 
 local function formatCandidateSummary(candidate, index: number): string
@@ -2258,20 +2432,34 @@ function ReplayService.DebugPlayBestPOTG(first, second)
 		return false, "Calling developer is not available"
 	end
 
-	local candidate = POTGService.GetBestCandidate() or buildFallbackPOTGCandidate({ player })
+	local candidate = POTGService.GetBestCandidate()
+	local usedFallbackCandidate = false
+	if not candidate then
+		candidate = buildFallbackPOTGCandidate({ player })
+		usedFallbackCandidate = candidate ~= nil
+	end
 	if not candidate then
 		return false, "No POTG candidate is available"
 	end
 
-	local payload = buildPOTGReplayPayload(candidate)
+	local payload = if not usedFallbackCandidate then getArchivedPOTGPayload(candidate) else nil
+	local payloadFailure = nil
 	if not payload then
-		return false, "Best POTG candidate could not produce a clip"
+		payload, payloadFailure = buildSendablePOTGReplayPayload(candidate, usedFallbackCandidate)
+		if payload then
+			payload.potgClipSource = if usedFallbackCandidate then "fallback" else "live-buffer"
+		end
+	end
+	if not payload then
+		return false, "Best POTG candidate could not produce a clip: " .. tostring(payloadFailure or "invalid-candidate")
 	end
 	if typeof(payload.frames) ~= "table" or #payload.frames == 0 then
 		return false, "Best POTG clip has no frames"
 	end
-	if not isPOTGClipReasonable(payload) then
+	if not usedFallbackCandidate and not isPOTGClipReasonable(payload) then
 		return false, "Best POTG clip failed replay caps"
+	elseif usedFallbackCandidate and not isFallbackPOTGClipSendable(payload) then
+		return false, "Best POTG fallback clip failed replay caps"
 	end
 
 	local remote = getReplayRemote(ReplayConstants.REMOTES.PlayOfTheGame)
@@ -2404,32 +2592,66 @@ function ReplayService.PlayPOTG(first, second, third)
 		return false
 	end
 
-	local payload, payloadFailure = buildSendablePOTGReplayPayload(candidate, usedFallbackCandidate)
-	if not payload then
-		debugPOTGReplaySend("candidate-" .. payloadFailure, nil, nil)
-		if not usedFallbackCandidate then
-			local fallbackCandidate = buildFallbackPOTGCandidate(recipients)
-			if fallbackCandidate then
-				candidate = fallbackCandidate
-				usedFallbackCandidate = true
-				payload, payloadFailure = buildSendablePOTGReplayPayload(candidate, true)
+	local payload = nil
+	local payloadFailure = nil
+	local clipSource = if usedFallbackCandidate then "fallback" else "live-buffer"
+	if not usedFallbackCandidate then
+		payload = getArchivedPOTGPayload(candidate)
+		if payload then
+			clipSource = "archived"
+			RuntimeProfiler.Count("Server/Replay/POTGArchiveHits")
+		else
+			RuntimeProfiler.Count("Server/Replay/POTGArchiveMisses")
+			payload, payloadFailure = buildSendablePOTGReplayPayload(candidate, false)
+			if payload then
+				payload.potgClipSource = "live-buffer"
+				clipSource = "live-buffer"
 			end
 		end
-		if not payload then
-			debugPOTGReplaySend("skipped-" .. (payloadFailure or "invalid-candidate"), nil, nil)
-			clearPOTGSendInProgress(sendToken)
-			return false
+	else
+		payload, payloadFailure = buildSendablePOTGReplayPayload(candidate, true)
+		if payload then
+			payload.potgClipSource = "fallback"
 		end
 	end
+	if not payload then
+		debugPOTGReplaySend("skipped-" .. (payloadFailure or "invalid-candidate"), nil, {
+			clipSource = if usedFallbackCandidate then "fallback" else "scored-candidate",
+			candidateStartTime = candidate.startTime,
+			candidateEndTime = candidate.endTime,
+			candidatePrimaryEventTime = candidate.primaryEventTime,
+			candidatePlayerUserId = candidate.playerUserId,
+			candidateScore = candidate.score,
+			candidateReason = candidate.reason,
+		})
+		clearPOTGSendInProgress(sendToken)
+		return false
+	end
 	if startedGeneration ~= roundStorageGeneration then
-		debugPOTGReplaySend("skipped-stale-round", payload, nil)
+		debugPOTGReplaySend("skipped-stale-round", payload, {
+			clipSource = clipSource,
+			candidateStartTime = candidate.startTime,
+			candidateEndTime = candidate.endTime,
+			candidatePrimaryEventTime = candidate.primaryEventTime,
+			candidatePlayerUserId = candidate.playerUserId,
+			candidateScore = candidate.score,
+			candidateReason = candidate.reason,
+		})
 		clearPOTGSendInProgress(sendToken)
 		return false
 	end
 
 	local remote = getReplayRemote(ReplayConstants.REMOTES.PlayOfTheGame)
 	if not remote then
-		debugPOTGReplaySend("skipped-missing-remote", payload, nil)
+		debugPOTGReplaySend("skipped-missing-remote", payload, {
+			clipSource = clipSource,
+			candidateStartTime = candidate.startTime,
+			candidateEndTime = candidate.endTime,
+			candidatePrimaryEventTime = candidate.primaryEventTime,
+			candidatePlayerUserId = candidate.playerUserId,
+			candidateScore = candidate.score,
+			candidateReason = candidate.reason,
+		})
 		clearPOTGSendInProgress(sendToken)
 		return false
 	end
@@ -2460,6 +2682,13 @@ function ReplayService.PlayPOTG(first, second, third)
 
 	if sentPlayers == 0 then
 		debugPOTGReplaySend("skipped-player-left", payload, {
+			clipSource = clipSource,
+			candidateStartTime = candidate.startTime,
+			candidateEndTime = candidate.endTime,
+			candidatePrimaryEventTime = candidate.primaryEventTime,
+			candidatePlayerUserId = candidate.playerUserId,
+			candidateScore = candidate.score,
+			candidateReason = candidate.reason,
 			sentPlayers = sentPlayers,
 			skippedPlayers = skippedPlayers,
 		})
@@ -2468,6 +2697,13 @@ function ReplayService.PlayPOTG(first, second, third)
 	end
 
 	debugPOTGReplaySend("sent", payload, {
+		clipSource = clipSource,
+		candidateStartTime = candidate.startTime,
+		candidateEndTime = candidate.endTime,
+		candidatePrimaryEventTime = candidate.primaryEventTime,
+		candidatePlayerUserId = candidate.playerUserId,
+		candidateScore = candidate.score,
+		candidateReason = candidate.reason,
 		sentPlayers = sentPlayers,
 		skippedPlayers = skippedPlayers,
 	})

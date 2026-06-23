@@ -2,7 +2,7 @@ local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
 
 
-local cola =  EmoteEffect.Create("Cola", { catalogOrder = 7 })
+local cola =  EmoteEffect.Create("Cola", { catalogOrder = 7,previewPauseTimeSeconds = 3 })
 
 
 

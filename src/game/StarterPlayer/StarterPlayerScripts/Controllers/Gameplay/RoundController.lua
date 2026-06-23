@@ -93,7 +93,6 @@ end
 
 function RoundController:OnStart()
 	ReplicaController.ReplicaOfClassCreated(RoundConfig.Scope, bindReplica)
-	ReplicaController.RequestData()
 	task.spawn(getSubmitMapVoteRemote)
 	task.spawn(bindSetAFKRemote)
 end

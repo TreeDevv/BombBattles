@@ -1997,10 +1997,20 @@ local function isSameActiveReplay(activeReplay, payload): boolean
 		return false
 	end
 
-	return activeReplay.replayType == getReplayPayloadType(payload)
-		and activeReplay.startTime == payload.startTime
-		and activeReplay.endTime == payload.endTime
-		and activeReplay.victimUserId == payload.victimUserId
+	local replayType = getReplayPayloadType(payload)
+	if
+		activeReplay.replayType ~= replayType
+		or activeReplay.startTime ~= payload.startTime
+		or activeReplay.endTime ~= payload.endTime
+	then
+		return false
+	end
+
+	if replayType == "POTGReplay" then
+		return activeReplay.playerUserId == payload.playerUserId
+	end
+
+	return activeReplay.victimUserId == payload.victimUserId
 end
 
 local function buildReplaySignalPayloadFromState(state, reason: string)
@@ -2049,6 +2059,17 @@ local function debugReplayClient(message: string, ...)
 	end
 end
 
+local function getPOTGCutsceneController()
+	local controllersFolder = script.Parent.Parent
+	local module = controllersFolder and controllersFolder:FindFirstChild("POTGCutsceneController")
+	if not (module and module:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, controller = pcall(require, module)
+	return if ok and typeof(controller) == "table" then controller else nil
+end
+
 function ReplayClient:_getRemoteBinderDeps()
 	return {
 		debugReplayClient = debugReplayClient,
@@ -2090,9 +2111,11 @@ function ReplayClient:CancelReplay(reason: string?)
 		state.renderBindingName = nil
 	end
 
-	pcall(function()
-		restoreCamera(state)
-	end)
+	if state.replayType ~= "POTGReplay" then
+		pcall(function()
+			restoreCamera(state)
+		end)
+	end
 
 	for _, visual in pairs(state.playerVisuals or {}) do
 		if ReplayCharacterVisualPool.Release(visual) then
@@ -2348,7 +2371,7 @@ function ReplayClient:PlayReplay(payload): boolean
 		return false
 	end
 
-	if replayType == "KillReplay" and isSameActiveReplay(self._activeReplay, payload) then
+	if (replayType == "KillReplay" or replayType == "POTGReplay") and isSameActiveReplay(self._activeReplay, payload) then
 		RuntimeProfiler.Count("Client/Replay/SkippedDuplicateReplay")
 		RuntimeProfiler.End("Client/Replay/PlayReplay", playToken)
 		return false
@@ -2473,7 +2496,31 @@ function ReplayClient:ReceiveKillReplay(payload)
 end
 
 function ReplayClient:PlayPOTGReplay(payload)
-	self:PlayReplay(payload)
+	local cutsceneController = getPOTGCutsceneController()
+	if
+		cutsceneController
+		and type(cutsceneController.QueueAfterRoundIntro) == "function"
+		and cutsceneController:QueueAfterRoundIntro(function()
+			self:PlayPOTGReplay(payload)
+		end)
+	then
+		return false
+	end
+
+	local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
+	if not ScreenEffects.IsBlack(0.01) and ScreenEffects.FadeToBlack(0.2) then
+		task.wait(0.2)
+		RunService.RenderStepped:Wait()
+	end
+
+	ScreenEffects.HoldBlack()
+	local started = self:PlayReplay(payload)
+	if started then
+		ScreenEffects.FadeFromBlack(0.3)
+	else
+		ScreenEffects.FadeFromBlack(0.2)
+	end
+	return started
 end
 
 function ReplayClient:RequestKillReplay(reason: string?): boolean

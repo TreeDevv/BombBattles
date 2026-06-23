@@ -11,6 +11,7 @@ local LocalPlayer = Players.LocalPlayer
 local SHOWCASE_SPECS = table.freeze({
 	table.freeze({
 		crateId = "FinisherBasic",
+		initialDelay = 0,
 		path = table.freeze({
 			"Lobby",
 			"MonetizationArea",
@@ -20,6 +21,7 @@ local SHOWCASE_SPECS = table.freeze({
 	}),
 	table.freeze({
 		crateId = "FinisherPremium",
+		initialDelay = 2.5,
 		path = table.freeze({
 			"Lobby",
 			"MonetizationArea",
@@ -44,6 +46,8 @@ FinisherShowcaseController._started = false
 FinisherShowcaseController._runToken = 0
 FinisherShowcaseController._description = nil :: HumanoidDescription?
 FinisherShowcaseController._connections = {} :: { RBXScriptConnection }
+FinisherShowcaseController._showcaseBags = {} :: { [string]: { string } }
+FinisherShowcaseController._lastShowcaseFinisherIds = {} :: { [string]: string }
 
 local function disconnectAll(connections: { RBXScriptConnection })
 	for _, connection in ipairs(connections) do
@@ -225,67 +229,85 @@ local function waitForRun(controller, runToken: number, seconds: number): boolea
 	return runToken == controller._runToken
 end
 
-local function buildCandidates(crateDefinition): { string }
+local function addUniqueFinisherId(finisherIds: { string }, seen: { [string]: boolean }, finisherId: any)
+	local normalizedFinisherId = FinisherConfig.NormalizeFinisherId(finisherId)
+	if normalizedFinisherId == "" or seen[normalizedFinisherId] then
+		return
+	end
+
+	if not FinisherConfig.GetDefinition(normalizedFinisherId) then
+		return
+	end
+
+	table.insert(finisherIds, normalizedFinisherId)
+	seen[normalizedFinisherId] = true
+end
+
+local function buildFallbackShowcaseFinisherIds(crateDefinition): { string }
 	local candidates = {}
+	local seen = {}
 	local rarityWeights = crateDefinition.rarityWeights or {}
 	for _, finisherId in ipairs(FinisherConfig.GetCatalogIds()) do
 		local definition = FinisherConfig.GetDefinition(finisherId)
 		local rarity = definition and definition.rarity
 		if rarity and (tonumber(rarityWeights[rarity]) or 0) > 0 then
-			table.insert(candidates, finisherId)
+			addUniqueFinisherId(candidates, seen, finisherId)
 		end
 	end
 	return candidates
 end
 
-local function pickWeightedFinisher(crateId: string): string
+local function getShowcaseFinisherIds(crateId: string): { string }
 	local crateDefinition = CrateRollConfig.GetDefinition(crateId)
 	if not crateDefinition then
-		return FinisherConfig.GetCatalogIds()[1] or ""
+		return FinisherConfig.GetCatalogIds()
 	end
 
-	local candidatesByRarity = {}
-	local totalWeight = 0
-	for _, finisherId in ipairs(buildCandidates(crateDefinition)) do
-		local definition = FinisherConfig.GetDefinition(finisherId)
-		local rarity = definition and definition.rarity
-		if rarity then
-			candidatesByRarity[rarity] = candidatesByRarity[rarity] or {}
-			table.insert(candidatesByRarity[rarity], finisherId)
+	local finisherIds = {}
+	local seen = {}
+	for _, finisherId in ipairs(crateDefinition.showcaseFinisherIds or {}) do
+		addUniqueFinisherId(finisherIds, seen, finisherId)
+	end
+
+	if #finisherIds > 0 then
+		return finisherIds
+	end
+
+	return buildFallbackShowcaseFinisherIds(crateDefinition)
+end
+
+local function shuffleFinisherIds(finisherIds: { string }): { string }
+	local shuffled = table.clone(finisherIds)
+	for index = #shuffled, 2, -1 do
+		local swapIndex = rng:NextInteger(1, index)
+		shuffled[index], shuffled[swapIndex] = shuffled[swapIndex], shuffled[index]
+	end
+	return shuffled
+end
+
+local function buildShowcaseBag(crateId: string, lastFinisherId: string?): { string }
+	local bag = shuffleFinisherIds(getShowcaseFinisherIds(crateId))
+	if #bag > 1 and lastFinisherId and bag[1] == lastFinisherId then
+		for index = 2, #bag do
+			if bag[index] ~= lastFinisherId then
+				bag[1], bag[index] = bag[index], bag[1]
+				break
+			end
 		end
 	end
+	return bag
+end
 
-	local weightedRarities = {}
-	for _, rarity in ipairs(CrateRollConfig.RarityOrder) do
-		local candidates = candidatesByRarity[rarity]
-		local weight = tonumber(crateDefinition.rarityWeights[rarity]) or 0
-		if candidates and #candidates > 0 and weight > 0 then
-			totalWeight += weight
-			table.insert(weightedRarities, {
-				rarity = rarity,
-				weight = weight,
-			})
-		end
+function FinisherShowcaseController:_nextShowcaseFinisherId(crateId: string): string
+	local bag = self._showcaseBags[crateId]
+	if not bag or #bag <= 0 then
+		bag = buildShowcaseBag(crateId, self._lastShowcaseFinisherIds[crateId])
+		self._showcaseBags[crateId] = bag
 	end
 
-	if totalWeight <= 0 then
-		local fallback = FinisherConfig.GetCatalogIds()
-		return fallback[rng:NextInteger(1, math.max(1, #fallback))] or ""
-	end
-
-	local roll = rng:NextNumber(0, totalWeight)
-	local cursor = 0
-	local selectedRarity = weightedRarities[#weightedRarities].rarity
-	for _, entry in ipairs(weightedRarities) do
-		cursor += entry.weight
-		if roll <= cursor then
-			selectedRarity = entry.rarity
-			break
-		end
-	end
-
-	local candidates = candidatesByRarity[selectedRarity]
-	return if candidates and #candidates > 0 then candidates[rng:NextInteger(1, #candidates)] else ""
+	local finisherId = table.remove(bag, 1) or ""
+	self._lastShowcaseFinisherIds[crateId] = finisherId
+	return finisherId
 end
 
 function FinisherShowcaseController:_getDescription(): HumanoidDescription?
@@ -374,10 +396,15 @@ end
 
 function FinisherShowcaseController:_runShowcase(spec, template: Model, runToken: number)
 	task.spawn(function()
+		local initialDelay = tonumber(spec.initialDelay) or 0
+		if initialDelay > 0 and not waitForRun(self, runToken, initialDelay) then
+			return
+		end
+
 		while runToken == self._runToken and template.Parent do
 			setTemplateHidden(template)
 
-			local finisherId = pickWeightedFinisher(spec.crateId)
+			local finisherId = self:_nextShowcaseFinisherId(spec.crateId)
 			local clone = self:_makeClone(template)
 			if not self:_countDownToExplosion(template, finisherId, runToken) then
 				if clone then

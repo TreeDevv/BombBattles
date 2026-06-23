@@ -7,6 +7,32 @@ FinisherConfig.AttributeName = "EquippedFinisher"
 FinisherConfig.MaxFinisherIdLength = 64
 FinisherConfig.RemotesFolderName = "Remotes"
 FinisherConfig.PlayedRemoteName = "FinisherPlayed"
+FinisherConfig.InventoryRequestRemoteName = "FinisherInventoryRequest"
+FinisherConfig.MaxInventoryActionLength = 32
+
+FinisherConfig.InventoryActions = table.freeze({
+	Equip = "Equip",
+})
+
+FinisherConfig.Rarities = table.freeze({
+	Common = "Common",
+	Rare = "Rare",
+	Epic = "Epic",
+	Legendary = "Legendary",
+	Mythic = "Mythic",
+	Divine = "Divine",
+	Secret = "Secret",
+})
+
+FinisherConfig.RarityOrder = table.freeze({
+	"Common",
+	"Rare",
+	"Epic",
+	"Legendary",
+	"Mythic",
+	"Divine",
+	"Secret",
+})
 
 local AUTHORED_ORDER = table.freeze({
 	"Atomic",
@@ -178,6 +204,6 @@ function FinisherConfig.GetCatalogIds(): { string }
 end
 
 FinisherConfig.Icons = table.freeze(icons)
-FinisherConfig.Rarities = rarityByFinisherId
+FinisherConfig.FinisherRarities = rarityByFinisherId
 
 return table.freeze(FinisherConfig)

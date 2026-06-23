@@ -77,6 +77,8 @@ local recentAbilitiesByPlayer = {}
 local bombLaunches = {}
 local bombTravelDistances = {}
 
+local isFiniteCFrame = ReplayUtil.IsFiniteCFrame
+
 local function debugPrint(...)
 	if DEBUG then
 		print("[POTGService]", ...)
@@ -185,6 +187,10 @@ local function applySourceContext(context, event)
 	context.sourceId = getSourceId(event.sourceId) or getSourceId(event.bombId)
 	context.sourceType = getString(event.sourceType) or getString(event.bombType)
 	context.sourceConfidence = getSourceConfidence(event, context.playerUserId)
+	context.mapId = getString(event.mapId) or context.mapId
+	if isFiniteCFrame(event.mapPivot) then
+		context.mapPivot = event.mapPivot
+	end
 end
 
 local function applyPlayerMetadata(context, event, prefix: string?)
@@ -413,6 +419,8 @@ local function newScoreContext(playerUserId: number, timestamp: number, eventTyp
 		playerDisplayName = nil,
 		playerTeam = nil,
 		playerIsNPC = nil,
+		mapId = nil,
+		mapPivot = nil,
 		score = 0,
 		reasons = {},
 		reasonSet = {},
@@ -467,6 +475,8 @@ local function buildCandidate(context)
 		playerDisplayName = context.playerDisplayName,
 		playerTeam = context.playerTeam,
 		playerIsNPC = context.playerIsNPC,
+		mapId = context.mapId,
+		mapPivot = context.mapPivot,
 		sourceId = context.sourceId,
 		sourceType = context.sourceType,
 		startTime = timestamp - ReplayConstants.POTG_PRE_SECONDS,
@@ -501,6 +511,8 @@ local function copyCandidate(candidate)
 		playerDisplayName = candidate.playerDisplayName,
 		playerTeam = candidate.playerTeam,
 		playerIsNPC = candidate.playerIsNPC,
+		mapId = candidate.mapId,
+		mapPivot = candidate.mapPivot,
 		sourceId = candidate.sourceId,
 		sourceType = candidate.sourceType,
 		startTime = candidate.startTime,

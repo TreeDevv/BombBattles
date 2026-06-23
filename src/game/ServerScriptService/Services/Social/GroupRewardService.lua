@@ -36,6 +36,8 @@ local GroupRewardService = {}
 
 local promptRemote: RemoteEvent? = nil
 local promptResultRemote: RemoteEvent? = nil
+local stateRemote: RemoteEvent? = nil
+local stateRequestRemote: RemoteFunction? = nil
 local zone = nil
 local zonePart: BasePart? = nil
 local ZonePlus = nil
@@ -193,6 +195,28 @@ local function ensureRemotes()
 	local remotesFolder = ensureRemotesFolder()
 	promptRemote = RemoteUtil.EnsureRemoteEvent(remotesFolder, GroupRewardConfig.PromptRemoteName)
 	promptResultRemote = RemoteUtil.EnsureRemoteEvent(remotesFolder, GroupRewardConfig.PromptResultRemoteName)
+	stateRemote = RemoteUtil.EnsureRemoteEvent(remotesFolder, GroupRewardConfig.StateRemoteName)
+	stateRequestRemote = RemoteUtil.EnsureRemoteFunction(remotesFolder, GroupRewardConfig.StateRequestRemoteName)
+end
+
+local function buildStatePayload(player: Player)
+	local state = getState(player)
+	return {
+		hasBaseline = state.hasBaseline == true,
+		rewardClaimed = state.rewardClaimed == true,
+		joinedViaPrompt = state.joinedViaPrompt == true,
+	}
+end
+
+local function fireState(player: Player)
+	if not stateRemote then
+		ensureRemotes()
+	end
+
+	local remote = stateRemote
+	if remote and player.Parent == Players then
+		remote:FireClient(player, buildStatePayload(player))
+	end
 end
 
 local function shouldRateLimit(player: Player): boolean
@@ -241,12 +265,14 @@ local function rememberBaseline(player: Player, likes: number)
 		state.baselineLikes = roundNonNegative(likes)
 		state.baselineAtUnix = nowUnix()
 	end)
+	fireState(player)
 end
 
 local function rememberPromptJoin(player: Player)
 	updateState(player, function(state)
 		state.joinedViaPrompt = true
 	end)
+	fireState(player)
 end
 
 local function grantReward(player: Player): boolean
@@ -266,6 +292,7 @@ local function grantReward(player: Player): boolean
 		state.rewardClaimed = true
 		state.claimedAtUnix = nowUnix()
 	end)
+	fireState(player)
 	Notify.Send(player, GroupRewardConfig.RewardClaimedText, { color = "Green" })
 	FriendRewardService.OpenForPlayer(player)
 	return true
@@ -298,6 +325,7 @@ local function evaluateReward(player: Player, currentLikes: number, groupId: num
 	end
 
 	if state.rewardClaimed then
+		fireState(player)
 		FriendRewardService.OpenForPlayer(player)
 		return
 	end
@@ -338,6 +366,7 @@ local function handleInteraction(player: Player)
 
 	local state = getState(player)
 	if state.rewardClaimed then
+		fireState(player)
 		FriendRewardService.OpenForPlayer(player)
 		return
 	end
@@ -459,6 +488,9 @@ function GroupRewardService:OnStart()
 	if promptResultRemote then
 		promptResultRemote.OnServerEvent:Connect(handlePromptResult)
 	end
+	if stateRequestRemote then
+		stateRequestRemote.OnServerInvoke = buildStatePayload
+	end
 
 	local part = getZonePart()
 	if not part then
@@ -474,6 +506,10 @@ function GroupRewardService:OnStart()
 	end
 
 	startZone(part)
+end
+
+function GroupRewardService:OnPlayerAdded(player: Player)
+	fireState(player)
 end
 
 function GroupRewardService:OnPlayerRemoving(player: Player)

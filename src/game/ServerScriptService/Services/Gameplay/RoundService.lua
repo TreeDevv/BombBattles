@@ -190,6 +190,7 @@ local lobbyVoidFallAccumulator = 0
 local lobbyVoidResettingPlayers: { [Player]: boolean } = {}
 local characterReadinessWatchdogSerials: { [Player]: number } = {}
 local characterReadinessWatchdogRecoveries: { [Player]: { startedAt: number, count: number } } = {}
+RoundFlow.POTGIntroCompletions = {}
 RespawnFlow.VoidFallPadding = 70
 RespawnFlow.LobbyDeathBoundAttribute = "LobbyDeathBound"
 RespawnFlow.RoundDeathBoundAttribute = "RoundDeathBound"
@@ -365,12 +366,101 @@ function RoundFlow.getConfiguredDuration(value: any, fallback: number): number
 	return RoundReplayRuntime.GetConfiguredDuration(value, fallback)
 end
 
+function RoundFlow.getEndFlowConfig()
+	return require(ReplicatedStorage.Shared.Config.RoundEndFlowConfig)
+end
+
+function RoundFlow.ensurePOTGIntroRemote(): RemoteEvent
+	return ensureRoundRemote(RoundFlow.getEndFlowConfig().Remotes.POTGIntro)
+end
+
+function RoundFlow.ensurePOTGIntroCompleteRemote(): RemoteEvent
+	return ensureRoundRemote(RoundFlow.getEndFlowConfig().Remotes.POTGIntroComplete)
+end
+
+function RoundFlow.getWinnerBeatDuration(): number
+	return RoundFlow.getConfiguredDuration(RoundFlow.getEndFlowConfig().WinnerBeatSeconds, 1.5)
+end
+
 function RoundFlow.getPlayOfTheGameDuration(): number
 	return RoundFlow.getConfiguredDuration(RoundConfig.PlayOfTheGameSeconds, 10)
 end
 
+function RoundFlow.getPOTGIntroMaxDuration(): number
+	return RoundFlow.getConfiguredDuration(RoundFlow.getEndFlowConfig().POTGIntroMaxSeconds, 20)
+end
+
+function RoundFlow.getRoundResultsDuration(): number
+	return RoundFlow.getConfiguredDuration(RoundFlow.getEndFlowConfig().ResultsSeconds, 8)
+end
+
 function RoundFlow.playRoundEndPOTG(maxWaitSeconds: number): boolean
 	return RoundReplayRuntime.PlayPOTG(roundPlayers, maxWaitSeconds, DEBUG_REPLAY_EVENTS)
+end
+
+function RoundFlow.getPOTGAttachmentCFrame(): CFrame?
+	local activeMap = getActiveMap()
+	if not activeMap then
+		return nil
+	end
+
+	local attachmentName = RoundFlow.getEndFlowConfig().POTGAttachmentName
+	local attachment = if typeof(attachmentName) == "string" and attachmentName ~= ""
+		then activeMap:FindFirstChild(attachmentName, true)
+		else nil
+	if attachment and attachment:IsA("Attachment") then
+		return attachment.WorldCFrame
+	end
+
+	warn(("[RoundService] Active map %s is missing POTG attachment %s"):format(activeMap.Name, tostring(attachmentName)))
+	return nil
+end
+
+function RoundFlow.firePOTGIntro(recipients: { Player }, winnerTeam: string)
+	RoundFlow.POTGIntroCompletions = {}
+	if #recipients == 0 then
+		return
+	end
+
+	local endFlowConfig = RoundFlow.getEndFlowConfig()
+	local remote = RoundFlow.ensurePOTGIntroRemote()
+	local payload = {
+		type = "POTGIntro",
+		roundId = roundId,
+		winnerTeam = winnerTeam,
+		mode = endFlowConfig.CutsceneModes.FullAnimation,
+		cameraCFrame = RoundFlow.getPOTGAttachmentCFrame(),
+	}
+
+	for _, player in ipairs(recipients) do
+		if player.Parent == Players and roundPlayers[player] == true then
+			remote:FireClient(player, payload)
+		end
+	end
+end
+
+function RoundFlow.waitForPOTGIntroCompletion(recipients: { Player }, maxWaitSeconds: number): boolean
+	local deadline = os.clock() + math.max(maxWaitSeconds, 0)
+	while os.clock() < deadline do
+		if pendingAdminReset or pendingAdminForceStartMapId or pendingAdminWinnerTeam then
+			return false
+		end
+
+		local pendingCount = 0
+		for _, player in ipairs(recipients) do
+			if player.Parent == Players and roundPlayers[player] == true and RoundFlow.POTGIntroCompletions[player] ~= true then
+				pendingCount += 1
+			end
+		end
+
+		if pendingCount <= 0 then
+			return true
+		end
+
+		task.wait(0.1)
+	end
+
+	return false
 end
 
 local function getPlayerKey(playerOrUserId: Player | number | string): string
@@ -1614,6 +1704,7 @@ end
 
 function RoundFlow.createNewRound()
 	roundId += 1
+	RoundFlow.POTGIntroCompletions = {}
 	resetReplayRoundState()
 	resetScoreboardStats()
 	resetTeamKillCounts()
@@ -1641,10 +1732,24 @@ end
 
 function RoundFlow.endRound(winnerTeam: string)
 	setWinner(winnerTeam)
+	local winnerBeatDuration = RoundFlow.getWinnerBeatDuration()
 	local potgDuration = RoundFlow.getPlayOfTheGameDuration()
-	if potgDuration > 0 then
-		setState(RoundStates.PlayOfTheGame, "Play of the Game", potgDuration)
-		local sentPOTG = RoundFlow.playRoundEndPOTG(potgDuration)
+	local potgIntroMaxDuration = RoundFlow.getPOTGIntroMaxDuration()
+	local potgStateDuration = winnerBeatDuration + potgIntroMaxDuration + potgDuration
+
+	if potgStateDuration > 0 then
+		setState(RoundStates.PlayOfTheGame, "Play of the Game", potgStateDuration)
+		if winnerBeatDuration > 0 then
+			task.wait(winnerBeatDuration)
+		end
+
+		local potgRecipients = RoundReplayRuntime.GetRecipients(roundPlayers)
+		if potgIntroMaxDuration > 0 and #potgRecipients > 0 then
+			RoundFlow.firePOTGIntro(potgRecipients, winnerTeam)
+			RoundFlow.waitForPOTGIntroCompletion(potgRecipients, potgIntroMaxDuration)
+		end
+
+		local sentPOTG = if potgDuration > 0 then RoundFlow.playRoundEndPOTG(potgDuration) else false
 		if sentPOTG then
 			setState(RoundStates.PlayOfTheGame, "Play of the Game", potgDuration)
 			task.wait(potgDuration)
@@ -1652,9 +1757,10 @@ function RoundFlow.endRound(winnerTeam: string)
 	end
 
 	local resetStartedAt = os.clock()
+	local resultsDuration = RoundFlow.getRoundResultsDuration()
 	publishRoundResults(winnerTeam)
-	setState(RoundStates.RoundEnding, if winnerTeam == "Draw" then "Draw" else winnerTeam .. " wins", RoundConfig.ResetSeconds)
-	local remainingResetSeconds = math.max(RoundConfig.ResetSeconds - (os.clock() - resetStartedAt), 0)
+	setState(RoundStates.RoundEnding, if winnerTeam == "Draw" then "Draw" else winnerTeam .. " wins", resultsDuration)
+	local remainingResetSeconds = math.max(resultsDuration - (os.clock() - resetStartedAt), 0)
 	task.wait(remainingResetSeconds)
 end
 
@@ -1933,6 +2039,17 @@ function RoundService:OnStart()
 	end)
 	killFeedRemote = ensureKillFeedRemote()
 	destructionScoreRemote = ensureDestructionScoreRemote()
+	RoundFlow.ensurePOTGIntroRemote()
+	RoundFlow.ensurePOTGIntroCompleteRemote().OnServerEvent:Connect(function(player: Player, payload: any)
+		if currentState ~= RoundStates.PlayOfTheGame or roundPlayers[player] ~= true then
+			return
+		end
+		if typeof(payload) ~= "table" or payload.roundId ~= roundId then
+			return
+		end
+
+		RoundFlow.POTGIntroCompletions[player] = true
+	end)
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		RoundAFKRuntime.ResetPlayer(player)

@@ -6,6 +6,7 @@ local TweenService = game:GetService("TweenService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AudioSettings = require(ReplicatedStorage.Shared.Audio.AudioSettings)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 
 local DataController = require(script.Parent:WaitForChild("DataController"))
@@ -21,11 +22,13 @@ local SIDE_BUTTONS_NAME = "SideButtons"
 local SKILLS_BUTTON_NAME = "Skills"
 local SKILLS_LABEL_TEXT = "SKILLS"
 local SKINS_TAB_NAME = "Skins"
+local FINISHERS_TAB_NAME = "Finishers"
 local HUD_TOGGLE_DEBOUNCE_SECONDS = 0.08
 local TILE_SLOT_NAME = "SkillsInventoryTileSlot"
 local TILE_SCALE_NAME = "SkillsInventoryVisualScale"
 local SKIN_TEMPLATE_SUFFIX = "Template"
 local SKIN_RUNTIME_TILE_ATTRIBUTE = "RuntimeSkinTile"
+local FINISHER_RUNTIME_TILE_ATTRIBUTE = "RuntimeFinisherTile"
 local TILE_HOVER_SIZE_FACTOR = 1.01
 local TILE_PRESSED_SIZE_FACTOR = 0.9
 local TILE_TWEEN_INFO = TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -38,6 +41,9 @@ local LOADOUT_KEY = Schema.AbilityLoadout and Schema.AbilityLoadout.key or "abil
 local OWNED_SKINS_KEY = Schema.OwnedBombSkins and Schema.OwnedBombSkins.key or "ownedBombSkins"
 local SKIN_COPIES_KEY = Schema.BombSkinCopies and Schema.BombSkinCopies.key or "bombSkinCopies"
 local EQUIPPED_SKIN_KEY = Schema.EquippedBombSkin and Schema.EquippedBombSkin.key or "equippedBombSkin"
+local OWNED_FINISHERS_KEY = Schema.OwnedFinishers and Schema.OwnedFinishers.key or "ownedFinishers"
+local FINISHER_COPIES_KEY = Schema.FinisherCopies and Schema.FinisherCopies.key or "finisherCopies"
+local EQUIPPED_FINISHER_KEY = Schema.EquippedFinisher and Schema.EquippedFinisher.key or "equippedFinisher"
 
 type TileRecord = {
 	button: ImageButton,
@@ -50,6 +56,12 @@ type TileRecord = {
 type SkinTileRecord = {
 	button: ImageButton,
 	skinId: string,
+	normalSize: UDim2,
+}
+
+type FinisherTileRecord = {
+	button: ImageButton,
+	finisherId: string,
 	normalSize: UDim2,
 }
 
@@ -76,21 +88,26 @@ SkillsInventoryController._frameConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._hudConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._tileConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._skinTileConnections = {} :: { RBXScriptConnection }
+SkillsInventoryController._finisherTileConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._frame = nil :: GuiObject?
 SkillsInventoryController._right = nil :: Instance?
 SkillsInventoryController._topbar = nil :: Instance?
 SkillsInventoryController._containers = {} :: { [string]: GuiObject }
 SkillsInventoryController._tilesByAbilityId = {} :: { [string]: TileRecord }
 SkillsInventoryController._skinTilesBySkinId = {} :: { [string]: SkinTileRecord }
+SkillsInventoryController._finisherTilesByFinisherId = {} :: { [string]: FinisherTileRecord }
 SkillsInventoryController._tileTweens = {} :: { [ImageButton]: Tween }
 SkillsInventoryController._selectedTab = AbilityConfig.Slots.Offensive
 SkillsInventoryController._selectedSlot = AbilityConfig.Slots.Offensive
 SkillsInventoryController._selectedAbilityId = ""
 SkillsInventoryController._selectedSkinId = BombSkinConfig.DefaultSkinId
+SkillsInventoryController._selectedFinisherId = FinisherConfig.DefaultFinisherId
 SkillsInventoryController._remote = nil :: RemoteEvent?
 SkillsInventoryController._skinRemote = nil :: RemoteEvent?
+SkillsInventoryController._finisherRemote = nil :: RemoteEvent?
 SkillsInventoryController._statusByAbilityId = {} :: { [string]: string }
 SkillsInventoryController._statusBySkinId = {} :: { [string]: string }
+SkillsInventoryController._statusByFinisherId = {} :: { [string]: string }
 SkillsInventoryController._lastHudToggleAt = 0
 
 local warnedMissingTextStyles = {}
@@ -191,6 +208,7 @@ local function getInventoryTabs(): { string }
 		AbilityConfig.Slots.Offensive,
 		AbilityConfig.Slots.Defensive,
 		SKINS_TAB_NAME,
+		FINISHERS_TAB_NAME,
 	}
 end
 
@@ -211,6 +229,16 @@ local function getSkinRemote(): RemoteEvent?
 	end
 
 	local remote = remotes:WaitForChild(BombSkinConfig.InventoryRequestRemoteName, 10)
+	return if remote and remote:IsA("RemoteEvent") then remote else nil
+end
+
+local function getFinisherRemote(): RemoteEvent?
+	local remotes = ReplicatedStorage:WaitForChild(FinisherConfig.RemotesFolderName, 10)
+	if not remotes then
+		return nil
+	end
+
+	local remote = remotes:WaitForChild(FinisherConfig.InventoryRequestRemoteName, 10)
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
 end
 
@@ -292,9 +320,63 @@ local function getSkinCopies(): { [string]: number }
 	return copies
 end
 
+local function getOwnedFinishers(): { [string]: boolean }
+	local rawOwned = DataController:Get(OWNED_FINISHERS_KEY)
+	local owned = {}
+	if typeof(rawOwned) ~= "table" then
+		return owned
+	end
+
+	for key, child in pairs(rawOwned) do
+		local finisherId = nil
+		if typeof(key) == "string" and child == true then
+			finisherId = key
+		elseif typeof(child) == "string" then
+			finisherId = child
+		end
+
+		if finisherId then
+			local normalizedFinisherId = FinisherConfig.NormalizeFinisherId(finisherId)
+			if FinisherConfig.IsKnownFinisherId(normalizedFinisherId) then
+				owned[normalizedFinisherId] = true
+			end
+		end
+	end
+
+	return owned
+end
+
+local function getFinisherCopies(): { [string]: number }
+	local rawCopies = DataController:Get(FINISHER_COPIES_KEY)
+	local owned = getOwnedFinishers()
+	local copies = {}
+
+	if typeof(rawCopies) == "table" then
+		for rawFinisherId, rawCount in pairs(rawCopies) do
+			local finisherId = FinisherConfig.NormalizeFinisherId(rawFinisherId)
+			local count = math.floor(tonumber(rawCount) or 0)
+			if finisherId ~= "" and owned[finisherId] == true and count > 0 then
+				copies[finisherId] = count
+			end
+		end
+	end
+
+	for finisherId in pairs(owned) do
+		if (copies[finisherId] or 0) < 1 then
+			copies[finisherId] = 1
+		end
+	end
+
+	return copies
+end
+
 local function getEquippedSkinId(): string
 	local skinId = BombSkinConfig.NormalizeSkinId(DataController:Get(EQUIPPED_SKIN_KEY))
 	return if skinId ~= "" then skinId else BombSkinConfig.DefaultSkinId
+end
+
+local function getEquippedFinisherId(): string
+	return FinisherConfig.NormalizeFinisherId(DataController:Get(EQUIPPED_FINISHER_KEY))
 end
 
 local function getLoadout(): { [string]: string }
@@ -311,6 +393,11 @@ end
 local rarityRank = {}
 for index, rarity in ipairs(BombSkinConfig.RarityOrder) do
 	rarityRank[rarity] = index
+end
+
+local finisherRarityRank = {}
+for index, rarity in ipairs(FinisherConfig.RarityOrder) do
+	finisherRarityRank[rarity] = index
 end
 
 local function getSortedOwnedSkinIds(): { string }
@@ -341,6 +428,34 @@ local function getSortedOwnedSkinIds(): { string }
 	return skinIds
 end
 
+local function getSortedOwnedFinisherIds(): { string }
+	local owned = getOwnedFinishers()
+	local finisherIds = {}
+
+	for finisherId in pairs(owned) do
+		if FinisherConfig.IsKnownFinisherId(finisherId) then
+			table.insert(finisherIds, finisherId)
+		end
+	end
+
+	table.sort(finisherIds, function(leftId, rightId)
+		local left = FinisherConfig.GetDefinition(leftId)
+		local right = FinisherConfig.GetDefinition(rightId)
+		local leftRank = if left then finisherRarityRank[left.rarity] or math.huge else math.huge
+		local rightRank = if right then finisherRarityRank[right.rarity] or math.huge else math.huge
+
+		if leftRank == rightRank then
+			local leftOrder = if left then tonumber(left.catalogOrder) or 0 else 0
+			local rightOrder = if right then tonumber(right.catalogOrder) or 0 else 0
+			return leftOrder < rightOrder
+		end
+
+		return leftRank < rightRank
+	end)
+
+	return finisherIds
+end
+
 local function findAbilityContainer(frame: Instance, name: string): GuiObject?
 	for _, child in ipairs(frame:GetChildren()) do
 		if child.Name == name and child:IsA("GuiObject") and child:FindFirstChildWhichIsA("ScrollingFrame") then
@@ -356,6 +471,16 @@ local function findSkinTemplate(scroller: ScrollingFrame, rarity: string?): Imag
 	local template = scroller:FindFirstChild(templateName)
 	if not (template and template:IsA("ImageButton")) then
 		template = scroller:FindFirstChild(BombSkinConfig.Rarities.Common .. SKIN_TEMPLATE_SUFFIX)
+	end
+
+	return if template and template:IsA("ImageButton") then template else nil
+end
+
+local function findFinisherTemplate(scroller: ScrollingFrame, rarity: string?): ImageButton?
+	local templateName = tostring(rarity or FinisherConfig.Rarities.Common) .. SKIN_TEMPLATE_SUFFIX
+	local template = scroller:FindFirstChild(templateName)
+	if not (template and template:IsA("ImageButton")) then
+		template = scroller:FindFirstChild(FinisherConfig.Rarities.Common .. SKIN_TEMPLATE_SUFFIX)
 	end
 
 	return if template and template:IsA("ImageButton") then template else nil
@@ -589,6 +714,18 @@ function SkillsInventoryController:_disconnectSkinTiles()
 	table.clear(self._skinTilesBySkinId)
 end
 
+function SkillsInventoryController:_disconnectFinisherTiles()
+	for _, record in pairs(self._finisherTilesByFinisherId) do
+		self:_cancelTileTween(record.button)
+		if record.button.Parent then
+			record.button.Size = record.normalSize
+		end
+	end
+
+	disconnectAll(self._finisherTileConnections)
+	table.clear(self._finisherTilesByFinisherId)
+end
+
 function SkillsInventoryController:_disconnectTiles()
 	for button, tween in pairs(self._tileTweens) do
 		tween:Cancel()
@@ -602,6 +739,7 @@ function SkillsInventoryController:_disconnectTiles()
 	disconnectAll(self._tileConnections)
 	table.clear(self._tilesByAbilityId)
 	self:_disconnectSkinTiles()
+	self:_disconnectFinisherTiles()
 end
 
 function SkillsInventoryController:_disconnectFrame()
@@ -628,6 +766,7 @@ function SkillsInventoryController:_setTopbarState(slot: string)
 		local isEnabledTab = child.Name == AbilityConfig.Slots.Offensive
 			or child.Name == AbilityConfig.Slots.Defensive
 			or child.Name == SKINS_TAB_NAME
+			or child.Name == FINISHERS_TAB_NAME
 		local isSelected = child.Name == slot
 		child:SetAttribute("Selected", isSelected)
 		child:SetAttribute("Disabled", not isEnabledTab)
@@ -644,9 +783,10 @@ function SkillsInventoryController:_updateTileStates()
 	local loadout = getLoadout()
 	local owned = getOwnedAbilities()
 	local equippedSkinId = getEquippedSkinId()
+	local equippedFinisherId = getEquippedFinisherId()
 
 	for abilityId, record in pairs(self._tilesByAbilityId) do
-		local isSelected = self._selectedTab ~= SKINS_TAB_NAME and abilityId == self._selectedAbilityId
+		local isSelected = AbilityConfig.IsKnownSlot(self._selectedTab) and abilityId == self._selectedAbilityId
 		local isOwned = owned[abilityId] == true
 		local isEquipped = loadout[record.slot] == abilityId
 
@@ -658,6 +798,15 @@ function SkillsInventoryController:_updateTileStates()
 	for skinId, record in pairs(self._skinTilesBySkinId) do
 		local isSelected = self._selectedTab == SKINS_TAB_NAME and skinId == self._selectedSkinId
 		local isEquipped = equippedSkinId == skinId
+
+		record.button:SetAttribute("Selected", isSelected)
+		record.button:SetAttribute("Owned", true)
+		record.button:SetAttribute("Equipped", isEquipped)
+	end
+
+	for finisherId, record in pairs(self._finisherTilesByFinisherId) do
+		local isSelected = self._selectedTab == FINISHERS_TAB_NAME and finisherId == self._selectedFinisherId
+		local isEquipped = equippedFinisherId == finisherId
 
 		record.button:SetAttribute("Selected", isSelected)
 		record.button:SetAttribute("Owned", true)
@@ -736,9 +885,84 @@ function SkillsInventoryController:_updateSkinRightPanel()
 	end
 end
 
+function SkillsInventoryController:_updateFinisherRightPanel()
+	local right = self._right
+	if not right then
+		return
+	end
+
+	local finisherId = self._selectedFinisherId
+	local definition = FinisherConfig.GetDefinition(finisherId)
+	local owned = getOwnedFinishers()
+	local icon = findImage(right, "Icon")
+	local nameLabel = findTextLabel(right, "AbilityName")
+	local descriptionLabel = findTextLabel(right, "Description")
+	local buyButton = findButton(right, "BuyButton")
+	local equipButton = findButton(right, "EquipButton")
+	local unequipButton = findButton(right, "UnequipButton")
+	local favoriteButton = findButton(right, "FavoriteButton")
+	local warning = findTextLabel(right, "Warning")
+
+	if not (definition and owned[definition.id] == true) then
+		if icon then
+			icon.Image = ""
+		end
+		if nameLabel then
+			nameLabel.Text = ""
+		end
+		if descriptionLabel then
+			descriptionLabel.Text = ""
+		end
+		setButtonVisible(buyButton, false)
+		setButtonVisible(equipButton, false)
+		setButtonVisible(unequipButton, false)
+		setButtonVisible(favoriteButton, false)
+		if warning then
+			warning.Visible = false
+		end
+		return
+	end
+
+	local isEquipped = getEquippedFinisherId() == definition.id
+
+	if icon then
+		icon.Image = definition.iconImage or ""
+	end
+	if nameLabel then
+		nameLabel.Text = definition.displayName or definition.id
+	end
+	if descriptionLabel then
+		descriptionLabel.Text = definition.description or ""
+	end
+
+	setButtonLabel(equipButton, "EQUIP")
+	setButtonLabel(unequipButton, "EQUIPPED")
+	setButtonVisible(buyButton, false)
+	setButtonVisible(equipButton, not isEquipped)
+	setButtonVisible(unequipButton, isEquipped)
+	if isEquipped then
+		setButtonEnabled(unequipButton, false)
+	end
+	setButtonVisible(favoriteButton, false)
+
+	if warning then
+		local statusText = self._statusByFinisherId[definition.id]
+		if statusText and statusText ~= "" then
+			warning.Text = statusText
+			warning.Visible = true
+		else
+			warning.Visible = false
+		end
+	end
+end
+
 function SkillsInventoryController:_updateRightPanel()
 	if self._selectedTab == SKINS_TAB_NAME then
 		self:_updateSkinRightPanel()
+		return
+	end
+	if self._selectedTab == FINISHERS_TAB_NAME then
+		self:_updateFinisherRightPanel()
 		return
 	end
 
@@ -852,6 +1076,24 @@ function SkillsInventoryController:_selectSkin(skinId: string)
 	self:_refresh()
 end
 
+function SkillsInventoryController:_selectFinisher(finisherId: string)
+	local definition = FinisherConfig.GetDefinition(finisherId)
+	if not definition then
+		return
+	end
+
+	local owned = getOwnedFinishers()
+	if owned[definition.id] ~= true then
+		return
+	end
+
+	self._selectedTab = FINISHERS_TAB_NAME
+	self._selectedFinisherId = definition.id
+	self:_setContainerVisible(FINISHERS_TAB_NAME)
+	self:_setTopbarState(FINISHERS_TAB_NAME)
+	self:_refresh()
+end
+
 function SkillsInventoryController:_selectSlot(slot: string)
 	if slot == SKINS_TAB_NAME then
 		self._selectedTab = SKINS_TAB_NAME
@@ -873,6 +1115,35 @@ function SkillsInventoryController:_selectSlot(slot: string)
 
 		local skinIds = getSortedOwnedSkinIds()
 		self:_selectSkin(skinIds[1] or BombSkinConfig.DefaultSkinId)
+		return
+	end
+
+	if slot == FINISHERS_TAB_NAME then
+		self._selectedTab = FINISHERS_TAB_NAME
+		self:_setContainerVisible(FINISHERS_TAB_NAME)
+		self:_setTopbarState(FINISHERS_TAB_NAME)
+
+		local owned = getOwnedFinishers()
+		local selectedFinisher = FinisherConfig.GetDefinition(self._selectedFinisherId)
+		if selectedFinisher and owned[selectedFinisher.id] == true then
+			self:_refresh()
+			return
+		end
+
+		local equippedFinisherId = getEquippedFinisherId()
+		if owned[equippedFinisherId] == true then
+			self:_selectFinisher(equippedFinisherId)
+			return
+		end
+
+		local finisherIds = getSortedOwnedFinisherIds()
+		local firstFinisherId = finisherIds[1]
+		if firstFinisherId then
+			self:_selectFinisher(firstFinisherId)
+		else
+			self._selectedFinisherId = FinisherConfig.DefaultFinisherId
+			self:_refresh()
+		end
 		return
 	end
 
@@ -913,9 +1184,31 @@ function SkillsInventoryController:_sendSkinAction(action: string)
 	})
 end
 
+function SkillsInventoryController:_sendFinisherAction(action: string)
+	if action ~= FinisherConfig.InventoryActions.Equip then
+		return
+	end
+
+	local remote = self._finisherRemote
+	local definition = FinisherConfig.GetDefinition(self._selectedFinisherId)
+	if not (remote and definition) then
+		return
+	end
+
+	self._statusByFinisherId[definition.id] = nil
+	remote:FireServer({
+		action = action,
+		finisherId = definition.id,
+	})
+end
+
 function SkillsInventoryController:_sendAction(action: string)
 	if self._selectedTab == SKINS_TAB_NAME then
 		self:_sendSkinAction(action)
+		return
+	end
+	if self._selectedTab == FINISHERS_TAB_NAME then
+		self:_sendFinisherAction(action)
 		return
 	end
 
@@ -1038,13 +1331,55 @@ function SkillsInventoryController:_bindSkinTileButton(button: ImageButton, skin
 	end))
 end
 
-local function clearSkinTiles(scroller: ScrollingFrame)
+function SkillsInventoryController:_bindFinisherTileButton(button: ImageButton, finisherId: string)
+	local normalSize = button.Size
+	local bigSize = scaleUDim2(normalSize, TILE_HOVER_SIZE_FACTOR)
+	local smallSize = scaleUDim2(normalSize, TILE_PRESSED_SIZE_FACTOR)
+
+	button.Active = true
+	button.Selectable = true
+	button.AutoButtonColor = true
+	button:SetAttribute("defaultSize", normalSize)
+	button:SetAttribute("Hovered", false)
+	button:SetAttribute("Pressed", false)
+
+	track(self._finisherTileConnections, button.MouseEnter:Connect(function()
+		button:SetAttribute("Hovered", true)
+		self:_tweenTileButton(button, bigSize)
+	end))
+
+	track(self._finisherTileConnections, button.MouseLeave:Connect(function()
+		button:SetAttribute("Hovered", false)
+		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, normalSize)
+	end))
+
+	track(self._finisherTileConnections, button.MouseButton1Down:Connect(function()
+		button:SetAttribute("Pressed", true)
+		self:_tweenTileButton(button, smallSize)
+	end))
+	track(self._finisherTileConnections, button.MouseButton1Up:Connect(function()
+		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, bigSize)
+	end))
+	track(self._finisherTileConnections, button.Activated:Connect(function()
+		button:SetAttribute("Pressed", false)
+		playClick()
+		self:_selectFinisher(finisherId)
+	end))
+	track(self._finisherTileConnections, button.MouseButton1Click:Connect(function()
+		button:SetAttribute("Pressed", false)
+		self:_selectFinisher(finisherId)
+	end))
+end
+
+local function clearCosmeticTiles(scroller: ScrollingFrame, runtimeTileAttribute: string)
 	for _, child in ipairs(scroller:GetChildren()) do
 		if not child:IsA("ImageButton") then
 			continue
 		end
 
-		if child:GetAttribute(SKIN_RUNTIME_TILE_ATTRIBUTE) == true then
+		if child:GetAttribute(runtimeTileAttribute) == true then
 			child:Destroy()
 		elseif string.sub(child.Name, -#SKIN_TEMPLATE_SUFFIX) == SKIN_TEMPLATE_SUFFIX then
 			child.Visible = false
@@ -1129,7 +1464,7 @@ function SkillsInventoryController:_populateSkins(container: GuiObject?)
 	self:_disconnectSkinTiles()
 	disableAuthoredTileTweenScripts(scroller)
 	removeRuntimeTileScales(scroller)
-	clearSkinTiles(scroller)
+	clearCosmeticTiles(scroller, SKIN_RUNTIME_TILE_ATTRIBUTE)
 
 	local skinIds = getSortedOwnedSkinIds()
 	local skinCopies = getSkinCopies()
@@ -1178,6 +1513,68 @@ function SkillsInventoryController:_populateSkins(container: GuiObject?)
 	end
 end
 
+function SkillsInventoryController:_populateFinishers(container: GuiObject?)
+	if not container then
+		return
+	end
+
+	local scroller = container:FindFirstChildWhichIsA("ScrollingFrame")
+	if not scroller then
+		return
+	end
+
+	self:_disconnectFinisherTiles()
+	disableAuthoredTileTweenScripts(scroller)
+	removeRuntimeTileScales(scroller)
+	clearCosmeticTiles(scroller, FINISHER_RUNTIME_TILE_ATTRIBUTE)
+
+	local finisherIds = getSortedOwnedFinisherIds()
+	local finisherCopies = getFinisherCopies()
+
+	for index, finisherId in ipairs(finisherIds) do
+		local definition = FinisherConfig.GetDefinition(finisherId)
+		if not definition then
+			continue
+		end
+
+		local template = findFinisherTemplate(scroller, definition.rarity)
+		if not template then
+			warn(("[SkillsInventoryController] Missing finisher inventory template for rarity '%s'."):format(tostring(definition.rarity)))
+			continue
+		end
+
+		local button = template:Clone()
+		button.Name = "Finisher_" .. definition.id
+		button.LayoutOrder = index
+		button.Visible = true
+		button.Active = true
+		button.Selectable = true
+		button:SetAttribute(FINISHER_RUNTIME_TILE_ATTRIBUTE, true)
+		button:SetAttribute("FinisherId", definition.id)
+		button:SetAttribute("Rarity", definition.rarity)
+
+		local label = findTextLabel(button, "Label")
+		if label then
+			label.Text = formatSkinTileName(definition, finisherCopies[definition.id] or 1)
+		end
+
+		local icon = findImage(button, "Icon")
+		if icon then
+			icon.Image = definition.iconImage or ""
+		end
+
+		button.Parent = scroller
+
+		self._finisherTilesByFinisherId[definition.id] = {
+			button = button,
+			finisherId = definition.id,
+			normalSize = button.Size,
+		}
+
+		self:_bindFinisherTileButton(button, definition.id)
+	end
+end
+
 function SkillsInventoryController:_bindFrame(frame: GuiObject?)
 	self:_disconnectFrame()
 	self._frame = frame
@@ -1196,10 +1593,13 @@ function SkillsInventoryController:_bindFrame(frame: GuiObject?)
 	self._containers[AbilityConfig.Slots.Offensive] = findAbilityContainer(frame, "OffensiveAbilities")
 	self._containers[AbilityConfig.Slots.Defensive] = findAbilityContainer(frame, "DefensiveAbilities")
 	self._containers[SKINS_TAB_NAME] = findAbilityContainer(frame, SKINS_TAB_NAME)
+	self._containers[FINISHERS_TAB_NAME] = findAbilityContainer(frame, FINISHERS_TAB_NAME)
 
 	for slot, container in pairs(self._containers) do
 		if slot == SKINS_TAB_NAME then
 			self:_populateSkins(container)
+		elseif slot == FINISHERS_TAB_NAME then
+			self:_populateFinishers(container)
 		else
 			self:_populateSlot(slot, container)
 		end
@@ -1318,6 +1718,23 @@ function SkillsInventoryController:_bindRemote()
 			self:_refresh()
 		end))
 	end
+
+	self._finisherRemote = getFinisherRemote()
+	if self._finisherRemote then
+		track(self._connections, self._finisherRemote.OnClientEvent:Connect(function(response)
+			if typeof(response) ~= "table" then
+				return
+			end
+
+			local finisherId = FinisherConfig.NormalizeFinisherId(response.finisherId)
+			if finisherId ~= "" then
+				self._statusByFinisherId[finisherId] =
+					if response.ok == true then nil else tostring(response.message or "Finisher action failed.")
+			end
+
+			self:_refresh()
+		end))
+	end
 end
 
 function SkillsInventoryController:OnStart()
@@ -1347,8 +1764,13 @@ function SkillsInventoryController:OnStart()
 		if self._containers[SKINS_TAB_NAME] then
 			self:_populateSkins(self._containers[SKINS_TAB_NAME])
 		end
+		if self._containers[FINISHERS_TAB_NAME] then
+			self:_populateFinishers(self._containers[FINISHERS_TAB_NAME])
+		end
 		if self._selectedTab == SKINS_TAB_NAME then
 			self:_selectSlot(SKINS_TAB_NAME)
+		elseif self._selectedTab == FINISHERS_TAB_NAME then
+			self:_selectSlot(FINISHERS_TAB_NAME)
 		else
 			self:_refresh()
 		end
@@ -1365,7 +1787,18 @@ function SkillsInventoryController:OnStart()
 			else
 				self:_refresh()
 			end
+		elseif key == OWNED_FINISHERS_KEY or key == FINISHER_COPIES_KEY then
+			if self._containers[FINISHERS_TAB_NAME] then
+				self:_populateFinishers(self._containers[FINISHERS_TAB_NAME])
+			end
+			if self._selectedTab == FINISHERS_TAB_NAME then
+				self:_selectSlot(FINISHERS_TAB_NAME)
+			else
+				self:_refresh()
+			end
 		elseif key == EQUIPPED_SKIN_KEY then
+			self:_refresh()
+		elseif key == EQUIPPED_FINISHER_KEY then
 			self:_refresh()
 		end
 	end))

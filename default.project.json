@@ -353,6 +353,9 @@
           "ResultsScreenController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ResultsScreenController.lua"
           },
+          "RoundEndFlowController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/RoundEndFlowController.lua"
+          },
           "SkillsInventoryController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/SkillsInventoryController.lua"
           },
@@ -361,6 +364,12 @@
           },
           "BottomButtonsController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/BottomButtonsController.lua"
+          },
+          "Bundles": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/Bundles"
+          },
+          "BundlesController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/BundlesController.lua"
           },
           "ScrollGradientController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ScrollGradientController.lua"

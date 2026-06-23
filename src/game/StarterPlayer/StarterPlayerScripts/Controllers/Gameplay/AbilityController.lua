@@ -95,6 +95,7 @@ AbilityController.Loaded = false
 AbilityController._requestRemote = nil :: RemoteEvent?
 AbilityController._effectRemote = nil :: RemoteEvent?
 AbilityController._effectConnection = nil :: RBXScriptConnection?
+AbilityController._replicaConnection = nil :: RBXScriptConnection?
 AbilityController._hudConnections = {} :: { RBXScriptConnection }
 AbilityController._buttons = {} :: { [string]: ImageButton }
 AbilityController._buttonVisuals = {} :: { [string]: ButtonVisual }
@@ -946,6 +947,13 @@ function AbilityController:GetSlotState(slot: string): AbilitySlotState?
 end
 
 function AbilityController:OnStart()
+	if self._replicaConnection then
+		self._replicaConnection:Disconnect()
+	end
+	self._replicaConnection = ReplicaController.ReplicaOfClassCreated(AbilityConfig.Scope, function(replica)
+		self:_bindReplica(replica)
+	end)
+
 	publishDebugState()
 	for _, connection in ipairs(self._hudConnections) do
 		connection:Disconnect()
@@ -958,11 +966,6 @@ function AbilityController:OnStart()
 	self._effectRemote = getRemote(EFFECT_REMOTE_NAME)
 	self:_bindEffects()
 	self:_bindInputs()
-
-	ReplicaController.ReplicaOfClassCreated(AbilityConfig.Scope, function(replica)
-		self:_bindReplica(replica)
-	end)
-	ReplicaController.RequestData()
 
 	table.insert(self._hudConnections, PlayerGui.ChildAdded:Connect(function(child)
 		if child.Name == "HUD" or child.Name == "ScreenGui" then

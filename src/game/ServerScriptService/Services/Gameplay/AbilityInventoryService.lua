@@ -329,6 +329,35 @@ function AbilityInventoryService:OnStart()
 	requestRemote.OnServerEvent:Connect(handleRequest)
 end
 
+function AbilityInventoryService:GrantAbility(player: Player, rawAbilityId: any, source: string?): (boolean, any)
+	if not (player and player.Parent == Players) then
+		return false, "Target player is not in this server"
+	end
+
+	local abilityId = if isPlainString(rawAbilityId, AbilityConfig.MaxAbilityIdLength)
+		then AbilityConfig.NormalizeAbilityId(rawAbilityId)
+		else ""
+	local definition = if abilityId ~= "" then AbilityConfig.GetDefinition(abilityId) else nil
+	if not (definition and AbilityConfig.IsCatalogAbility(abilityId)) then
+		return false, "Unknown ability: " .. tostring(rawAbilityId)
+	end
+
+	local ownedBefore = getOwnedAbilities(player)
+	local wasOwned = ownedBefore[abilityId] == true
+	DataService:Set(player, OWNED_KEY, function(currentValue)
+		local ownedAbilities = normalizeOwnedAbilities(currentValue)
+		ownedAbilities[abilityId] = true
+		return ownedAbilities
+	end)
+
+	return true, {
+		abilityId = abilityId,
+		definition = definition,
+		source = source,
+		isNew = not wasOwned,
+	}
+end
+
 function AbilityInventoryService:OnPlayerAdded(player: Player)
 	local data = DataService:Get(player)
 	if typeof(data) ~= "table" then

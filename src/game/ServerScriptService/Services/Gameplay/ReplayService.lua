@@ -117,6 +117,68 @@ local copyReplayEvent = ReplayUtil.CopyReplayEvent
 local getReplayIdKey = ReplayUtil.GetReplayIdKey
 local getUserIdKey = ReplayUtil.GetUserIdKey
 
+local function getRoundId(value: any): number?
+	if not isFiniteNumber(value) then
+		return nil
+	end
+	return math.floor(value)
+end
+
+local function getCurrentMapContextForRound(roundId: number?)
+	if typeof(currentMapContext) ~= "table" then
+		return nil
+	end
+	local currentRound = getRoundId(currentMapContext.roundId)
+	if roundId and currentRound and roundId ~= currentRound then
+		return nil
+	end
+	return currentMapContext
+end
+
+local function applyCurrentMapContextToEvent(event)
+	if typeof(event) ~= "table" then
+		return
+	end
+	if event.roundId == nil then
+		event.roundId = currentRoundId
+	end
+
+	local eventRoundId = getRoundId(event.roundId)
+	local mapContext = getCurrentMapContextForRound(eventRoundId)
+	if not mapContext then
+		return
+	end
+	if typeof(event.mapId) ~= "string" or event.mapId == "" then
+		event.mapId = mapContext.mapId
+	end
+	if not isFiniteCFrame(event.mapPivot) and event.mapId == mapContext.mapId then
+		event.mapPivot = mapContext.mapPivot
+	end
+end
+
+local function resolvePayloadMapContext(payload)
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+
+	local payloadRoundId = getRoundId(payload.roundId)
+	local payloadMapId = if typeof(payload.mapId) == "string" and payload.mapId ~= "" then payload.mapId else nil
+	local payloadMapPivot = if isFiniteCFrame(payload.mapPivot) then payload.mapPivot else nil
+	local currentContext = getCurrentMapContextForRound(payloadRoundId)
+	if payloadMapId then
+		local mapPivot = payloadMapPivot
+		if not mapPivot and currentContext and currentContext.mapId == payloadMapId then
+			mapPivot = currentContext.mapPivot
+		end
+		return {
+			mapId = payloadMapId,
+			mapPivot = mapPivot,
+			roundId = payloadRoundId,
+		}
+	end
+	return currentContext
+end
+
 local function pruneRecentKillReplayEvents(currentTime: number)
 	for userId, record in pairs(recentKillReplayEventsByVictimUserId) do
 		if typeof(record) ~= "table" or not isFiniteNumber(record.expiresAt) or record.expiresAt <= currentTime then
@@ -965,6 +1027,8 @@ debugKillReplaySend = function(status: string, payload)
 			else nil,
 		killerUserId = if typeof(payload) == "table" then payload.killerUserId else nil,
 		victimUserId = if typeof(payload) == "table" then payload.victimUserId else nil,
+		roundId = if typeof(payload) == "table" then payload.roundId else nil,
+		mapId = if typeof(payload) == "table" then payload.mapId else nil,
 		optimization = lastClipOptimizationDebug,
 	}
 	lastKillReplayDebug = summary
@@ -978,8 +1042,10 @@ debugKillReplaySend = function(status: string, payload)
 	end
 
 	warn(
-		("[ReplayService] KillReplay %s start=%.3f kill=%s end=%.3f frames=%d events=%d killer=%s victim=%s"):format(
+		("[ReplayService] KillReplay %s round=%s map=%s start=%.3f kill=%s end=%.3f frames=%d events=%d killer=%s victim=%s"):format(
 			status,
+			tostring(summary.roundId),
+			tostring(summary.mapId),
 			summary.startTime,
 			if summary.primaryEventTime then ("%.3f"):format(summary.primaryEventTime) else "nil",
 			summary.endTime,
@@ -1005,6 +1071,8 @@ local function debugPOTGReplaySend(status: string, payload, extra)
 		playerUserId = if typeof(payload) == "table" then payload.playerUserId else nil,
 		score = if typeof(payload) == "table" then payload.score else nil,
 		reason = if typeof(payload) == "table" then payload.reason else nil,
+		roundId = if typeof(payload) == "table" then payload.roundId else nil,
+		mapId = if typeof(payload) == "table" then payload.mapId else nil,
 		sentPlayers = if typeof(extra) == "table" then extra.sentPlayers else nil,
 		skippedPlayers = if typeof(extra) == "table" then extra.skippedPlayers else nil,
 		optimization = lastClipOptimizationDebug,
@@ -1016,8 +1084,10 @@ local function debugPOTGReplaySend(status: string, payload, extra)
 	end
 
 	warn(
-		("[ReplayService] POTG %s start=%.3f end=%.3f frames=%d events=%d player=%s score=%s sent=%s skipped=%s reason=%s"):format(
+		("[ReplayService] POTG %s round=%s map=%s start=%.3f end=%.3f frames=%d events=%d player=%s score=%s sent=%s skipped=%s reason=%s"):format(
 			status,
+			tostring(summary.roundId),
+			tostring(summary.mapId),
 			summary.startTime,
 			summary.endTime,
 			estimate.frames,
@@ -1318,9 +1388,19 @@ local function addMapFieldsToPayload(payload, endTime: number)
 		return payload
 	end
 
-	if typeof(currentMapContext) == "table" then
-		payload.mapId = currentMapContext.mapId
-		payload.mapPivot = currentMapContext.mapPivot
+	local mapContext = resolvePayloadMapContext(payload)
+	if typeof(mapContext) == "table" then
+		payload.mapId = mapContext.mapId
+		if isFiniteCFrame(mapContext.mapPivot) then
+			payload.mapPivot = mapContext.mapPivot
+		end
+	end
+	if payload.roundId == nil then
+		if typeof(mapContext) == "table" and mapContext.roundId ~= nil then
+			payload.roundId = mapContext.roundId
+		else
+			payload.roundId = currentRoundId
+		end
 	end
 	local debrisStartTime = if isFiniteNumber(payload.startTime) then payload.startTime else nil
 	payload.destructionEvents = getDestructionEventsForClip(endTime, debrisStartTime)
@@ -1354,6 +1434,9 @@ local function buildKillReplayPayload(killEvent)
 		killerDisplayName = killEvent.killerDisplayName,
 		killerTeam = killEvent.killerTeam,
 		killerIsNPC = killEvent.killerIsNPC,
+		roundId = killEvent.roundId,
+		mapId = killEvent.mapId,
+		mapPivot = killEvent.mapPivot,
 		victimUserId = killEvent.victimUserId,
 		victimName = killEvent.victimName,
 		victimDisplayName = killEvent.victimDisplayName,
@@ -1533,6 +1616,9 @@ local function buildPOTGReplayPayload(candidate)
 		playerDisplayName = candidate.playerDisplayName,
 		playerTeam = candidate.playerTeam,
 		playerIsNPC = candidate.playerIsNPC,
+		roundId = candidate.roundId,
+		mapId = candidate.mapId,
+		mapPivot = candidate.mapPivot,
 		sourceType = candidate.sourceType,
 		sourceId = candidate.sourceId,
 		reason = candidate.reason,
@@ -1893,6 +1979,7 @@ function ReplayService.RecordEvent(first, second, third)
 			end
 		end
 	end
+	applyCurrentMapContextToEvent(event)
 
 	local buffer = ensureBuffer()
 	local addEventToken = RuntimeProfiler.Begin("Server/Replay/RecordEvent/AddEvent")
@@ -1973,7 +2060,12 @@ function ReplayService.SetRoundMap(first, second, third)
 	currentMapContext = {
 		mapId = mapId,
 		mapPivot = mapPivot,
+		roundId = currentRoundId,
 	}
+	RuntimeProfiler.Count("Server/Replay/SetRoundMap")
+	if DEBUG_KILL_REPLAY_SEND then
+		warn(("[ReplayService] SetRoundMap round=%s map=%s"):format(tostring(currentRoundId), mapId))
+	end
 	return true
 end
 

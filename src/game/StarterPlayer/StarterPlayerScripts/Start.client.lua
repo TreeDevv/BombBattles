@@ -1,7 +1,9 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local StarterGui = game:GetService("StarterGui")
 
 local Loader = require(ReplicatedStorage.Loader)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
+local ReplicaController = require(ReplicatedStorage.Packages.ReplicaController)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local StarterPlayerScripts = script.Parent
@@ -96,10 +98,31 @@ local function bindPlayClientSoundRemote()
 	end)
 end
 
+local function requestReplicaDataAfterControllersStart()
+	task.defer(function()
+		task.wait()
+		ReplicaController.RequestData()
+	end)
+end
+
+local function disableCharacterReset()
+	for _ = 1, 5 do
+		local success = pcall(function()
+			StarterGui:SetCore("ResetButtonCallback", false)
+		end)
+		if success then
+			return
+		end
+		task.wait(0.25)
+	end
+end
+
 local loadedModules = Loader.LoadDescendants(ControllersFolder, shouldLoadController)
 
 markLoadedControllerInstances()
+task.spawn(disableCharacterReset)
 Loader.SpawnAll(loadedModules, "OnStart")
+requestReplicaDataAfterControllersStart()
 bindControllerHotLoad(loadedModules)
 task.spawn(bindNotifyRemote)
 task.spawn(bindPlayClientSoundRemote)

@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
+local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 
@@ -14,14 +15,53 @@ local DEFAULT_FINISHER_ID = FinisherConfig.DefaultFinisherId
 local EQUIPPED_ATTR = FinisherConfig.AttributeName
 local REMOTES_FOLDER_NAME = FinisherConfig.RemotesFolderName
 local PLAYED_REMOTE_NAME = FinisherConfig.PlayedRemoteName
+local REQUEST_REMOTE_NAME = FinisherConfig.InventoryRequestRemoteName
+local ACTIONS = FinisherConfig.InventoryActions
+
+local MAX_REQUESTS_PER_SECOND = 12
+
+type RequestWindow = {
+	startedAt: number,
+	count: number,
+}
 
 local FinisherService = {}
 
 local playedRemote: RemoteEvent? = nil
+local requestRemote: RemoteEvent? = nil
+local requestWindows: { [Player]: RequestWindow } = {}
 
 local function ensurePlayedRemote(): RemoteEvent
 	playedRemote = RemoteUtil.EnsureRemoteEventInFolder(ReplicatedStorage, REMOTES_FOLDER_NAME, PLAYED_REMOTE_NAME, true)
 	return playedRemote :: RemoteEvent
+end
+
+local function ensureRemotesFolder(): Folder
+	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
+end
+
+local function ensureRequestRemote(): RemoteEvent
+	requestRemote = RemoteUtil.EnsureRemoteEvent(ensureRemotesFolder(), REQUEST_REMOTE_NAME)
+	return requestRemote :: RemoteEvent
+end
+
+local function isPlainString(value: any, maxLength: number): boolean
+	return typeof(value) == "string" and value ~= "" and #value <= maxLength
+end
+
+local function isRateLimited(player: Player): boolean
+	local currentTime = os.clock()
+	local window = requestWindows[player]
+	if not window or currentTime - window.startedAt >= 1 then
+		requestWindows[player] = {
+			startedAt = currentTime,
+			count = 1,
+		}
+		return false
+	end
+
+	window.count += 1
+	return window.count > MAX_REQUESTS_PER_SECOND
 end
 
 local function normalizeOwnedFinishers(value): ({ [string]: boolean }, boolean)
@@ -147,6 +187,87 @@ local function sanitizePlayerData(player: Player): string
 	return equippedFinisher
 end
 
+local function respond(player: Player, request, ok: boolean, code: string, message: string?)
+	local remote = requestRemote
+	if not remote then
+		return
+	end
+
+	local action = nil
+	local finisherId = nil
+	if typeof(request) == "table" then
+		action = request.action
+		finisherId = request.finisherId
+	end
+
+	remote:FireClient(player, {
+		action = action,
+		finisherId = finisherId,
+		ok = ok,
+		code = code,
+		message = message,
+	})
+end
+
+local function fail(player: Player, request, code: string, message: string?)
+	respond(player, request, false, code, message)
+	if message and message ~= "" then
+		Notify.Send(player, message, { color = "Red" })
+	end
+end
+
+local function resolveRequest(request)
+	if typeof(request) ~= "table" then
+		return nil
+	end
+
+	local action = request.action
+	if not isPlainString(action, FinisherConfig.MaxInventoryActionLength) then
+		return nil
+	end
+	if action ~= ACTIONS.Equip then
+		return nil
+	end
+
+	local finisherId = request.finisherId
+	if isPlainString(finisherId, FinisherConfig.MaxFinisherIdLength) then
+		finisherId = FinisherConfig.NormalizeFinisherId(finisherId)
+	else
+		finisherId = ""
+	end
+
+	local definition = if finisherId ~= "" then FinisherConfig.GetDefinition(finisherId) else nil
+	if not (definition and FinisherConfig.IsKnownFinisherId(finisherId)) then
+		return nil
+	end
+
+	return {
+		action = action,
+		finisherId = finisherId,
+		definition = definition,
+	}
+end
+
+local function handleRequest(player: Player, rawRequest)
+	if isRateLimited(player) then
+		return
+	end
+
+	local request = resolveRequest(rawRequest)
+	if not request then
+		fail(player, rawRequest, "InvalidRequest", "Invalid finisher request.")
+		return
+	end
+
+	local ok, message = FinisherService:EquipFinisher(player, request.finisherId)
+	if not ok then
+		fail(player, request, "EquipFailed", message or "Finisher equip failed.")
+		return
+	end
+
+	respond(player, request, true, "Equipped")
+end
+
 function FinisherService:GetEquippedFinisherId(player: Player): string
 	if not (player and player.Parent == Players) then
 		return DEFAULT_FINISHER_ID
@@ -262,6 +383,8 @@ end
 
 function FinisherService:OnStart()
 	ensurePlayedRemote()
+	requestRemote = ensureRequestRemote()
+	requestRemote.OnServerEvent:Connect(handleRequest)
 end
 
 function FinisherService:OnPlayerAdded(player: Player)
@@ -269,6 +392,7 @@ function FinisherService:OnPlayerAdded(player: Player)
 end
 
 function FinisherService:OnPlayerRemoving(player: Player)
+	requestWindows[player] = nil
 	player:SetAttribute(EQUIPPED_ATTR, nil)
 end
 

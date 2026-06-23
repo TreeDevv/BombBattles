@@ -79,6 +79,15 @@ local crates = {
 		description = "A starter crate with common and rare finishers.",
 		rewardType = CrateRollConfig.RewardTypes.Finisher,
 		cashPrice = 500,
+		showcaseFinisherIds = {
+			"Explosion",
+			"Confetti",
+			"Atomic",
+			"Evaporation",
+			"Flashbang",
+			"Frostburst",
+			"Light",
+		},
 		rarityWeights = {
 			Common = 70,
 			Rare = 30,
@@ -90,6 +99,15 @@ local crates = {
 		description = "A premium crate with better finisher odds.",
 		rewardType = CrateRollConfig.RewardTypes.Finisher,
 		productKey = "PremiumFinisherCrateRoll",
+		showcaseFinisherIds = {
+			"Lightning",
+			"Savage",
+			"SoulReaper",
+			"Essence",
+			"Flashbang",
+			"Frostburst",
+			"Light",
+		},
 		rarityWeights = {
 			Rare = 65,
 			Epic = 25,
@@ -120,6 +138,7 @@ for index, entry in ipairs(crates) do
 		cashPrice = entry.cashPrice,
 		productKey = entry.productKey,
 		rarityWeights = table.freeze(table.clone(entry.rarityWeights or {})),
+		showcaseFinisherIds = table.freeze(table.clone(entry.showcaseFinisherIds or {})),
 		catalogOrder = index,
 	})
 	definitions[entry.id] = definition
@@ -172,6 +191,7 @@ function CrateRollConfig.GetCratesPayload()
 			cashPrice = definition.cashPrice,
 			productKey = definition.productKey,
 			rarityWeights = table.clone(definition.rarityWeights),
+			showcaseFinisherIds = table.clone(definition.showcaseFinisherIds),
 		})
 	end
 	return payload

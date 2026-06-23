@@ -236,7 +236,11 @@ local function getRuntime(player: Player): PlayerRuntime
 	return runtime
 end
 
-local function createReplica(player: Player, loadout: any?): any
+local function createReplica(player: Player, loadout: any?): any?
+	if player.Parent ~= Players then
+		return nil
+	end
+
 	local runtime = getRuntime(player)
 	if runtime.replica and runtime.replica:IsActive() then
 		return runtime.replica
@@ -819,6 +823,9 @@ function AbilityService:SetEquippedAbility(player: Player, slot: string, ability
 	end
 
 	local replica = createReplica(player)
+	if not replica then
+		return false
+	end
 	replica:SetValue({ "slots", slot }, AbilityConfig.BuildSlotState(slot, resolvedAbilityId))
 	publishPlayerDebugState(player)
 	return true
@@ -826,6 +833,9 @@ end
 
 function AbilityService:SetLoadout(player: Player, loadout: AbilityLoadout): boolean
 	local replica = createReplica(player, loadout)
+	if not replica then
+		return false
+	end
 
 	for _, slot in ipairs(AbilityConfig.SlotOrder) do
 		local abilityId = AbilityConfig.GetSlotAbility(loadout, slot)

@@ -1,11 +1,15 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
+local POTGCutsceneController = require(script.Parent:WaitForChild("POTGCutsceneController"))
+local ReplayClient = require(script.Parent:WaitForChild("Replay"):WaitForChild("ReplayClient"))
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -157,6 +161,15 @@ local function getResultPlayers(results): { PlayerResult }
 	end
 
 	return players
+end
+
+local function isPOTGReplayActive(): boolean
+	if type(ReplayClient.GetActiveReplayDebugInfo) ~= "function" then
+		return false
+	end
+
+	local debugInfo = ReplayClient:GetActiveReplayDebugInfo()
+	return typeof(debugInfo) == "table" and debugInfo.replayType == "POTGReplay"
 end
 
 local function sortPlayerResults(players: { PlayerResult })
@@ -514,10 +527,31 @@ function ResultsScreenController:_openForResults(results)
 	if self._dismissedRoundId == results.roundId or self._shownRoundId == results.roundId then
 		return
 	end
+	if
+		type(POTGCutsceneController.QueueAfterRoundIntro) == "function"
+		and POTGCutsceneController:QueueAfterRoundIntro(function()
+			self:_openForResults(results)
+		end)
+	then
+		return
+	end
+	if isPOTGReplayActive() and ReplayClient.ReplayEnded and type(ReplayClient.ReplayEnded.Once) == "function" then
+		ReplayClient.ReplayEnded:Once(function(payload)
+			if typeof(payload) == "table" and payload.type == "POTGReplay" then
+				self:_openForResults(results)
+			end
+		end)
+		return
+	end
 
 	self._shownRoundId = results.roundId
+	ScreenEffects.HoldBlack()
 	self:_render(results)
 	FrameController:OpenFrame(RESULTS_FRAME_NAME)
+	task.defer(function()
+		RunService.RenderStepped:Wait()
+		ScreenEffects.FadeFromBlack(0.35)
+	end)
 end
 
 function ResultsScreenController:_syncFromState()
@@ -529,9 +563,12 @@ function ResultsScreenController:_syncFromState()
 	local results = state.roundResults
 	if state.state == RoundStates.RoundEnding then
 		self:_openForResults(results)
+	elseif state.state == RoundStates.Resetting then
+		FrameController:CloseFrame(RESULTS_FRAME_NAME, true)
 	elseif state.state == RoundStates.Intermission or state.state == RoundStates.Active then
 		self._dismissedRoundId = nil
 		self._shownRoundId = nil
+		FrameController:CloseFrame(RESULTS_FRAME_NAME, true)
 	end
 end
 

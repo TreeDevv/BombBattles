@@ -20,6 +20,7 @@ EmoteConfig.MaxEmoteIdLength = 64
 EmoteConfig.DefaultRarity = "Rare"
 EmoteConfig.DefaultWalkSpeed = 10
 EmoteConfig.DefaultAutoRotate = true
+EmoteConfig.DefaultPreviewPauseTimeSeconds = 0
 EmoteConfig.CancelMoveSpeed = 0.75
 EmoteConfig.MovementCancelGraceSeconds = 0.25
 EmoteConfig.DefaultAnimationName = "Animation1"
@@ -43,6 +44,10 @@ local function makeDefinition(behavior: any, asset: Instance?, fallbackOrder: nu
 	end
 
 	local catalogOrder = if typeof(behavior.catalogOrder) == "number" then behavior.catalogOrder else fallbackOrder
+	local previewPauseTimeSeconds = if typeof(behavior.previewPauseTimeSeconds) == "number"
+		then math.max(behavior.previewPauseTimeSeconds, 0)
+		else EmoteConfig.DefaultPreviewPauseTimeSeconds
+
 	return table.freeze({
 		id = behavior.id,
 		displayName = if typeof(behavior.displayName) == "string" then behavior.displayName else behavior.id,
@@ -53,6 +58,7 @@ local function makeDefinition(behavior: any, asset: Instance?, fallbackOrder: nu
 		catalogOrder = catalogOrder,
 		walkSpeed = if typeof(behavior.walkSpeed) == "number" then behavior.walkSpeed else EmoteConfig.DefaultWalkSpeed,
 		autoRotate = if typeof(behavior.autoRotate) == "boolean" then behavior.autoRotate else EmoteConfig.DefaultAutoRotate,
+		previewPauseTimeSeconds = previewPauseTimeSeconds,
 		behavior = behavior,
 	})
 end

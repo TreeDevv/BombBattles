@@ -99,11 +99,43 @@ local function sanitizeMapIdForName(mapId: any): string
 	return string.gsub(raw, "[^%w_%-]", "_")
 end
 
+local function getPayloadMapId(payload: any): string?
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+	return if typeof(payload.mapId) == "string" and payload.mapId ~= "" then payload.mapId else nil
+end
+
+local function getPayloadRoundId(payload: any): number?
+	if typeof(payload) ~= "table" or not isFiniteNumber(payload.roundId) then
+		return nil
+	end
+	return math.floor(payload.roundId)
+end
+
+local function setReplayIdentityAttributes(instance: Instance?, mapId: string?, roundId: number?)
+	if not instance then
+		return
+	end
+	instance:SetAttribute("ReplayMapId", mapId)
+	instance:SetAttribute("ReplayRoundId", roundId)
+end
+
+local function warnPreparedSceneMismatch(reason: string, expectedMapId: string, actualMapId: any)
+	warn(
+		("[ReplayMapSimulator] Ignoring prepared replay scene: %s expectedMap=%s actualMap=%s"):format(
+			reason,
+			expectedMapId,
+			tostring(actualMapId)
+		)
+	)
+end
+
 local function createPreparedScene(mapId: string): Folder
 	local scene = Instance.new("Folder")
 	scene.Name = ("%s_%s_%s"):format(PREPARED_SCENE_NAME_PREFIX, sanitizeMapIdForName(mapId), getLocalSceneSuffix())
 	scene:SetAttribute(LOCAL_REPLAY_ATTR, true)
-	scene:SetAttribute("ReplayMapId", mapId)
+	setReplayIdentityAttributes(scene, mapId, nil)
 	scene.Parent = Workspace
 	return scene
 end
@@ -243,6 +275,7 @@ function ReplayMapSimulator.PrewarmTemplate(mapId: any): boolean
 	local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmTemplate")
 	local clone = template:Clone()
 	clone.Name = RoundConfig.ActiveMapName
+	setReplayIdentityAttributes(clone, mapId, nil)
 	prepareMapClone(clone)
 	rememberPreparedTemplate(mapId, clone)
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmedTemplates")
@@ -290,6 +323,7 @@ local function clonePreparedMapTemplate(mapId: any): Instance?
 	end
 	local clone = template:Clone()
 	clone.Name = RoundConfig.ActiveMapName
+	setReplayIdentityAttributes(clone, mapId, nil)
 	prepareMapClone(clone)
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/ColdTemplateClones")
 	return clone
@@ -957,12 +991,15 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 		VoxManager:resetTerrainState()
 	end
 
+	local payloadMapId = getPayloadMapId(payload)
+	local payloadRoundId = getPayloadRoundId(payload)
 	local livePivot = if typeof(payload) == "table" and isFiniteCFrame(payload.mapPivot) then payload.mapPivot else CFrame.new()
 	local context = {
 		scene = scene,
 		livePivot = livePivot,
 		replayPivot = REPLAY_ZONE_PIVOT,
-		mapId = if typeof(payload) == "table" then payload.mapId else nil,
+		mapId = payloadMapId,
+		roundId = payloadRoundId,
 		mapRoot = nil,
 		outputFolder = nil,
 		debrisFolder = nil,
@@ -977,14 +1014,22 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 		targetsHit = 0,
 		lastTargetCount = 0,
 	}
+	setReplayIdentityAttributes(scene, payloadMapId, payloadRoundId)
 
 	local mapFolder = Instance.new("Folder")
 	mapFolder.Name = MAP_FOLDER_NAME
+	setReplayIdentityAttributes(mapFolder, payloadMapId, payloadRoundId)
 	mapFolder.Parent = scene
 	context.mapFolder = mapFolder
 
 	local clone = clonePreparedMapTemplate(context.mapId)
 	if not clone then
+		if payloadMapId then
+			warn(("[ReplayMapSimulator] Missing replay map template for payload map %s"):format(payloadMapId))
+		else
+			warn("[ReplayMapSimulator] Replay payload is missing mapId; replay will build without a map")
+		end
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/MissingMapTemplates")
 		return context
 	end
 
@@ -993,6 +1038,7 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 	VoxManager:setTerrainConfig(DestructionConfig)
 
 	clone.Name = RoundConfig.ActiveMapName
+	setReplayIdentityAttributes(clone, payloadMapId, payloadRoundId)
 	pivotInstance(clone, context.replayPivot)
 	clone.Parent = mapFolder
 	context.staticMapRoot = clone
@@ -1038,6 +1084,17 @@ local function rememberPreparedScene(mapId: string, scene: Folder, mapContext, p
 		destroyPreparedSceneEntry(existing)
 	end
 	destroyDuplicatePreparedScenes(mapId, scene)
+	setReplayIdentityAttributes(scene, mapId, nil)
+	if typeof(mapContext) == "table" then
+		mapContext.mapId = mapId
+		mapContext.roundId = nil
+		if mapContext.mapFolder then
+			setReplayIdentityAttributes(mapContext.mapFolder, mapId, nil)
+		end
+		if mapContext.staticMapRoot then
+			setReplayIdentityAttributes(mapContext.staticMapRoot, mapId, nil)
+		end
+	end
 	if not preparedSceneCache[mapId] then
 		table.insert(preparedSceneOrder, mapId)
 	end
@@ -1059,6 +1116,43 @@ local function rememberPreparedScene(mapId: string, scene: Folder, mapContext, p
 		preparedSceneCache[oldMapId] = nil
 		destroyPreparedSceneEntry(oldEntry)
 	end
+end
+
+local function isPreparedSceneEntryUsable(entry, expectedMapId: string): boolean
+	if typeof(entry) ~= "table" then
+		return false
+	end
+	if entry.mapId ~= expectedMapId then
+		warnPreparedSceneMismatch("entry-map", expectedMapId, entry.mapId)
+		return false
+	end
+	if not (entry.scene and entry.scene.Parent and entry.mapContext) then
+		return false
+	end
+
+	local sceneMapId = entry.scene:GetAttribute("ReplayMapId")
+	if sceneMapId ~= nil and sceneMapId ~= expectedMapId then
+		warnPreparedSceneMismatch("scene-attribute", expectedMapId, sceneMapId)
+		return false
+	end
+	if typeof(entry.mapContext) ~= "table" or entry.mapContext.mapId ~= expectedMapId then
+		warnPreparedSceneMismatch(
+			"context-map",
+			expectedMapId,
+			if typeof(entry.mapContext) == "table" then entry.mapContext.mapId else nil
+		)
+		return false
+	end
+
+	local staticMapRoot = entry.mapContext.staticMapRoot
+	if staticMapRoot and staticMapRoot:GetAttribute("ReplayMapId") ~= nil then
+		local rootMapId = staticMapRoot:GetAttribute("ReplayMapId")
+		if rootMapId ~= expectedMapId then
+			warnPreparedSceneMismatch("map-root-attribute", expectedMapId, rootMapId)
+			return false
+		end
+	end
+	return true
 end
 
 function ReplayMapSimulator.PrewarmReusableScene(mapId: any, options): boolean
@@ -1147,16 +1241,20 @@ function ReplayMapSimulator.PrewarmReusableScenes(limit: number?): number
 end
 
 function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
-	local mapId = if typeof(payload) == "table" then payload.mapId else nil
-	if typeof(mapId) ~= "string" or mapId == "" then
+	local mapId = getPayloadMapId(payload)
+	local roundId = getPayloadRoundId(payload)
+	if not mapId then
 		RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneMisses")
+		warn("[ReplayMapSimulator] Cannot use prepared replay scene without payload mapId")
 		return nil, nil
 	end
 
 	local entry = preparedSceneCache[mapId]
-	if not (entry and entry.scene and entry.scene.Parent and entry.mapContext) then
+	if not isPreparedSceneEntryUsable(entry, mapId) then
 		preparedSceneCache[mapId] = nil
+		destroyPreparedSceneEntry(entry)
 		RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneMisses")
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneRejected")
 		return nil, nil
 	end
 
@@ -1175,10 +1273,19 @@ function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
 
 	entry.scene.Name = SCENE_NAME
 	entry.scene:SetAttribute(LOCAL_REPLAY_ATTR, true)
+	setReplayIdentityAttributes(entry.scene, mapId, roundId)
 	entry.mapContext.livePivot = if typeof(payload) == "table" and isFiniteCFrame(payload.mapPivot)
 		then payload.mapPivot
 		else CFrame.new()
 	entry.mapContext.scene = entry.scene
+	entry.mapContext.mapId = mapId
+	entry.mapContext.roundId = roundId
+	if entry.mapContext.mapFolder then
+		setReplayIdentityAttributes(entry.mapContext.mapFolder, mapId, roundId)
+	end
+	if entry.mapContext.staticMapRoot then
+		setReplayIdentityAttributes(entry.mapContext.staticMapRoot, mapId, roundId)
+	end
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedSceneHits")
 	return entry.scene, entry.mapContext
 end

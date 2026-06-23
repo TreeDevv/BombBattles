@@ -48,6 +48,8 @@ type RenderState = {
 type PreviewState = {
 	track: AnimationTrack?,
 	animation: Animation?,
+	pausedTimeSeconds: number,
+	playing: boolean,
 }
 
 type ListTileRecord = {
@@ -348,21 +350,35 @@ local function ensureViewportCamera(viewport: ViewportFrame, rig: Model?)
 	camera.CFrame = CFrame.new(center + Vector3.new(0, 0.8, 7.5), center)
 end
 
+local function getPreviewPauseTimeSeconds(emoteId: string): number
+	local definition = EmoteConfig.GetDefinition(emoteId)
+	local pauseTime = definition and definition.previewPauseTimeSeconds
+	return if typeof(pauseTime) == "number" then math.max(pauseTime, 0) else 0
+end
+
+local function setTrackTimePosition(track: AnimationTrack, timePosition: number)
+	pcall(function()
+		track.TimePosition = timePosition
+	end)
+end
+
 local function setPreviewPlaying(state: PreviewState?, playing: boolean)
-	local track = state and state.track
-	if not track then
+	if not (state and state.track) then
 		return
 	end
+	local track = state.track
 
 	if not track.IsPlaying then
 		track:Play(0, 1, if playing then 1 else 0)
 	end
+	if playing and not state.playing then
+		setTrackTimePosition(track, 0)
+	end
 	track:AdjustSpeed(if playing then 1 else 0)
 	if not playing then
-		pcall(function()
-			track.TimePosition = 0
-		end)
+		setTrackTimePosition(track, state.pausedTimeSeconds)
 	end
+	state.playing = playing
 end
 
 local function loadPreview(viewport: ViewportFrame?, emoteId: string, playing: boolean): PreviewState?
@@ -400,23 +416,24 @@ local function loadPreview(viewport: ViewportFrame?, emoteId: string, playing: b
 	end
 
 	local track = result :: AnimationTrack
+	local pausedTimeSeconds = getPreviewPauseTimeSeconds(emoteId)
 	track.Priority = Enum.AnimationPriority.Action
 	track.Looped = true
 	track:Play(0, 1, if playing then 1 else 0)
 	if not playing then
 		track:AdjustSpeed(0)
 		task.defer(function()
-			pcall(function()
-				if track.IsPlaying then
-					track.TimePosition = 0
-				end
-			end)
+			if track.IsPlaying then
+				setTrackTimePosition(track, pausedTimeSeconds)
+			end
 		end)
 	end
 
 	return {
 		track = track,
 		animation = animation,
+		pausedTimeSeconds = pausedTimeSeconds,
+		playing = playing,
 	}
 end
 

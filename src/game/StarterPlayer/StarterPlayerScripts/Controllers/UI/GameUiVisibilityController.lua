@@ -32,15 +32,30 @@ type UiRecord = {
 	restoring: boolean,
 }
 
+type HiddenScope = {
+	exclusions: { Instance },
+	includeTopbar: boolean,
+	includeScreenEffects: boolean,
+	hideByVisibility: boolean,
+	includeFrameBackdrop: boolean,
+}
+
 local GameUiVisibilityController = {}
 
 GameUiVisibilityController._hidden = false
+GameUiVisibilityController._manualHidden = false
+GameUiVisibilityController._hiddenScopes = {} :: { [string]: HiddenScope }
 GameUiVisibilityController._started = false
 GameUiVisibilityController._connections = {} :: { RBXScriptConnection }
 GameUiVisibilityController._objectConnections = {} :: { [Instance]: { RBXScriptConnection } }
 GameUiVisibilityController._records = {} :: { [GuiObject]: UiRecord }
 GameUiVisibilityController._enforceQueued = false
 GameUiVisibilityController._restoring = false
+GameUiVisibilityController._activeExclusions = {} :: { Instance }
+GameUiVisibilityController._includeTopbar = false
+GameUiVisibilityController._includeScreenEffects = false
+GameUiVisibilityController._hideByVisibility = false
+GameUiVisibilityController._includeFrameBackdrop = false
 
 local function addPositionOffset(position: UDim2, xOffset: number, yOffset: number): UDim2
 	return UDim2.new(
@@ -140,7 +155,17 @@ function GameUiVisibilityController:_cancelTween(record: UiRecord)
 end
 
 function GameUiVisibilityController:_isExcludedScreenGui(screenGui: ScreenGui): boolean
-	return EXCLUDED_SCREEN_GUIS[screenGui.Name] == true or startsWith(screenGui.Name, TOPBAR_PREFIX)
+	return (EXCLUDED_SCREEN_GUIS[screenGui.Name] == true and not (self._includeScreenEffects and screenGui.Name == "ScreenEffects"))
+		or (not self._includeTopbar and startsWith(screenGui.Name, TOPBAR_PREFIX))
+end
+
+function GameUiVisibilityController:_isExcludedGuiObject(guiObject: GuiObject): boolean
+	for _, excludedRoot in ipairs(self._activeExclusions) do
+		if guiObject == excludedRoot or guiObject:IsDescendantOf(excludedRoot) then
+			return true
+		end
+	end
+	return false
 end
 
 function GameUiVisibilityController:_isTouchControlException(guiObject: GuiObject): boolean
@@ -152,7 +177,10 @@ function GameUiVisibilityController:_isTouchControlException(guiObject: GuiObjec
 end
 
 function GameUiVisibilityController:_isHideCandidate(guiObject: GuiObject): boolean
-	if guiObject.Name == FRAME_BACKDROP_NAME then
+	if guiObject.Name == FRAME_BACKDROP_NAME and not self._includeFrameBackdrop then
+		return false
+	end
+	if self:_isExcludedGuiObject(guiObject) then
 		return false
 	end
 	if self:_isTouchControlException(guiObject) then
@@ -228,6 +256,56 @@ function GameUiVisibilityController:_bindPlayerGui()
 	end
 end
 
+function GameUiVisibilityController:_restoreRecord(guiObject: GuiObject, record: UiRecord, instant: boolean?)
+	self:_cancelTween(record)
+	record.restoring = true
+
+	if not guiObject.Parent then
+		record.restoring = false
+		self._records[guiObject] = nil
+		return
+	end
+
+	if record.visible then
+		guiObject.Visible = true
+	end
+
+	if instant then
+		guiObject.Position = record.position
+		guiObject.Visible = record.visible
+		record.restoring = false
+		self._records[guiObject] = nil
+		return
+	end
+
+	local tween = TweenService:Create(guiObject, SHOW_TWEEN, {
+		Position = record.position,
+	})
+	record.tween = tween
+	tween:Play()
+	tween.Completed:Once(function(playbackState)
+		if playbackState ~= Enum.PlaybackState.Completed or record.tween ~= tween then
+			return
+		end
+
+		guiObject.Position = record.position
+		guiObject.Visible = record.visible
+		record.tween = nil
+		record.restoring = false
+		if not self._hidden or not self:_isHideCandidate(guiObject) then
+			self._records[guiObject] = nil
+		end
+	end)
+end
+
+function GameUiVisibilityController:_restoreRecordsNoLongerHidden(instant: boolean?)
+	for guiObject, record in pairs(self._records) do
+		if not self:_isHideCandidate(guiObject) then
+			self:_restoreRecord(guiObject, record, instant)
+		end
+	end
+end
+
 function GameUiVisibilityController:_hideObject(guiObject: GuiObject, instant: boolean?)
 	if not self:_isHideCandidate(guiObject) or not guiObject.Visible then
 		return
@@ -248,10 +326,19 @@ function GameUiVisibilityController:_hideObject(guiObject: GuiObject, instant: b
 	end
 
 	if isSameUDim2(guiObject.Position, record.hiddenPosition) then
+		if self._hideByVisibility then
+			guiObject.Visible = false
+		end
 		return
 	end
 	record.restoring = false
 	self:_cancelTween(record)
+
+	if self._hideByVisibility then
+		guiObject.Position = record.hiddenPosition
+		guiObject.Visible = false
+		return
+	end
 
 	if instant then
 		guiObject.Position = record.hiddenPosition
@@ -274,6 +361,7 @@ end
 
 function GameUiVisibilityController:_enforceHidden(instant: boolean?)
 	self:_bindPlayerGui()
+	self:_restoreRecordsNoLongerHidden(instant)
 
 	for _, child in ipairs(PlayerGui:GetChildren()) do
 		if not child:IsA("ScreenGui") or self:_isExcludedScreenGui(child) then
@@ -306,46 +394,61 @@ function GameUiVisibilityController:_restoreAll(instant: boolean?)
 	self._restoring = true
 
 	for guiObject, record in pairs(self._records) do
-		self:_cancelTween(record)
-		record.restoring = true
-
-		if guiObject.Parent then
-			if record.visible then
-				guiObject.Visible = true
-			end
-
-			if instant then
-				guiObject.Position = record.position
-				guiObject.Visible = record.visible
-				record.restoring = false
-				self._records[guiObject] = nil
-			else
-				local tween = TweenService:Create(guiObject, SHOW_TWEEN, {
-					Position = record.position,
-				})
-				record.tween = tween
-				tween:Play()
-				tween.Completed:Once(function(playbackState)
-					if playbackState ~= Enum.PlaybackState.Completed or record.tween ~= tween then
-						return
-					end
-
-					guiObject.Position = record.position
-					guiObject.Visible = record.visible
-					record.tween = nil
-					record.restoring = false
-					if not self._hidden then
-						self._records[guiObject] = nil
-					end
-				end)
-			end
-		else
-			record.restoring = false
-			self._records[guiObject] = nil
-		end
+		self:_restoreRecord(guiObject, record, instant)
 	end
 
 	self._restoring = false
+end
+
+function GameUiVisibilityController:_syncHiddenOptions()
+	local exclusions = {}
+	local includeTopbar = false
+	local includeScreenEffects = false
+	local hideByVisibility = false
+	local includeFrameBackdrop = false
+
+	for _, scope in pairs(self._hiddenScopes) do
+		for _, excludedRoot in ipairs(scope.exclusions) do
+			if excludedRoot.Parent then
+				table.insert(exclusions, excludedRoot)
+			end
+		end
+		includeTopbar = includeTopbar or scope.includeTopbar == true
+		includeScreenEffects = includeScreenEffects or scope.includeScreenEffects == true
+		hideByVisibility = hideByVisibility or scope.hideByVisibility == true
+		includeFrameBackdrop = includeFrameBackdrop or scope.includeFrameBackdrop == true
+	end
+
+	self._activeExclusions = exclusions
+	self._includeTopbar = includeTopbar
+	self._includeScreenEffects = includeScreenEffects
+	self._hideByVisibility = hideByVisibility
+	self._includeFrameBackdrop = includeFrameBackdrop
+end
+
+function GameUiVisibilityController:_hasHiddenScope(): boolean
+	for _ in pairs(self._hiddenScopes) do
+		return true
+	end
+	return false
+end
+
+function GameUiVisibilityController:_applyHiddenState(instant: boolean?)
+	local nextHidden = self._manualHidden or self:_hasHiddenScope()
+	local changed = self._hidden ~= nextHidden
+
+	self._hidden = nextHidden
+	self:_syncHiddenOptions()
+	self:_bindPlayerGui()
+
+	if self._hidden then
+		if changed then
+			FrameController:CloseCurrentFrame(true)
+		end
+		self:_enforceHidden(instant)
+	elseif changed then
+		self:_restoreAll(instant)
+	end
 end
 
 function GameUiVisibilityController:IsHidden(): boolean
@@ -353,24 +456,44 @@ function GameUiVisibilityController:IsHidden(): boolean
 end
 
 function GameUiVisibilityController:SetHidden(hidden: boolean, instant: boolean?)
-	if self._hidden == hidden then
-		return
-	end
-
-	self._hidden = hidden
-	self:_bindPlayerGui()
-
-	if hidden then
-		FrameController:CloseCurrentFrame(true)
-		self:_enforceHidden(instant)
-	else
-		self:_restoreAll(instant)
-	end
+	self._manualHidden = hidden
+	self:_applyHiddenState(instant)
 end
 
 function GameUiVisibilityController:ToggleHidden()
-	self:SetHidden(not self._hidden)
-	return self._hidden
+	self:SetHidden(not self._manualHidden)
+	return self._manualHidden
+end
+
+function GameUiVisibilityController:PushHiddenScope(scopeId: string, options: { [string]: any }?, instant: boolean?)
+	if typeof(scopeId) ~= "string" or scopeId == "" then
+		return
+	end
+
+	local exclusions = {}
+	for _, excludedRoot in ipairs(options and options.Exclusions or {}) do
+		if typeof(excludedRoot) == "Instance" then
+			table.insert(exclusions, excludedRoot)
+		end
+	end
+
+	self._hiddenScopes[scopeId] = {
+		exclusions = exclusions,
+		includeTopbar = options and options.IncludeTopbar == true or false,
+		includeScreenEffects = options and options.IncludeScreenEffects == true or false,
+		hideByVisibility = options and options.HideByVisibility == true or false,
+		includeFrameBackdrop = options and options.IncludeFrameBackdrop == true or false,
+	}
+	self:_applyHiddenState(instant)
+end
+
+function GameUiVisibilityController:PopHiddenScope(scopeId: string, instant: boolean?)
+	if typeof(scopeId) ~= "string" or scopeId == "" or not self._hiddenScopes[scopeId] then
+		return
+	end
+
+	self._hiddenScopes[scopeId] = nil
+	self:_applyHiddenState(instant)
 end
 
 function GameUiVisibilityController:OnStart()

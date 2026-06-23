@@ -1,6 +1,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Icon = require(ReplicatedStorage.Packages.topbarplus)
+local BundlesController = require(script.Parent:WaitForChild("BundlesController"))
 local DailyRewardController = require(script.Parent:WaitForChild("DailyRewardController"))
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
 local GameUiVisibilityController = require(script.Parent:WaitForChild("GameUiVisibilityController"))
@@ -44,6 +45,15 @@ local TOPBAR_ITEMS = {
 		order = 30,
 		width = 72,
 		frameName = "Stats",
+	},
+	{
+		name = "TopbarBundles",
+		label = "Bundles",
+		order = 35,
+		width = 96,
+		open = function()
+			BundlesController:Open()
+		end,
 	},
 	{
 		name = HIDE_UI_ICON_NAME,

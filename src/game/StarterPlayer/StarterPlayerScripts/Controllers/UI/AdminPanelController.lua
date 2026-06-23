@@ -10,7 +10,7 @@ local CrateRollController = require(script.Parent:WaitForChild("CrateRollControl
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local REMOTES_FOLDER_NAME = "Remotes"
-local TOGGLE_KEY = Enum.KeyCode.F4
+local TOGGLE_KEY = Enum.KeyCode.P
 
 local AdminPanelController = {}
 
@@ -367,19 +367,10 @@ function AdminPanelController:_buildPanel()
 	screenGui.Parent = PlayerGui
 	self._screenGui = screenGui
 
-	local toggle = Instance.new("TextButton")
-	toggle.Name = "Toggle"
-	toggle.AnchorPoint = Vector2.new(1, 0)
-	toggle.Position = UDim2.new(1, -18, 0, 18)
-	toggle.Size = UDim2.fromOffset(86, 30)
-	toggle.Text = "ADMIN"
-	toggle.Parent = screenGui
-	styleTextButton(toggle)
-
 	local panel = Instance.new("Frame")
 	panel.Name = "Panel"
 	panel.AnchorPoint = Vector2.new(1, 0)
-	panel.Position = UDim2.new(1, -18, 0, 56)
+	panel.Position = UDim2.new(1, -18, 0, 18)
 	panel.Size = UDim2.fromOffset(360, 520)
 	panel.BackgroundColor3 = Color3.fromRGB(18, 22, 27)
 	panel.BorderSizePixel = 0
@@ -615,12 +606,6 @@ function AdminPanelController:_buildPanel()
 		})
 	end)
 
-	toggle.Activated:Connect(function()
-		panel.Visible = not panel.Visible
-		if panel.Visible then
-			self:_refresh()
-		end
-	end)
 end
 
 function AdminPanelController:_togglePanel()

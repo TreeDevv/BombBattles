@@ -1,4 +1,3 @@
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
@@ -6,11 +5,7 @@ local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 
-local LocalPlayer = Players.LocalPlayer
-
-local ROUND_TEAM_ATTR = "RoundTeam"
 local DEFAULT_DURATION = 3
-local IMPORTANT_DURATION = 4
 
 type RoundState = {
 	roundId: number?,
@@ -45,27 +40,6 @@ end
 
 local function getEventKey(roundId: number, key: string): string
 	return tostring(roundId) .. ":" .. key
-end
-
-local function getLocalRoundTeam(): string?
-	local teamName = LocalPlayer:GetAttribute(ROUND_TEAM_ATTR)
-	return if typeof(teamName) == "string" and teamName ~= "" then teamName else nil
-end
-
-local function getWinnerMessage(winnerTeam: string): (string, string)
-	if winnerTeam == "Draw" then
-		return "Draw!", "Gold"
-	end
-
-	local localTeam = getLocalRoundTeam()
-	if localTeam == winnerTeam then
-		return "Victory!", "Green"
-	end
-	if localTeam and winnerTeam ~= "" then
-		return "Defeat...", "Red"
-	end
-
-	return winnerTeam .. " wins!", "Gold"
 end
 
 function GameStateNotificationController:_trackConnection(connection: RBXScriptConnection)
@@ -116,14 +90,6 @@ function GameStateNotificationController:_showForState(state: RoundState, isInit
 		self:_showOnce(roundId, "round-starting", "Round starting", "Gold", DEFAULT_DURATION)
 	elseif stateName == RoundStates.Active then
 		self:_showOnce(roundId, "active", "Battle started", "Green", DEFAULT_DURATION)
-	elseif stateName == RoundStates.PlayOfTheGame then
-		self:_showOnce(roundId, "potg", "Play of the Game", "Gold", DEFAULT_DURATION)
-	elseif stateName == RoundStates.RoundEnding then
-		local winnerTeam = state.winnerTeam
-		if typeof(winnerTeam) == "string" and winnerTeam ~= "" then
-			local message, color = getWinnerMessage(winnerTeam)
-			self:_showOnce(roundId, "round-ending", message, color, IMPORTANT_DURATION)
-		end
 	end
 
 	self._lastState = stateName

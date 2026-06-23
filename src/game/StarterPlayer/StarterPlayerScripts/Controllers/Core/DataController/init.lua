@@ -46,7 +46,6 @@ end
 
 function DataController:OnStart()
 	ReplicaController.ReplicaOfClassCreated(SCOPE, bindReplica)
-	ReplicaController.RequestData()
 end
 
 function DataController:Get(key: string?)

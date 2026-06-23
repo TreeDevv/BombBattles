@@ -42,10 +42,13 @@ local function setUpUIStrokes()
 	local baseSize = 800
 	local attribute = "initial"
 	local strokes = {}
+	local playerGui = Players.LocalPlayer.PlayerGui
+	local frames = playerGui:FindFirstChild("Frames")
+	local bundlesFrame = frames and frames:FindFirstChild("Bundles")
 
-	for _, container in { Players.LocalPlayer.PlayerGui, Players.LocalPlayer.PlayerScripts } do
+	for _, container in { playerGui, Players.LocalPlayer.PlayerScripts } do
 		for _, item in container:GetDescendants() do
-			if item:IsA("UIStroke") then
+			if item:IsA("UIStroke") and not (bundlesFrame and item:IsDescendantOf(bundlesFrame)) then
 				item:SetAttribute(attribute, item.Thickness)
 				table.insert(strokes, item)
 			end

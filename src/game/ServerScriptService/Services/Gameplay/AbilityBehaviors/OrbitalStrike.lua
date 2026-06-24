@@ -6,7 +6,6 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
-local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
@@ -35,14 +34,8 @@ local HIT_FLASH_EFFECT = "OrbitalStrikeHitFlash"
 local BEGIN_TARGETING_EFFECT = "OrbitalStrikeBeginTargeting"
 local REJECTED_EFFECT = "OrbitalStrikeRejected"
 local CANCELLED_EFFECT = "OrbitalStrikeCancelled"
-
-local UNSAFE_TAGS = {
-	RoundConfig.Tags.TeamCore,
-	RoundConfig.Tags.TeamSpawn,
-	RoundConfig.Tags.LobbySpawn,
-	"NoStrikeZone",
-	"ProtectedZone",
-}
+local TARGET_RAY_DISTANCE = 10000
+local TARGET_HIT_TOLERANCE = 8
 
 local abilityService: AbilityServiceLike? = nil
 local sessions: { [Player]: TargetSession } = {}
@@ -51,11 +44,6 @@ local nextSessionId = 0
 local function getDefinitionNumber(definition: AbilityDefinition?, key: string, fallback: number): number
 	local value = if definition then definition[key] else nil
 	return if typeof(value) == "number" then value else fallback
-end
-
-local function getDefinitionBoolean(definition: AbilityDefinition?, key: string, fallback: boolean): boolean
-	local value = if definition then definition[key] else nil
-	return if typeof(value) == "boolean" then value else fallback
 end
 
 local function isFiniteVector(value: any): boolean
@@ -129,32 +117,6 @@ local function isEnemyPlayer(owner: Player, target: Player?): boolean
 	return not (ownerTeam and targetTeam and ownerTeam == targetTeam)
 end
 
-local function hasTaggedAncestor(instance: Instance, tags: { string }): boolean
-	local current: Instance? = instance
-	while current and current ~= workspace do
-		for _, tagName in ipairs(tags) do
-			if CollectionService:HasTag(current, tagName) then
-				return true
-			end
-		end
-		current = current.Parent
-	end
-	return false
-end
-
-local function isInsideMapBounds(position: Vector3, map: Model?): boolean
-	if not map then
-		return false
-	end
-
-	local boundsCFrame, boundsSize = map:GetBoundingBox()
-	local localPosition = boundsCFrame:PointToObjectSpace(position)
-	local halfSize = boundsSize * 0.5 + Vector3.new(3, 12, 3)
-	return math.abs(localPosition.X) <= halfSize.X
-		and math.abs(localPosition.Y) <= halfSize.Y
-		and math.abs(localPosition.Z) <= halfSize.Z
-end
-
 local function getMapVerticalBounds(map: Model?, radius: number, fallbackPosition: Vector3): (number, number)
 	if not map then
 		return fallbackPosition.Y + radius * 2, fallbackPosition.Y - radius * 3
@@ -197,79 +159,33 @@ local function getChildFolder(parent: Instance, name: string): Folder
 	return folder
 end
 
-local function makeRaycastParams(player: Player): RaycastParams
+local function makeRaycastParams(): RaycastParams
 	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.IgnoreWater = true
 	params.RespectCanCollide = true
-
-	local excluded = {}
-	if player.Character then
-		table.insert(excluded, player.Character)
-	end
-
-	local targetRoot = getTargetBoundsRoot(player)
-	local objectsFolder = targetRoot and targetRoot:FindFirstChild(OBJECTS_FOLDER_NAME) or workspace:FindFirstChild(OBJECTS_FOLDER_NAME)
-	if objectsFolder then
-		table.insert(excluded, objectsFolder)
-	end
-	local projectileFolder = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
-	if projectileFolder then
-		table.insert(excluded, projectileFolder)
-	end
-	local fireFolder = workspace:FindFirstChild("FireBombZones")
-	if fireFolder then
-		table.insert(excluded, fireFolder)
-	end
-
-	params.FilterDescendantsInstances = excluded
 	return params
 end
 
-local function hasSkyAccess(player: Player, position: Vector3, definition: AbilityDefinition): boolean
-	if not getDefinitionBoolean(definition, "skyAccessRequired", false) then
-		return true
+local function validateTarget(payload: any): (Vector3?, string?)
+	if typeof(payload) ~= "table" then
+		return nil, "InvalidPayload"
+	end
+	local rayOrigin = payload.rayOrigin
+	local rayDirection = payload.rayDirection
+	local clientHitPosition = payload.hitPosition
+	if not isFiniteVector(rayOrigin) or not isFiniteVector(rayDirection) or not isFiniteVector(clientHitPosition) then
+		return nil, "InvalidRay"
+	end
+	if rayDirection.Magnitude < 0.05 then
+		return nil, "InvalidRay"
 	end
 
-	local params = makeRaycastParams(player)
-	local hit = workspace:Raycast(position + Vector3.yAxis * 2, Vector3.yAxis * 600, params)
-	return hit == nil
-end
-
-local function validateTarget(player: Player, definition: AbilityDefinition, proposedPosition: any): (Vector3?, string?)
-	if not isFiniteVector(proposedPosition) then
-		return nil, "InvalidPosition"
-	end
-	if not getCharacterRoot(player) then
-		return nil, "NotAlive"
-	end
-
-	local boundsRoot = getTargetBoundsRoot(player)
-	if not isInsideMapBounds(proposedPosition, boundsRoot) then
-		return nil, "OutOfMap"
-	end
-
-	local rayUp = math.max(getDefinitionNumber(definition, "floorRaycastUp", 80), 1)
-	local rayDown = math.max(getDefinitionNumber(definition, "floorRaycastDown", 180), 1)
-	local hit = workspace:Raycast(
-		proposedPosition + Vector3.yAxis * rayUp,
-		Vector3.yAxis * -(rayUp + rayDown),
-		makeRaycastParams(player)
-	)
+	local hit = workspace:Raycast(rayOrigin, rayDirection.Unit * TARGET_RAY_DISTANCE, makeRaycastParams())
 	if not hit then
 		return nil, "NoSurface"
 	end
-	if hit.Normal.Y < getDefinitionNumber(definition, "minFloorNormalY", 0.45) then
-		return nil, "BadSurface"
-	end
-	if boundsRoot and not hit.Instance:IsDescendantOf(boundsRoot) then
-		return nil, "OutOfMap"
-	end
-	if hasTaggedAncestor(hit.Instance, UNSAFE_TAGS) then
-		return nil, "Protected"
-	end
-	if not hasSkyAccess(player, hit.Position, definition) then
-		return nil, "BlockedSky"
+	if (hit.Position - clientHitPosition).Magnitude > TARGET_HIT_TOLERANCE then
+		return nil, "RayMismatch"
 	end
 
 	return hit.Position, nil
@@ -706,7 +622,7 @@ local function confirmTarget(context: ServerClientMessageContext)
 		return
 	end
 
-	local position, reason = validateTarget(context.player, context.definition, payload.position)
+	local position, reason = validateTarget(payload)
 	if not position then
 		sessions[context.player] = nil
 		reject(context.player, sessionId, reason or "InvalidTarget")

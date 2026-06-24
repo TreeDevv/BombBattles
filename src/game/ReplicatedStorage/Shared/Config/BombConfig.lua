@@ -129,6 +129,7 @@ return table.freeze({
 
 	PreviewPoints = 18,
 	PreviewStepSeconds = 0.08,
+	PreviewMinVisibleSeconds = 0.12,
 	PreviewPointSize = 0.18,
 	PreviewMaxSeconds = 1.4,
 	PreviewColor = Color3.fromRGB(255, 197, 67),

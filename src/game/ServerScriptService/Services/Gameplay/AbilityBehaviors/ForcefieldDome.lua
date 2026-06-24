@@ -193,6 +193,9 @@ function ForcefieldDome.OnProjectileStep(context: ServerHookContext): AbilityHoo
 	if not (dome and typeof(payload) == "table" and typeof(payload.projectileId) == "string") then
 		return AbilityResult.Continue()
 	end
+	if payload.owner == context.player then
+		return AbilityResult.Continue()
+	end
 
 	local radius = getRadius(context.definition)
 	local touching, hitPosition = isProjectileTouchingDome(payload, dome.rootPart.Position, radius)

@@ -360,15 +360,19 @@ function BombTrajectoryPreview:Show(
 	end
 
 	local findHit = self._findHit
-	local hit, endElapsed
+	local hit, endElapsed, displayEndPosition
 	if typeof(findHit) == "function" then
-		hit, endElapsed = findHit(trajectory, maxPreviewTime)
+		hit, endElapsed, displayEndPosition = findHit(trajectory, maxPreviewTime)
 	end
 	endElapsed = if typeof(endElapsed) == "number" then endElapsed else maxPreviewTime
 
 	local origin = trajectory.origin
 	local endAlpha = math.clamp(endElapsed / trajectory.duration, 0, 1)
-	local endPosition = if hit then hit.Position else BombTrajectory.Evaluate(trajectory, endAlpha)
+	local endPosition = if typeof(displayEndPosition) == "Vector3"
+		then displayEndPosition
+		elseif hit
+		then hit.Position
+		else BombTrajectory.Evaluate(trajectory, endAlpha)
 	local startVelocity = BombTrajectory.GetVelocity(trajectory, 0)
 	local endVelocity = BombTrajectory.GetVelocity(trajectory, endAlpha)
 	local reversePathDirection = origin - endPosition

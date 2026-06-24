@@ -419,6 +419,9 @@
           "GameStateNotificationController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GameStateNotificationController.lua"
           },
+          "RoundTimerController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/RoundTimerController.lua"
+          },
           "GlobalLeaderboardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/GlobalLeaderboardController.lua"
           },

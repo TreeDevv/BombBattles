@@ -8,7 +8,6 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
-local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
@@ -52,7 +51,6 @@ type TargetingState = {
 	restoreTweening: boolean,
 	currentFocus: Vector3?,
 	placementCenter: Vector3?,
-	placementOffset: Vector3,
 	placementForward: Vector3,
 	keyboardInput: Vector2,
 	gamepadInput: Vector2,
@@ -63,6 +61,8 @@ type TargetingState = {
 	controls: Controls?,
 	controlsDisabled: boolean,
 	targetPosition: Vector3?,
+	targetRayOrigin: Vector3?,
+	targetRayDirection: Vector3?,
 	valid: boolean,
 	connections: { RBXScriptConnection },
 }
@@ -78,14 +78,7 @@ local PREVIEW_FOLDER_NAME = "OrbitalStrikePreview"
 local VFX_FOLDER_NAME = "OrbitalStrikeVFX"
 local CAMERA_TWEEN_SECONDS = 0.4
 local FOCUS_RESPONSIVENESS = 14
-
-local UNSAFE_TAGS = {
-	RoundConfig.Tags.TeamCore,
-	RoundConfig.Tags.TeamSpawn,
-	RoundConfig.Tags.LobbySpawn,
-	"NoStrikeZone",
-	"ProtectedZone",
-}
+local TARGET_RAY_DISTANCE = 10000
 
 local KEY_DIRECTIONS = {
 	[Enum.KeyCode.W] = Vector2.new(0, 1),
@@ -122,7 +115,6 @@ local state: TargetingState = {
 	restoreTweening = false,
 	currentFocus = nil,
 	placementCenter = nil,
-	placementOffset = Vector3.zero,
 	placementForward = Vector3.zAxis,
 	keyboardInput = Vector2.zero,
 	gamepadInput = Vector2.zero,
@@ -133,6 +125,8 @@ local state: TargetingState = {
 	controls = nil,
 	controlsDisabled = false,
 	targetPosition = nil,
+	targetRayOrigin = nil,
+	targetRayDirection = nil,
 	valid = false,
 	connections = {},
 }
@@ -554,78 +548,10 @@ local function resolvePlacementForward(rootPart: BasePart): Vector3
 	return Vector3.zAxis
 end
 
-local function hasTaggedAncestor(instance: Instance, tags: { string }): boolean
-	local current: Instance? = instance
-	while current and current ~= workspace do
-		for _, tagName in ipairs(tags) do
-			if CollectionService:HasTag(current, tagName) then
-				return true
-			end
-		end
-		current = current.Parent
-	end
-	return false
-end
-
-local function isInsideMapBounds(position: Vector3, map: Model?): boolean
-	if not map then
-		return false
-	end
-
-	local boundsCFrame, boundsSize = map:GetBoundingBox()
-	local localPosition = boundsCFrame:PointToObjectSpace(position)
-	local halfSize = boundsSize * 0.5 + Vector3.new(3, 12, 3)
-	return math.abs(localPosition.X) <= halfSize.X
-		and math.abs(localPosition.Y) <= halfSize.Y
-		and math.abs(localPosition.Z) <= halfSize.Z
-end
-
-local function clampToMapFootprint(position: Vector3, map: Model?): Vector3
-	if not map then
-		return position
-	end
-
-	local boundsCFrame, boundsSize = map:GetBoundingBox()
-	local localPosition = boundsCFrame:PointToObjectSpace(position)
-	local halfSize = boundsSize * 0.5
-	localPosition = Vector3.new(
-		math.clamp(localPosition.X, -halfSize.X, halfSize.X),
-		localPosition.Y,
-		math.clamp(localPosition.Z, -halfSize.Z, halfSize.Z)
-	)
-	return boundsCFrame:PointToWorldSpace(localPosition)
-end
-
 local function makeRaycastParams(): RaycastParams
 	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.IgnoreWater = true
 	params.RespectCanCollide = true
-
-	local excluded = {}
-	for _, player in ipairs(Players:GetPlayers()) do
-		if player.Character then
-			table.insert(excluded, player.Character)
-		end
-	end
-	if state.markerFolder then
-		table.insert(excluded, state.markerFolder)
-	end
-	local targetRoot = getTargetRoot()
-	local strikeObjects = targetRoot and targetRoot:FindFirstChild("OrbitalStrikeObjects")
-	if strikeObjects then
-		table.insert(excluded, strikeObjects)
-	end
-	local projectileFolder = workspace:FindFirstChild(BombConfig.ProjectileFolderName)
-	if projectileFolder then
-		table.insert(excluded, projectileFolder)
-	end
-	local fireFolder = workspace:FindFirstChild("FireBombZones")
-	if fireFolder then
-		table.insert(excluded, fireFolder)
-	end
-
-	params.FilterDescendantsInstances = excluded
 	return params
 end
 
@@ -708,58 +634,61 @@ local function getPanDirection(input: Vector2): Vector3
 	return if direction.Magnitude > 0.05 then direction.Unit * math.min(input.Magnitude, 1) else Vector3.zero
 end
 
-local function raycastPlacement(desiredPosition: Vector3, definition: AbilityDefinition): (Vector3?, Instance?, Vector3?)
-	local rayUp = math.max(getDefinitionNumber(definition, "floorRaycastUp", 80), 1)
-	local rayDown = math.max(getDefinitionNumber(definition, "floorRaycastDown", 180), 1)
-	local hit = workspace:Raycast(
-		desiredPosition + Vector3.yAxis * rayUp,
-		Vector3.yAxis * -(rayUp + rayDown),
-		makeRaycastParams()
-	)
-	if not hit then
-		return nil, nil, nil
+local function getTargetRay(camera: Camera): (Vector3, Vector3)
+	local viewportSize = camera.ViewportSize
+	local screenPosition = viewportSize * 0.5
+	if UserInputService.MouseEnabled then
+		local mousePosition = UserInputService:GetMouseLocation()
+		screenPosition = Vector2.new(
+			math.clamp(mousePosition.X, 0, math.max(viewportSize.X - 1, 0)),
+			math.clamp(mousePosition.Y, 0, math.max(viewportSize.Y - 1, 0))
+		)
 	end
 
-	return hit.Position, hit.Instance, hit.Normal
+	local ray = camera:ViewportPointToRay(screenPosition.X, screenPosition.Y)
+	return ray.Origin, ray.Direction
 end
 
-local function updatePlacementFromMove(definition: AbilityDefinition, dt: number): (Vector3?, boolean)
+local function raycastPlacement(camera: Camera): (Vector3?, Vector3?, Vector3?)
+	local rayOrigin, rayDirection = getTargetRay(camera)
+	if rayDirection.Magnitude < 0.05 then
+		return nil, rayOrigin, rayDirection
+	end
+
+	local hit = workspace:Raycast(rayOrigin, rayDirection.Unit * TARGET_RAY_DISTANCE, makeRaycastParams())
+	if not hit then
+		return nil, rayOrigin, rayDirection
+	end
+
+	return hit.Position, rayOrigin, rayDirection
+end
+
+local function updatePlacementFromMove(
+	definition: AbilityDefinition,
+	camera: Camera,
+	dt: number
+): (Vector3?, Vector3?, Vector3?, Vector3, boolean)
 	local rootPart = getRootPart()
 	if not rootPart then
-		return nil, false
+		return nil, nil, nil, camera.CFrame.Position, false
 	end
 
 	local center = state.placementCenter or rootPart.Position
-	state.placementCenter = center
 	local panDirection = getPanDirection(getMoveInput())
+	local isPanning = panDirection.Magnitude > 0.05
 	if panDirection.Magnitude > 0.05 then
 		local speed = math.max(getDefinitionNumber(definition, "placementPanSpeed", 180), 1)
-		state.placementOffset += panDirection * speed * dt
+		center += panDirection * speed * dt
 	end
+	state.placementCenter = center
 
-	local targetRoot = getTargetRoot()
-	local desiredPosition = clampToMapFootprint(center + state.placementOffset, targetRoot)
-	state.placementOffset = desiredPosition - center
-	local targetPosition, hitInstance, normal = raycastPlacement(desiredPosition, definition)
+	local targetPosition, rayOrigin, rayDirection = raycastPlacement(camera)
 	if not targetPosition then
-		return desiredPosition, false
+		return center, rayOrigin, rayDirection, center, false
 	end
 
-	local valid = true
-	if hitInstance and not PracticeRangeTargeting.IsInTargetRoot(hitInstance, targetRoot) then
-		valid = false
-	end
-	if not isInsideMapBounds(targetPosition, targetRoot) then
-		valid = false
-	end
-	if normal and normal.Y < getDefinitionNumber(definition, "minFloorNormalY", 0.45) then
-		valid = false
-	end
-	if hitInstance and hasTaggedAncestor(hitInstance, UNSAFE_TAGS) then
-		valid = false
-	end
-
-	return targetPosition, valid
+	local focusPosition = if isPanning then center else targetPosition
+	return targetPosition, rayOrigin, rayDirection, focusPosition, true
 end
 
 local function getCameraGoal(definition: AbilityDefinition, focus: Vector3): (CFrame, number)
@@ -816,9 +745,10 @@ local function finishCleanup()
 	state.restoreTweening = false
 	state.currentFocus = nil
 	state.placementCenter = nil
-	state.placementOffset = Vector3.zero
 	state.placementForward = Vector3.zAxis
 	state.targetPosition = nil
+	state.targetRayOrigin = nil
+	state.targetRayDirection = nil
 	state.valid = false
 end
 
@@ -893,13 +823,15 @@ local function stepTargeting(dt: number)
 
 		disableMovementControls()
 
-		local targetPosition, valid = updatePlacementFromMove(definition, dt)
+		local targetPosition, rayOrigin, rayDirection, focusPosition, valid = updatePlacementFromMove(definition, camera, dt)
 		state.targetPosition = targetPosition
+		state.targetRayOrigin = rayOrigin
+		state.targetRayDirection = rayDirection
 		state.valid = valid
 		setMarker(targetPosition, valid)
 
 		local rootPart = getRootPart()
-		local desiredFocus = targetPosition or (rootPart and rootPart.Position) or saved.cframe.Position
+		local desiredFocus = focusPosition or targetPosition or (rootPart and rootPart.Position) or saved.cframe.Position
 		state.currentFocus = if state.currentFocus
 			then state.currentFocus:Lerp(desiredFocus, 1 - math.exp(-FOCUS_RESPONSIVENESS * dt))
 			else desiredFocus
@@ -916,14 +848,25 @@ local function stepTargeting(dt: number)
 end
 
 local function confirmTarget()
-	if not (state.active and state.controller and state.valid and state.targetPosition) then
+	if
+		not (
+			state.active
+			and state.controller
+			and state.valid
+			and state.targetPosition
+			and state.targetRayOrigin
+			and state.targetRayDirection
+		)
+	then
 		return
 	end
 
 	state.controller:SendMessage(state.slot, AbilityConfig.MessageTypes.Intent, {
 		action = "ConfirmTarget",
 		sessionId = state.sessionId,
-		position = state.targetPosition,
+		hitPosition = state.targetPosition,
+		rayOrigin = state.targetRayOrigin,
+		rayDirection = state.targetRayDirection,
 	})
 	endTargeting(false)
 end
@@ -1180,9 +1123,10 @@ local function beginLocalTargeting(context: ClientEffectContext)
 	state.restoreTweening = false
 	state.currentFocus = rootPart.Position
 	state.placementCenter = rootPart.Position
-	state.placementOffset = Vector3.zero
 	state.placementForward = resolvePlacementForward(rootPart)
 	state.targetPosition = rootPart.Position
+	state.targetRayOrigin = nil
+	state.targetRayDirection = nil
 	state.valid = false
 	clearMoveInput()
 

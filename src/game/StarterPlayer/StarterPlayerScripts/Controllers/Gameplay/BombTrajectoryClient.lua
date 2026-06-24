@@ -131,10 +131,13 @@ function BombTrajectoryClient.FindPreviewTrajectoryHit(
 	path: BombTrajectory.Path,
 	maxPreviewTime: number,
 	character: Model?
-): (RaycastResult?, number)
+): (RaycastResult?, number, Vector3?)
 	local stepSeconds = if typeof(BombConfig.PreviewStepSeconds) == "number"
 		then math.max(BombConfig.PreviewStepSeconds, 1 / 60)
 		else 0.08
+	local minVisibleSeconds = if typeof(BombConfig.PreviewMinVisibleSeconds) == "number"
+		then math.max(BombConfig.PreviewMinVisibleSeconds, 0)
+		else 0
 	local segmentCount = math.max(1, math.ceil(maxPreviewTime / stepSeconds))
 	local params = createPreviewSweepParams(character)
 
@@ -150,7 +153,13 @@ function BombTrajectoryClient.FindPreviewTrajectoryHit(
 			local segmentAlpha = if segmentLength > 0.001
 				then math.clamp(hit.Distance / segmentLength, 0, 1)
 				else 0
-			return hit, previousElapsed + (elapsed - previousElapsed) * segmentAlpha
+			local hitElapsed = previousElapsed + (elapsed - previousElapsed) * segmentAlpha
+			if minVisibleSeconds > 0 and hitElapsed < minVisibleSeconds then
+				local displayElapsed = math.min(maxPreviewTime, math.max(minVisibleSeconds, elapsed))
+				local displayAlpha = math.clamp(displayElapsed / path.duration, 0, 1)
+				return hit, displayElapsed, BombTrajectory.Evaluate(path, displayAlpha)
+			end
+			return hit, hitElapsed, nil
 		end
 
 		previousElapsed = elapsed

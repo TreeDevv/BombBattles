@@ -106,6 +106,12 @@ local function getRaycastParams(excludeInstances: { Instance }?): RaycastParams
 	return params
 end
 
+local function getSolidRaycastParams(excludeInstances: { Instance }?): RaycastParams
+	local params = getRaycastParams(excludeInstances)
+	params.RespectCanCollide = true
+	return params
+end
+
 function PlacementSurfaceUtil.ResolveAimedSurfacePlacement(options): FloorPlacement?
 	local rootPart: BasePart = options.rootPart
 	local definition = options.definition or {}
@@ -195,6 +201,51 @@ function PlacementSurfaceUtil.ResolveForwardOffsetPlacement(options): FloorPlace
 
 	return {
 		position = rootPart.Position + facing * math.max(distance, 0),
+		facing = facing,
+		normal = Vector3.yAxis,
+		floor = nil,
+	}
+end
+
+function PlacementSurfaceUtil.ResolveForwardSolidPlacement(options): FloorPlacement?
+	local rootPart: BasePart = options.rootPart
+	local definition = options.definition or {}
+	local facing = PlacementSurfaceUtil.FlattenDirection(rootPart.CFrame.LookVector)
+	local distance = math.max(tonumber(options.distance) or tonumber(definition.placementDistance) or DEFAULT_PLACEMENT_DISTANCE, 0)
+	local target = rootPart.Position + facing * distance
+	local params = getSolidRaycastParams(options.excludeInstances)
+
+	local forwardOffset = target - rootPart.Position
+	if forwardOffset.Magnitude > 0.05 then
+		local hit = workspace:Raycast(rootPart.Position, forwardOffset, params)
+		if hit then
+			return {
+				position = hit.Position,
+				facing = PlacementSurfaceUtil.GetSurfaceFacing(facing, hit.Normal),
+				normal = hit.Normal,
+				floor = hit.Instance,
+			}
+		end
+	end
+
+	local rayUp = tonumber(definition.floorRaycastUp) or DEFAULT_RAYCAST_UP
+	local rayDown = tonumber(definition.floorRaycastDown) or DEFAULT_RAYCAST_DOWN
+	local floorHit = workspace:Raycast(
+		target + Vector3.yAxis * rayUp,
+		Vector3.new(0, -(rayUp + rayDown), 0),
+		params
+	)
+	if floorHit then
+		return {
+			position = floorHit.Position,
+			facing = PlacementSurfaceUtil.GetSurfaceFacing(facing, floorHit.Normal),
+			normal = floorHit.Normal,
+			floor = floorHit.Instance,
+		}
+	end
+
+	return {
+		position = target,
 		facing = facing,
 		normal = Vector3.yAxis,
 		floor = nil,

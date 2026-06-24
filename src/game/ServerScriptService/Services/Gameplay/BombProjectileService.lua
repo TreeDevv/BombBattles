@@ -1,4 +1,5 @@
 local CollectionService = game:GetService("CollectionService")
+local PhysicsService = game:GetService("PhysicsService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -6,6 +7,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local CollisionGroupConfig = require(ReplicatedStorage.Shared.Config.CollisionGroupConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
@@ -19,6 +21,8 @@ local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatan
 
 local RESULT_KIND = AbilityResult.Kind
 local DEBUG_REPLAY_EVENTS = false
+local BOMB_PROJECTILE_COLLISION_GROUP = CollisionGroupConfig.Groups.BombProjectile
+local PRACTICE_RANGE_BOMB_BARRIER_COLLISION_GROUP = CollisionGroupConfig.Groups.PracticeRangeBombBarrier
 
 type HandlerTable = {
 	fireEffect: ((effectName: string, payload: any) -> ())?,
@@ -523,6 +527,41 @@ end
 
 local setBasePartTransparency
 
+local function registerCollisionGroup(name: string)
+	pcall(function()
+		PhysicsService:RegisterCollisionGroup(name)
+	end)
+end
+
+local function setGroupsCollidable(groupA: string, groupB: string, collidable: boolean)
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(groupA, groupB, collidable)
+	end)
+end
+
+local function configureCollisionGroups()
+	registerCollisionGroup(BOMB_PROJECTILE_COLLISION_GROUP)
+	registerCollisionGroup(PRACTICE_RANGE_BOMB_BARRIER_COLLISION_GROUP)
+	setGroupsCollidable("Default", PRACTICE_RANGE_BOMB_BARRIER_COLLISION_GROUP, false)
+	setGroupsCollidable(BOMB_PROJECTILE_COLLISION_GROUP, PRACTICE_RANGE_BOMB_BARRIER_COLLISION_GROUP, true)
+	setGroupsCollidable(BOMB_PROJECTILE_COLLISION_GROUP, "Default", true)
+end
+
+local function setProjectileCollisionGroup(instance: Instance)
+	if instance:IsA("BasePart") then
+		pcall(function()
+			instance.CollisionGroup = BOMB_PROJECTILE_COLLISION_GROUP
+		end)
+	end
+	for _, descendant in ipairs(instance:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			pcall(function()
+				descendant.CollisionGroup = BOMB_PROJECTILE_COLLISION_GROUP
+			end)
+		end
+	end
+end
+
 local function preparePhysicalProjectile(projectileId: string, owner: any, bombType: string, skinId: string, visuals): (Instance, BasePart)
 	local hideBaseVisual = typeof(visuals) == "table" and visuals.hideBaseVisual == true
 	local visualScale = if typeof(visuals) == "table" and typeof(visuals.visualScale) == "number"
@@ -544,6 +583,7 @@ local function preparePhysicalProjectile(projectileId: string, owner: any, bombT
 	if projectile:IsA("Model") then
 		projectile.PrimaryPart = rootPart
 	end
+	setProjectileCollisionGroup(projectile)
 	if hideBaseVisual then
 		setBasePartTransparency(projectile, 1)
 	end
@@ -885,6 +925,7 @@ local function createRaycastParams(state: ProjectileState): RaycastParams
 
 	params.FilterDescendantsInstances = excluded
 	params.IgnoreWater = state.collision.ignoreWater ~= false
+	params.CollisionGroup = BOMB_PROJECTILE_COLLISION_GROUP
 	params.RespectCanCollide = state.collision.respectCanCollide ~= false
 	return params
 end
@@ -2226,6 +2267,8 @@ function BombProjectileService:GetReplaySnapshots(maxCount: number?)
 end
 
 function BombProjectileService:OnStart()
+	configureCollisionGroups()
+
 	if heartbeatConnection then
 		heartbeatConnection:Disconnect()
 	end

@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Relaxed =  EmoteEffect.Create("Relaxed", { catalogOrder = 25 })
+local Relaxed =  EmoteEffect.Create("Relaxed", { catalogOrder = 25, rarity = "Rare" })
 
 function Relaxed:Begin(_character: Model, runtime)
 	local root = runtime:GetRoot()

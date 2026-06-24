@@ -32,8 +32,6 @@ POTGCutsceneConfig.Cutscenes = table.freeze({
 		cameraRigName = "CamRigWithLetterBox1",
 		cameraBoneName = "cameraBone",
 		pivotPartName = "Pivot",
-		bombAttachmentNames = table.freeze({ "RightGripAttachment", "BombGripAttachment" }),
-		bombHandleNames = table.freeze({ "RightHandle", "RIghtHandle", "Bomb" }),
 		characterAnimation = table.freeze({
 			type = POTGCutsceneConfig.AnimationSourceTypes.AnimationId,
 			animationId = "rbxassetid://92968462721009",
@@ -73,8 +71,6 @@ POTGCutsceneConfig.Cutscenes = table.freeze({
 		cameraRigName = "CamRigWithLetterBox1",
 		cameraBoneName = "cameraBone",
 		pivotPartName = "Pivot",
-		bombAttachmentNames = table.freeze({ "RightGripAttachment", "BombGripAttachment" }),
-		bombHandleNames = table.freeze({ "RightHandle", "RIghtHandle", "Bomb" }),
 		motionSourcePivotCFrame = cf(23.875103, 3.05721, -18.511501, 0.013962141, 0, 0.999902546, 0, 1, 0),
 		characterAnimation = table.freeze({
 			type = POTGCutsceneConfig.AnimationSourceTypes.AnimationId,
@@ -233,7 +229,6 @@ EmitModule:Emit(workspace.HighlightIntros["Hollow Purple"].Burst)
 		cameraRigName = "CamRigWithLetterBox1",
 		cameraBoneName = "cameraBone",
 		pivotPartName = "Pivot",
-		useRuntimeBombVisual = false,
 		motionSourcePivotCFrame = cf(
 			-35.645168,
 			2.840100,

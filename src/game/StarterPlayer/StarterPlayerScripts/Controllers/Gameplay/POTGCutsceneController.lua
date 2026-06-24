@@ -8,10 +8,6 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
-local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
-local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
-local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
-local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
 local POTGCutsceneConfig = require(ReplicatedStorage.Shared.Config.POTGCutsceneConfig)
 local RoundEndFlowConfig = require(ReplicatedStorage.Shared.Config.RoundEndFlowConfig)
@@ -37,33 +33,14 @@ local DEBUG_CUTSCENE = RunService:IsStudio()
 local CUTSCENE_DOF_NAME = "_LocalPOTGHighlightDOF"
 local EMIT_WARN_PREFIX = "[POTGHighlightIntro]"
 local VFX_HANDLER_NAME = "VFXHandler"
-local TEMPLATE_WAIT_SECONDS = 10
-local REQUIRED_DESCENDANT_WAIT_SECONDS = 8
-local ANIMATION_LOAD_TIMEOUT_SECONDS = 3
-local CUTSCENE_BOMB_VISUAL_NAME = "POTGEquippedBombVisual"
-local PLACEHOLDER_BOMB_NAMES = table.freeze({
-	Bomb = true,
-	RightHandle = true,
-	RIghtHandle = true,
-	LeftHandle = true,
-	Handle = true,
-})
-local DEFAULT_BOMB_ATTACHMENT_NAMES = table.freeze({
-	"BombGripAttachment",
-	"RightGripAttachment",
-	"LeftGripAttachment",
-})
-local DEFAULT_BOMB_HANDLE_NAMES = table.freeze({
-	"RightHandle",
-	"RIghtHandle",
-	"LeftHandle",
-	"Handle",
-	"Bomb",
-})
-
+local REMOTE_WAIT_SECONDS = 10
+local TRACK_HOLD_LEAD_SECONDS = 1 / 30
+local TRACK_FINAL_POSE_OFFSET_SECONDS = 1 / 240
+local PREPARED_HIGHLIGHT_INTROS_FOLDER_NAME = "PreparedHighlightIntros"
 local moonVFXModule: any? = nil
 local moonVFXModuleInitialized = false
 local checkedForMoonVFXModule = false
+local prewarmedAnimationIds: { [string]: boolean } = {}
 
 type Controls = {
 	Disable: ((Controls) -> ())?,
@@ -83,16 +60,17 @@ type SavedCameraState = {
 	controlsDisabled: boolean,
 }
 
+type TrackHoldRecord = {
+	track: AnimationTrack,
+	name: string,
+	length: number,
+	held: boolean,
+}
+
 type ActiveCutscene = {
 	clone: Model,
 	cutsceneSpec: any,
 	cameraBone: BasePart,
-	bombVisual: Instance?,
-	bombVisualRoot: BasePart?,
-	bombAttachment: Attachment?,
-	bombHandle: BasePart?,
-	bombGripOffset: CFrame,
-	authoredBombPlaceholders: { Instance },
 	placementAnchor: BasePart?,
 	dofEffect: DepthOfFieldEffect?,
 	motionSourcePivot: CFrame,
@@ -105,6 +83,9 @@ type ActiveCutscene = {
 	fadeTween: Tween?,
 	connections: { RBXScriptConnection },
 	tracks: { AnimationTrack },
+	heldTracks: { TrackHoldRecord },
+	cameraTrackHold: TrackHoldRecord?,
+	cameraHoldCFrame: CFrame?,
 	endAt: number,
 	durationSeconds: number,
 	playbackStartedAt: number,
@@ -135,7 +116,7 @@ POTGCutsceneController.RoundIntroStarted = Signal.new()
 POTGCutsceneController.RoundIntroCompleted = Signal.new()
 
 local function getRemotesFolder(): Folder?
-	local folder = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, 10)
+	local folder = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, REMOTE_WAIT_SECONDS)
 	return if folder and folder:IsA("Folder") then folder else nil
 end
 
@@ -145,7 +126,7 @@ local function getRemote(): RemoteEvent?
 		return nil
 	end
 
-	local remote = folder:WaitForChild(AdminConfig.POTGCutsceneRemoteName, 10)
+	local remote = folder:WaitForChild(AdminConfig.POTGCutsceneRemoteName, REMOTE_WAIT_SECONDS)
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
 end
 
@@ -155,7 +136,7 @@ local function getRoundIntroRemote(): RemoteEvent?
 		return nil
 	end
 
-	local remote = folder:WaitForChild(RoundEndFlowConfig.Remotes.POTGIntro, 10)
+	local remote = folder:WaitForChild(RoundEndFlowConfig.Remotes.POTGIntro, REMOTE_WAIT_SECONDS)
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
 end
 
@@ -165,7 +146,7 @@ local function getRoundIntroCompleteRemote(): RemoteEvent?
 		return nil
 	end
 
-	local remote = folder:WaitForChild(RoundEndFlowConfig.Remotes.POTGIntroComplete, 10)
+	local remote = folder:WaitForChild(RoundEndFlowConfig.Remotes.POTGIntroComplete, REMOTE_WAIT_SECONDS)
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
 end
 
@@ -188,60 +169,61 @@ local function getControls(): Controls?
 	return module:GetControls()
 end
 
-local function getCutsceneTemplate(cutsceneSpec): Instance?
+local function getPreparedCutsceneTemplate(payload): Instance?
+	if
+		typeof(payload) ~= "table"
+		or payload.appearanceAppliedOnServer ~= true
+		or typeof(payload.preparedHighlightIntroName) ~= "string"
+		or payload.preparedHighlightIntroName == ""
+	then
+		return nil
+	end
+
+	local assets = ReplicatedStorage:FindFirstChild("Assets")
+	if not assets then
+		assets = ReplicatedStorage:WaitForChild("Assets", REMOTE_WAIT_SECONDS)
+	end
+	local preparedFolder = assets and assets:FindFirstChild(PREPARED_HIGHLIGHT_INTROS_FOLDER_NAME)
+	if not preparedFolder and assets then
+		preparedFolder = assets:WaitForChild(PREPARED_HIGHLIGHT_INTROS_FOLDER_NAME, REMOTE_WAIT_SECONDS)
+	end
+	if not preparedFolder then
+		warn(("[POTGCutsceneController] Missing prepared highlight intro folder for %s"):format(
+			payload.preparedHighlightIntroName
+		))
+		return nil
+	end
+
+	local template = preparedFolder:FindFirstChild(payload.preparedHighlightIntroName)
+	if not template then
+		template = preparedFolder:WaitForChild(payload.preparedHighlightIntroName, REMOTE_WAIT_SECONDS)
+	end
+	if template and (template:IsA("Folder") or template:IsA("Model")) then
+		return template
+	end
+
+	warn(("[POTGCutsceneController] Missing prepared highlight intro template %s"):format(
+		payload.preparedHighlightIntroName
+	))
+	return nil
+end
+
+local function getCutsceneTemplate(cutsceneSpec, payload): (Instance?, boolean)
+	local preparedTemplate = getPreparedCutsceneTemplate(payload)
+	if preparedTemplate then
+		return preparedTemplate, true
+	end
+
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
 	local cutscenes = assets and assets:FindFirstChild("Cutscenes")
 	local replicatedTemplate = cutscenes and cutscenes:FindFirstChild(cutsceneSpec.replicatedAssetName)
-	if not replicatedTemplate and cutscenes then
-		replicatedTemplate = cutscenes:WaitForChild(cutsceneSpec.replicatedAssetName, TEMPLATE_WAIT_SECONDS)
-	end
 	if replicatedTemplate and (replicatedTemplate:IsA("Folder") or replicatedTemplate:IsA("Model")) then
-		return replicatedTemplate
+		return replicatedTemplate, false
 	end
 
 	local highlightIntros = workspace:FindFirstChild("HighlightIntros")
-	if not highlightIntros then
-		highlightIntros = workspace:WaitForChild("HighlightIntros", TEMPLATE_WAIT_SECONDS)
-	end
 	local template = highlightIntros and highlightIntros:FindFirstChild(cutsceneSpec.assetFolderName)
-	if not template and highlightIntros then
-		template = highlightIntros:WaitForChild(cutsceneSpec.assetFolderName, TEMPLATE_WAIT_SECONDS)
-	end
-	return if template and (template:IsA("Folder") or template:IsA("Model")) then template else nil
-end
-
-local function waitForDescendant(root: Instance, name: string, className: string, timeoutSeconds: number): Instance?
-	local existing = root:FindFirstChild(name, true)
-	if existing and existing:IsA(className) then
-		return existing
-	end
-
-	local deadline = os.clock() + math.max(timeoutSeconds, 0)
-	while os.clock() < deadline do
-		local remaining = deadline - os.clock()
-		local found: Instance? = nil
-		local connection = root.DescendantAdded:Connect(function(descendant)
-			if not found and descendant.Name == name and descendant:IsA(className) then
-				found = descendant
-			end
-		end)
-		while not found and os.clock() < deadline do
-			task.wait(math.min(0.1, math.max(deadline - os.clock(), 0)))
-		end
-		connection:Disconnect()
-		if found then
-			return found
-		end
-
-		existing = root:FindFirstChild(name, true)
-		if existing and existing:IsA(className) then
-			return existing
-		end
-		if remaining <= 0 then
-			break
-		end
-	end
-	return nil
+	return if template and (template:IsA("Folder") or template:IsA("Model")) then template else nil, false
 end
 
 local function findCameraPartInRig(cameraRig: Instance?, cutsceneSpec): BasePart?
@@ -263,55 +245,53 @@ local function findCameraPartInRig(cameraRig: Instance?, cutsceneSpec): BasePart
 	return if fallback and fallback:IsA("BasePart") then fallback else nil
 end
 
-local function waitForCameraPart(cameraRig: Instance, cutsceneSpec, timeoutSeconds: number): BasePart?
-	local existing = findCameraPartInRig(cameraRig, cutsceneSpec)
-	if existing then
-		return existing
-	end
-
-	local found: BasePart? = nil
-	local connection = cameraRig.DescendantAdded:Connect(function(descendant)
-		if not found and descendant:IsA("BasePart") then
-			found = findCameraPartInRig(cameraRig, cutsceneSpec) or descendant
-		end
-	end)
-	local deadline = os.clock() + math.max(timeoutSeconds, 0)
-	while not found and os.clock() < deadline do
-		task.wait(math.min(0.1, math.max(deadline - os.clock(), 0)))
-	end
-	connection:Disconnect()
-	return found or findCameraPartInRig(cameraRig, cutsceneSpec)
-end
-
-local function waitForHighlightIntroReady(template: Instance, cutsceneSpec)
+local function validateHighlightIntroTemplate(template: Instance, cutsceneSpec): boolean
 	local characterRig = template:FindFirstChild(cutsceneSpec.characterRigName)
-	if not characterRig then
-		characterRig = template:WaitForChild(cutsceneSpec.characterRigName, TEMPLATE_WAIT_SECONDS)
-	end
-
 	local cameraRig = template:FindFirstChild(cutsceneSpec.cameraRigName)
-	if not cameraRig then
-		cameraRig = template:WaitForChild(cutsceneSpec.cameraRigName, TEMPLATE_WAIT_SECONDS)
+	local missing = {}
+
+	if not characterRig then
+		table.insert(missing, tostring(cutsceneSpec.characterRigName))
+	elseif not characterRig:FindFirstChild("Humanoid", true) then
+		table.insert(missing, tostring(cutsceneSpec.characterRigName) .. ".Humanoid")
 	end
 
-	if cameraRig then
-		waitForCameraPart(cameraRig, cutsceneSpec, REQUIRED_DESCENDANT_WAIT_SECONDS)
-		waitForDescendant(cameraRig, "Animator", "Animator", REQUIRED_DESCENDANT_WAIT_SECONDS)
-	end
-	if characterRig then
-		waitForDescendant(characterRig, "Humanoid", "Humanoid", REQUIRED_DESCENDANT_WAIT_SECONDS)
+	if not cameraRig then
+		table.insert(missing, tostring(cutsceneSpec.cameraRigName))
+	else
+		if not findCameraPartInRig(cameraRig, cutsceneSpec) then
+			table.insert(missing, tostring(cutsceneSpec.cameraRigName) .. "." .. tostring(cutsceneSpec.cameraBoneName))
+		end
+		if
+			not cameraRig:FindFirstChildOfClass("AnimationController")
+			and not cameraRig:FindFirstChild("AnimationController", true)
+		then
+			table.insert(missing, tostring(cutsceneSpec.cameraRigName) .. ".AnimationController")
+		end
 	end
 
 	for _, event in ipairs(cutsceneSpec.events or {}) do
-		if typeof(event.effectName) == "string" and not template:FindFirstChild(event.effectName, true) then
-			if event.type == "Emit" or event.type == "Code" then
-				local deadline = os.clock() + 2
-				while os.clock() < deadline and not template:FindFirstChild(event.effectName, true) do
-					task.wait(0.1)
-				end
-			end
+		if
+			(event.type == "Emit" or event.type == "Code")
+			and typeof(event.effectName) == "string"
+			and not template:FindFirstChild(event.effectName, true)
+		then
+			warn(("[POTGCutsceneController] Cutscene %s is missing optional effect %s"):format(
+				tostring(cutsceneSpec.id),
+				event.effectName
+			))
 		end
 	end
+
+	if #missing > 0 then
+		warn(("[POTGCutsceneController] Cutscene %s is missing required template parts: %s"):format(
+			tostring(cutsceneSpec.id),
+			table.concat(missing, ", ")
+		))
+		return false
+	end
+
+	return true
 end
 
 local function getCutsceneFolder(): Folder
@@ -474,168 +454,6 @@ local function getCharacterRig(root: Instance, cutsceneSpec): Model?
 	return if rig and rig:IsA("Model") then rig else nil
 end
 
-local function getConfiguredNameList(value: any, fallback: { string }): { string }
-	if typeof(value) ~= "table" then
-		return fallback
-	end
-
-	local names = {}
-	for _, name in ipairs(value) do
-		if typeof(name) == "string" and name ~= "" then
-			table.insert(names, name)
-		end
-	end
-	return if #names > 0 then names else fallback
-end
-
-local function findDescendantByName(root: Instance?, names: { string }, className: string): Instance?
-	if not root then
-		return nil
-	end
-
-	for _, name in ipairs(names) do
-		local direct = root:FindFirstChild(name, true)
-		if direct and direct:IsA(className) then
-			return direct
-		end
-	end
-
-	return nil
-end
-
-local function getBombAttachmentNames(cutsceneSpec): { string }
-	return getConfiguredNameList(cutsceneSpec.bombAttachmentNames, DEFAULT_BOMB_ATTACHMENT_NAMES)
-end
-
-local function getBombHandleNames(cutsceneSpec): { string }
-	return getConfiguredNameList(cutsceneSpec.bombHandleNames, DEFAULT_BOMB_HANDLE_NAMES)
-end
-
-local function getPayloadBombSkinId(payload): string
-	if typeof(payload) == "table" then
-		local payloadSkinId = BombSkinConfig.NormalizeSkinId(payload.bombSkinId)
-		if payloadSkinId ~= "" then
-			return payloadSkinId
-		end
-	end
-
-	local userId = getCandidateUserId(payload)
-	local player: Player? = nil
-	if userId then
-		local ok, result = pcall(function()
-			return Players:GetPlayerByUserId(userId)
-		end)
-		if ok and result then
-			player = result
-		end
-	end
-
-	local skinId = BombSkinConfig.NormalizeSkinId(player and player:GetAttribute(BombSkinConfig.AttributeName))
-	return if skinId ~= "" then skinId else BombSkinConfig.DefaultSkinId
-end
-
-local function resolveBombAttachment(root: Model, cutsceneSpec, characterRig: Model?): Attachment?
-	local attachmentNames = getBombAttachmentNames(cutsceneSpec)
-	local configured = findDescendantByName(characterRig, attachmentNames, "Attachment")
-	if configured and configured:IsA("Attachment") then
-		return configured
-	end
-
-	configured = findDescendantByName(root, attachmentNames, "Attachment")
-	if configured and configured:IsA("Attachment") then
-		return configured
-	end
-
-	return BombThrowOrigin.GetRightGripAttachment(characterRig)
-end
-
-local function resolveBombHandle(root: Model, cutsceneSpec, characterRig: Model?): BasePart?
-	local handleNames = getBombHandleNames(cutsceneSpec)
-	local configured = findDescendantByName(characterRig, handleNames, "BasePart")
-	if configured and configured:IsA("BasePart") then
-		return configured
-	end
-
-	configured = findDescendantByName(root, handleNames, "BasePart")
-	return if configured and configured:IsA("BasePart") then configured else nil
-end
-
-local function collectAuthoredBombPlaceholders(root: Model, cutsceneSpec): { Instance }
-	local placeholders = {}
-	local characterRig = getCharacterRig(root, cutsceneSpec)
-	local handleNames = {}
-	for _, name in ipairs(getBombHandleNames(cutsceneSpec)) do
-		handleNames[name] = true
-	end
-
-	local function addPlaceholder(instance: Instance?)
-		if instance and not table.find(placeholders, instance) then
-			table.insert(placeholders, instance)
-		end
-	end
-
-	for _, descendant in ipairs(root:GetDescendants()) do
-		if descendant == characterRig or descendant:IsDescendantOf(characterRig) then
-			if descendant:IsA("BasePart") and (handleNames[descendant.Name] or PLACEHOLDER_BOMB_NAMES[descendant.Name]) then
-				addPlaceholder(descendant)
-			end
-		elseif descendant:IsA("BasePart") and PLACEHOLDER_BOMB_NAMES[descendant.Name] then
-			addPlaceholder(descendant)
-		end
-	end
-
-	local topBomb = root:FindFirstChild("Bomb")
-	if topBomb and topBomb:IsA("BasePart") then
-		addPlaceholder(topBomb)
-	end
-
-	return placeholders
-end
-
-local function hideAuthoredBombPlaceholders(placeholders: { Instance })
-	for _, placeholder in ipairs(placeholders) do
-		if placeholder:IsA("BasePart") then
-			hideRuntimeHelperPart(placeholder)
-		elseif placeholder:IsA("Decal") or placeholder:IsA("Texture") then
-			placeholder.Transparency = 1
-		end
-	end
-end
-
-local function createCutsceneBombVisual(root: Model, cutsceneSpec, payload)
-	if cutsceneSpec.useRuntimeBombVisual == false then
-		return nil, nil, nil, nil, CFrame.new(), {}
-	end
-
-	local characterRig = getCharacterRig(root, cutsceneSpec)
-	local attachment = resolveBombAttachment(root, cutsceneSpec, characterRig)
-	local handle = if attachment then nil else resolveBombHandle(root, cutsceneSpec, characterRig)
-	if not (attachment or handle) then
-		return nil, nil, nil, nil, CFrame.new(), {}
-	end
-
-	local placeholders = collectAuthoredBombPlaceholders(root, cutsceneSpec)
-	hideAuthoredBombPlaceholders(placeholders)
-
-	local skinId = getPayloadBombSkinId(payload)
-	local visual, rootPart = BombVisualUtil.CreateBombVisual(skinId, CUTSCENE_BOMB_VISUAL_NAME, {
-		anchored = true,
-		canCollide = false,
-		canQuery = false,
-		massless = true,
-		effectState = {
-			vfx = true,
-			fuseSpark = false,
-			trail = false,
-		},
-		visualScale = BombConfig.HeldVisualScale,
-	})
-	visual.Name = CUTSCENE_BOMB_VISUAL_NAME
-	visual.Parent = root
-
-	return visual, rootPart, attachment, handle, if typeof(BombConfig.HeldGripOffset) == "CFrame" then BombConfig.HeldGripOffset else CFrame.new(), placeholders
-end
-
 local function captureAuthoredBombMotor(root: Model, cutsceneSpec)
 	local rig = getCharacterRig(root, cutsceneSpec)
 	local rightArm = rig and rig:FindFirstChild("Right Arm")
@@ -780,6 +598,14 @@ local function restoreAuthoredExternalRigJoints(root: Model, snapshots)
 end
 
 local function getHumanoidDescriptionForUserId(userId: number): HumanoidDescription?
+	local okDescription, description = pcall(function()
+		return Players:GetHumanoidDescriptionFromUserIdAsync(userId)
+	end)
+	if okDescription and description then
+		return description
+	end
+
+	local asyncError = description
 	local okPlayer, player = pcall(function()
 		return Players:GetPlayerByUserId(userId)
 	end)
@@ -798,21 +624,181 @@ local function getHumanoidDescriptionForUserId(userId: number): HumanoidDescript
 		end
 	end
 
-	local ok, description = pcall(function()
-		return Players:GetHumanoidDescriptionFromUserIdAsync(userId)
-	end)
-	if ok and description then
-		return description
-	end
-
 	warn(("[POTGCutsceneController] Failed to get HumanoidDescription for userId %s: %s"):format(
 		tostring(userId),
-		tostring(description)
+		tostring(asyncError)
 	))
 	return nil
 end
 
-local function applyCandidateAppearanceToAuthoredRig(root: Model, cutsceneSpec, payload): Animator?
+local function getDescriptionAccessoryCount(description: HumanoidDescription): number?
+	local ok, accessories = pcall(function()
+		return description:GetAccessories(true)
+	end)
+	if not ok or typeof(accessories) ~= "table" then
+		return nil
+	end
+	return #accessories
+end
+
+local function getAppliedAccessoryCount(humanoid: Humanoid): number?
+	local ok, accessories = pcall(function()
+		return humanoid:GetAccessories()
+	end)
+	if not ok or typeof(accessories) ~= "table" then
+		return nil
+	end
+	return #accessories
+end
+
+local function getAccessoryHandle(accessory: Accessory): BasePart?
+	local handle = accessory:FindFirstChild("Handle")
+	return if handle and handle:IsA("BasePart") then handle else nil
+end
+
+local function getHandleAttachment(handle: BasePart): Attachment?
+	local hairAttachment = handle:FindFirstChild("HairAttachment")
+	if hairAttachment and hairAttachment:IsA("Attachment") then
+		return hairAttachment
+	end
+
+	for _, child in ipairs(handle:GetChildren()) do
+		if child:IsA("Attachment") then
+			return child
+		end
+	end
+
+	return nil
+end
+
+local function getRigAttachment(rig: Model, accessory: Accessory, handleAttachment: Attachment): Attachment?
+	if accessory.AccessoryType == Enum.AccessoryType.Hair or handleAttachment.Name == "HairAttachment" then
+		local head = rig:FindFirstChild("Head")
+		local headHairAttachment = head and head:FindFirstChild("HairAttachment")
+		if headHairAttachment and headHairAttachment:IsA("Attachment") then
+			return headHairAttachment
+		end
+	end
+
+	for _, descendant in ipairs(rig:GetDescendants()) do
+		if descendant == handleAttachment or not descendant:IsA("Attachment") or descendant.Name ~= handleAttachment.Name then
+			continue
+		end
+
+		local parent = descendant.Parent
+		if parent and parent:IsA("BasePart") and not parent:FindFirstAncestorOfClass("Accessory") then
+			return descendant
+		end
+	end
+
+	return nil
+end
+
+local function isValidAccessoryWeld(weld: Instance?, handle: BasePart, targetPart: BasePart): boolean
+	if not (weld and weld:IsA("Weld")) then
+		return false
+	end
+
+	local part0 = weld.Part0
+	local part1 = weld.Part1
+	if not (part0 and part1) then
+		return false
+	end
+
+	local otherPart = if part0 == handle then part1 elseif part1 == handle then part0 else nil
+	return otherPart == targetPart
+end
+
+local function repairAccessoryWeld(rig: Model, accessory: Accessory): boolean
+	local handle = getAccessoryHandle(accessory)
+	if not handle then
+		return false
+	end
+
+	local handleAttachment = getHandleAttachment(handle)
+	if not handleAttachment then
+		return false
+	end
+
+	local rigAttachment = getRigAttachment(rig, accessory, handleAttachment)
+	if not (rigAttachment and rigAttachment.Parent and rigAttachment.Parent:IsA("BasePart")) then
+		return false
+	end
+	local targetPart = rigAttachment.Parent
+
+	local existingWeld = handle:FindFirstChild("AccessoryWeld")
+	if isValidAccessoryWeld(existingWeld, handle, targetPart) then
+		return false
+	end
+
+	if existingWeld then
+		existingWeld:Destroy()
+	end
+
+	local weld = Instance.new("Weld")
+	weld.Name = "AccessoryWeld"
+	weld.Part0 = handle
+	weld.Part1 = targetPart
+	weld.C0 = handleAttachment.CFrame
+	weld.C1 = rigAttachment.CFrame
+	weld.Parent = handle
+	return true
+end
+
+local function repairCandidateAccessoryWelds(rig: Model, humanoid: Humanoid, userId: number)
+	local ok, accessories = pcall(function()
+		return humanoid:GetAccessories()
+	end)
+	if not ok or typeof(accessories) ~= "table" then
+		return
+	end
+
+	for _, accessory in ipairs(accessories) do
+		if accessory:IsA("Accessory") then
+			local repaired = repairAccessoryWeld(rig, accessory)
+			if repaired and DEBUG_CUTSCENE then
+				debugCutscene(
+					"Repaired candidate accessory weld",
+					"userId",
+					tostring(userId),
+					"accessory",
+					accessory.Name,
+					"type",
+					tostring(accessory.AccessoryType)
+				)
+			end
+		end
+	end
+end
+
+local function rebuildHumanoidAccessoryAttachments(humanoid: Humanoid)
+	local ok, err = pcall(function()
+		humanoid:BuildRigFromAttachments()
+	end)
+	if not ok then
+		warn(("[POTGCutsceneController] Failed to rebuild candidate accessory attachments: %s"):format(
+			tostring(err)
+		))
+	end
+end
+
+local function debugCandidateAccessoryApply(userId: number, description: HumanoidDescription, humanoid: Humanoid)
+	if not DEBUG_CUTSCENE then
+		return
+	end
+
+	debugCutscene(
+		"Candidate accessory apply",
+		"userId",
+		tostring(userId),
+		"requested",
+		tostring(getDescriptionAccessoryCount(description)),
+		"applied",
+		tostring(getAppliedAccessoryCount(humanoid))
+	)
+end
+
+local function applyCandidateAppearanceToAuthoredRig(root: Model, cutsceneSpec, payload, serverPreparedTemplate: boolean?): Animator?
 	local userId = getCandidateUserId(payload)
 	local rig = getCharacterRig(root, cutsceneSpec)
 	if not rig then
@@ -824,6 +810,16 @@ local function applyCandidateAppearanceToAuthoredRig(root: Model, cutsceneSpec, 
 		return nil
 	end
 
+	if serverPreparedTemplate == true then
+		local animator = humanoid:FindFirstChildOfClass("Animator")
+		if not animator then
+			animator = Instance.new("Animator")
+			animator.Parent = humanoid
+		end
+		debugCutscene("Using server-applied candidate appearance", "userId", tostring(userId))
+		return animator
+	end
+
 	if userId then
 		local description = getHumanoidDescriptionForUserId(userId)
 		if description then
@@ -832,6 +828,12 @@ local function applyCandidateAppearanceToAuthoredRig(root: Model, cutsceneSpec, 
 			local ok, err = pcall(function()
 				humanoid:ApplyDescriptionResetAsync(description)
 			end)
+			if ok then
+				rebuildHumanoidAccessoryAttachments(humanoid)
+				RunService.Heartbeat:Wait()
+				repairCandidateAccessoryWelds(rig, humanoid, userId)
+				debugCandidateAccessoryApply(userId, description, humanoid)
+			end
 			restoreAuthoredBombMotor(root, cutsceneSpec, bombMotorSnapshot)
 			restoreAuthoredExternalRigJoints(root, externalJointSnapshots)
 			description:Destroy()
@@ -1057,6 +1059,48 @@ local function createAnimationFromSource(root: Instance, rigName: string, animat
 	return nil, nil
 end
 
+local function prewarmAnimationId(animationId: string)
+	if animationId == "" or prewarmedAnimationIds[animationId] then
+		return
+	end
+	prewarmedAnimationIds[animationId] = true
+
+	task.spawn(function()
+		local animation = Instance.new("Animation")
+		animation.Name = "POTGCutscenePrewarm"
+		animation.AnimationId = animationId
+
+		local ok, err = pcall(function()
+			ContentProvider:PreloadAsync({ animation })
+		end)
+		animation:Destroy()
+
+		if not ok then
+			warn(("[POTGCutsceneController] Failed to prewarm animation %s: %s"):format(
+				animationId,
+				tostring(err)
+			))
+		end
+	end)
+end
+
+local function prewarmConfiguredAnimations()
+	for _, cutsceneSpec in pairs(POTGCutsceneConfig.Cutscenes or {}) do
+		for _, animationSource in ipairs({
+			cutsceneSpec.cameraAnimation,
+			cutsceneSpec.characterAnimation,
+		}) do
+			if
+				typeof(animationSource) == "table"
+				and animationSource.type == POTGCutsceneConfig.AnimationSourceTypes.AnimationId
+				and typeof(animationSource.animationId) == "string"
+			then
+				prewarmAnimationId(animationSource.animationId)
+			end
+		end
+	end
+end
+
 local function loadTrack(
 	root: Instance,
 	animator: Animator,
@@ -1070,50 +1114,22 @@ local function loadTrack(
 		return nil
 	end
 
-	if animationSource.type == POTGCutsceneConfig.AnimationSourceTypes.AnimationId then
-		local preloadOk, preloadErr = pcall(function()
-			ContentProvider:PreloadAsync({ animation })
-		end)
-		if not preloadOk then
-			warn(("[POTGCutsceneController] Failed to preload %s animation %s: %s"):format(
-				name,
-				tostring(sourceId),
-				tostring(preloadErr)
-			))
-		end
-	end
-
 	local ok, track = pcall(function()
 		return animator:LoadAnimation(animation)
 	end)
+	animation:Destroy()
 
 	if ok and track then
 		track.Priority = Enum.AnimationPriority.Action
 		track.Looped = false
-		local deadline = os.clock() + ANIMATION_LOAD_TIMEOUT_SECONDS
-		while track.Length <= 0 and os.clock() < deadline do
-			RunService.Heartbeat:Wait()
-		end
-		if track.Length > 0 then
-			animation:Destroy()
-			return track
-		end
-
-		warn(("[POTGCutsceneController] Loaded %s animation with zero length id=%s animator=%s timeout=%.1fs"):format(
-			name,
-			tostring(sourceId),
-			animator:GetFullName(),
-			ANIMATION_LOAD_TIMEOUT_SECONDS
-		))
-		pcall(function()
-			track:Destroy()
-		end)
-		animation:Destroy()
-		return nil
+		return track
 	end
 
-	animation:Destroy()
-	warn(("[POTGCutsceneController] Failed to load %s animation: %s"):format(name, tostring(track)))
+	warn(("[POTGCutsceneController] Failed to load %s animation id=%s: %s"):format(
+		name,
+		tostring(sourceId),
+		tostring(track)
+	))
 	return nil
 end
 
@@ -1170,6 +1186,43 @@ local function resumeCutsceneTracks(tracks: { AnimationTrack })
 			warn(("[POTGCutsceneController] Failed to resume animation track %s: %s"):format(track.Name, tostring(err)))
 		end
 	end
+end
+
+local function getTrackHoldLength(record: TrackHoldRecord): number
+	if record.length <= 0 and record.track.Length > 0 then
+		record.length = record.track.Length
+	end
+	return record.length
+end
+
+local function buildTrackHoldRecords(tracks: { AnimationTrack }): { TrackHoldRecord }
+	local records = {}
+	for index, track in ipairs(tracks) do
+		table.insert(records, {
+			track = track,
+			name = if track.Name ~= "" then track.Name else "Track" .. tostring(index),
+			length = math.max(track.Length, 0),
+			held = false,
+		})
+	end
+	return records
+end
+
+local function getTrackHoldRecord(records: { TrackHoldRecord }, track: AnimationTrack): TrackHoldRecord?
+	for _, record in ipairs(records) do
+		if record.track == track then
+			return record
+		end
+	end
+	return nil
+end
+
+local function getLongestTrackHoldLength(records: { TrackHoldRecord }): number
+	local longest = 0
+	for _, record in ipairs(records) do
+		longest = math.max(longest, getTrackHoldLength(record))
+	end
+	return longest
 end
 
 local function debugCutscenePlacement(
@@ -1282,14 +1335,19 @@ local function getTimelineValue(keys, elapsed: number): number
 		local previousKey = keys[index - 1]
 		local nextKey = keys[index]
 		if elapsed < nextKey.time then
-			if not previousKey.easingStyle or previousKey.easingStyle == "Constant" then
+			if previousKey.easingStyle == "Constant" then
 				return previousKey.value
 			end
 
 			local duration = math.max(nextKey.time - previousKey.time, 0.001)
 			local alpha = math.clamp((elapsed - previousKey.time) / duration, 0, 1)
-			alpha =
-				TweenService:GetValue(alpha, previousKey.easingStyle, previousKey.easingDirection or Enum.EasingDirection.Out)
+			if previousKey.easingStyle then
+				alpha = TweenService:GetValue(
+					alpha,
+					previousKey.easingStyle,
+					previousKey.easingDirection or Enum.EasingDirection.Out
+				)
+			end
 			return previousKey.value + (nextKey.value - previousKey.value) * alpha
 		end
 	end
@@ -1309,12 +1367,16 @@ local function resolveCutscenePath(root: Instance, path: string): Instance?
 end
 
 local function getCFrameTrackAlpha(previousKey, nextKey, elapsed: number): number
-	if not previousKey.easingStyle or previousKey.easingStyle == "Constant" then
+	if previousKey.easingStyle == "Constant" then
 		return 0
 	end
 
 	local duration = math.max(nextKey.time - previousKey.time, 0.001)
 	local alpha = math.clamp((elapsed - previousKey.time) / duration, 0, 1)
+	if not previousKey.easingStyle then
+		return alpha
+	end
+
 	return TweenService:GetValue(alpha, previousKey.easingStyle, previousKey.easingDirection or Enum.EasingDirection.Out)
 end
 
@@ -1393,7 +1455,7 @@ local function buildMotionRecords(root: Model, cutsceneSpec): { any }
 				else nil,
 			targetWorldPivotCFrame = nil,
 			lastKeyTime = getLastMotionKeyTime(track.keys),
-			holdFinalWorldCFrame = track.holdFinalWorldCFrame ~= false,
+			holdFinalWorldCFrame = track.apply ~= "LocalCFrame" and track.holdFinalWorldCFrame ~= false,
 			finalWorldCFrame = nil,
 		})
 	end
@@ -1571,42 +1633,6 @@ local function updateCutsceneProperties(active: ActiveCutscene, camera: Camera, 
 	end
 end
 
-local function updateCutsceneBombVisual(active: ActiveCutscene)
-	local visual = active.bombVisual
-	local rootPart = active.bombVisualRoot
-	if not (visual and visual.Parent and rootPart and rootPart.Parent) then
-		return
-	end
-
-	local sourceCFrame: CFrame? = nil
-	local attachment = active.bombAttachment
-	if attachment and attachment.Parent then
-		sourceCFrame = attachment.WorldCFrame
-	end
-
-	if not sourceCFrame then
-		local handle = active.bombHandle
-		if handle and handle.Parent then
-			sourceCFrame = handle.CFrame
-		end
-	end
-
-	if not sourceCFrame then
-		return
-	end
-
-	local rootCFrame = sourceCFrame * active.bombGripOffset:Inverse()
-	if visual:IsA("Model") then
-		visual:PivotTo(rootCFrame)
-	elseif visual:IsA("BasePart") then
-		visual.CFrame = rootCFrame
-	else
-		rootPart.CFrame = rootCFrame
-	end
-	rootPart.AssemblyLinearVelocity = Vector3.zero
-	rootPart.AssemblyAngularVelocity = Vector3.zero
-end
-
 local function getCameraBoneMotor(cameraBone: BasePart): Motor6D?
 	local preferred = cameraBone:FindFirstChild("cameraMotor6D")
 	if preferred and preferred:IsA("Motor6D") and preferred.Part0 and preferred.Part1 == cameraBone then
@@ -1634,8 +1660,56 @@ local function getAnimatedCameraBoneCFrame(cameraBone: BasePart): CFrame
 	return cameraBone.CFrame
 end
 
+local function holdTrackAtFinalPose(active: ActiveCutscene, record: TrackHoldRecord)
+	if record.held then
+		return
+	end
+
+	local track = record.track
+	local trackLength = getTrackHoldLength(record)
+	if track and trackLength > 0 then
+		pcall(function()
+			track.TimePosition = math.max(trackLength - TRACK_FINAL_POSE_OFFSET_SECONDS, 0)
+			track:AdjustSpeed(0)
+		end)
+	end
+	record.held = true
+
+	debugCutscene(
+		"Animation track held",
+		"cutsceneId",
+		tostring(active.cutsceneSpec.id),
+		"track",
+		record.name,
+		"trackLength",
+		string.format("%.3f", trackLength)
+	)
+end
+
+local function holdExpiredCutsceneTracks(active: ActiveCutscene, elapsed: number)
+	for _, record in ipairs(active.heldTracks) do
+		local trackLength = getTrackHoldLength(record)
+		if trackLength > 0 and elapsed >= math.max(trackLength - TRACK_HOLD_LEAD_SECONDS, 0) then
+			holdTrackAtFinalPose(active, record)
+		end
+	end
+end
+
 local function attachCameraToCameraBone(active: ActiveCutscene, camera: Camera, elapsed: number)
-	local cameraCFrame = getAnimatedCameraBoneCFrame(active.cameraBone)
+	local cameraTrackHold = active.cameraTrackHold
+	local cameraTrackLength = if cameraTrackHold then getTrackHoldLength(cameraTrackHold) else 0
+	local shouldHoldCamera = if cameraTrackHold
+		then cameraTrackHold.held or (cameraTrackLength > 0 and elapsed >= math.max(cameraTrackLength - TRACK_HOLD_LEAD_SECONDS, 0))
+		else false
+	local cameraCFrame
+	if shouldHoldCamera then
+		cameraCFrame = active.cameraHoldCFrame or getAnimatedCameraBoneCFrame(active.cameraBone)
+		active.cameraHoldCFrame = cameraCFrame
+	else
+		cameraCFrame = getAnimatedCameraBoneCFrame(active.cameraBone)
+		active.cameraHoldCFrame = cameraCFrame
+	end
+
 	LocalPlayer:SetAttribute(CAMERA_SPECTATING_ATTR, true)
 	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 	UserInputService.MouseIconEnabled = true
@@ -1645,6 +1719,9 @@ local function attachCameraToCameraBone(active: ActiveCutscene, camera: Camera, 
 	updateCutsceneProperties(active, camera, elapsed)
 end
 
+local getMoonVFXModule
+local invokeVFXMethod
+
 local function emitCutsceneEffect(active: ActiveCutscene, effectName: string): boolean
 	local effect = active.clone:FindFirstChild(effectName) or active.clone:FindFirstChild(effectName, true)
 	if not effect then
@@ -1653,7 +1730,7 @@ local function emitCutsceneEffect(active: ActiveCutscene, effectName: string): b
 	end
 
 	local handler = getMoonVFXModule()
-	if invokeVFXMethod(handler, "Emit", effect) then
+	if type(invokeVFXMethod) == "function" and invokeVFXMethod(handler, "Emit", effect) then
 		return true
 	end
 
@@ -1863,7 +1940,7 @@ local function parseImpactFramesFromCode(code: string): (number?, Color3?)
 	return frames, Color3.fromRGB(tonumber(r) or 0, tonumber(g) or 0, tonumber(b) or 0)
 end
 
-local function getMoonVFXModule(): any?
+function getMoonVFXModule(): any?
 	if checkedForMoonVFXModule then
 		return moonVFXModule
 	end
@@ -1931,7 +2008,7 @@ local function ensureMoonVFXInitialized(): boolean
 	return moonVFXModuleInitialized
 end
 
-local function invokeVFXMethod(module: any, methodName: string, ...): boolean
+function invokeVFXMethod(module: any, methodName: string, ...): boolean
 	if module == moonVFXModule and not moonVFXModuleInitialized then
 		ensureMoonVFXInitialized()
 	end
@@ -2300,7 +2377,6 @@ function POTGCutsceneController:_beginPlayback(active: ActiveCutscene)
 	)
 
 	applyCutsceneMotion(active, 0)
-	updateCutsceneBombVisual(active)
 	attachCameraToCameraBone(active, camera, 0)
 
 	self:_unbindCamera()
@@ -2318,8 +2394,8 @@ function POTGCutsceneController:_beginPlayback(active: ActiveCutscene)
 		local currentCamera = workspace.CurrentCamera
 		if currentCamera and active.cameraBone.Parent then
 			local elapsed = math.max(os.clock() - active.playbackStartedAt, 0)
+			holdExpiredCutsceneTracks(active, elapsed)
 			applyCutsceneMotion(active, elapsed)
-			updateCutsceneBombVisual(active)
 			attachCameraToCameraBone(active, currentCamera, elapsed)
 		else
 			self:_finish(active, false)
@@ -2361,7 +2437,7 @@ function POTGCutsceneController:_play(payload)
 	local cutsceneSpec = POTGCutsceneConfig.GetCutscene(
 		if typeof(payload) == "table" then payload.cutsceneId else POTGCutsceneConfig.DefaultCutsceneId
 	)
-	local template = getCutsceneTemplate(cutsceneSpec)
+	local template, serverPreparedTemplate = getCutsceneTemplate(cutsceneSpec, payload)
 	local camera = workspace.CurrentCamera
 	if not template or not camera then
 		warn(("[POTGCutsceneController] Missing cutscene template %s or CurrentCamera"):format(
@@ -2373,16 +2449,21 @@ function POTGCutsceneController:_play(payload)
 		return
 	end
 
-	waitForHighlightIntroReady(template, cutsceneSpec)
+	if not validateHighlightIntroTemplate(template, cutsceneSpec) then
+		if isRoundIntro then
+			self:_reportPayloadCompletion(payload, "InvalidTemplate")
+		end
+		return
+	end
+
 	local clone = cloneCutsceneTemplate(template)
 	forceNonLoopingCutsceneAnimations(clone)
-	prepCutsceneClone(clone)
-	hideCameraRigVisuals(clone, cutsceneSpec)
 	clone.Parent = getCutsceneFolder()
 
 	local cameraBone = getCameraPart(clone, cutsceneSpec)
 	local camRigAnimator = getAnimationControllerAnimatorFromRig(clone, cutsceneSpec.cameraRigName)
-	local characterAnimator = if isRoundIntro then applyCandidateAppearanceToAuthoredRig(clone, cutsceneSpec, payload) else nil
+	local characterAnimator =
+		if isRoundIntro then applyCandidateAppearanceToAuthoredRig(clone, cutsceneSpec, payload, serverPreparedTemplate) else nil
 	characterAnimator = characterAnimator or getHumanoidAnimatorFromRig(clone, cutsceneSpec.characterRigName)
 	if not (cameraBone and camRigAnimator and characterAnimator) then
 		warnMissingCutsceneRequirements(cutsceneSpec, clone, cameraBone, camRigAnimator, characterAnimator)
@@ -2392,6 +2473,7 @@ function POTGCutsceneController:_play(payload)
 		end
 		return
 	end
+
 	prepCutsceneClone(clone)
 	hideCameraRigVisuals(clone, cutsceneSpec)
 	local targetCameraCFrame = if isRoundIntro then getCFrameValue(payload.cameraCFrame) else nil
@@ -2444,6 +2526,8 @@ function POTGCutsceneController:_play(payload)
 	table.insert(tracks, camTrack)
 	table.insert(tracks, characterTrack)
 	primeCutsceneTracks(tracks)
+	local heldTracks = buildTrackHoldRecords(tracks)
+	local cameraTrackHold = getTrackHoldRecord(heldTracks, camTrack)
 
 	local motionSourcePivot = getMotionSourcePivot(clone, cutsceneSpec)
 	local placementAnchor: BasePart? = nil
@@ -2453,8 +2537,6 @@ function POTGCutsceneController:_play(payload)
 	local motionTargetPivotPart = getCutscenePivotPart(clone, cutsceneSpec)
 	local motionTargetPivot = getMotionTargetPivot(clone, cutsceneSpec, placementAnchor)
 	local motionRecords = buildMotionRecords(clone, cutsceneSpec)
-	local bombVisual, bombVisualRoot, bombAttachment, bombHandle, bombGripOffset, authoredBombPlaceholders =
-		createCutsceneBombVisual(clone, cutsceneSpec, payload)
 	debugCutscenePlacement(clone, cutsceneSpec, cameraBone, placementAnchor, tracks, "Frame-0 placement")
 
 	local overlayGui, overlayFrame = createOverlay()
@@ -2463,11 +2545,12 @@ function POTGCutsceneController:_play(payload)
 	local completionRemote = if isRoundIntro then self._roundIntroCompleteRemote or getRoundIntroCompleteRemote() else nil
 	self._roundIntroCompleteRemote = completionRemote or self._roundIntroCompleteRemote
 
-	local cameraTrackLength = camTrack.Length
+	local cameraTrackLength = if cameraTrackHold then getTrackHoldLength(cameraTrackHold) else math.max(camTrack.Length, 0)
+	local longestTrackLength = getLongestTrackHoldLength(heldTracks)
 	local durationSeconds = if cutsceneSpec.durationSeconds > 0
 		then cutsceneSpec.durationSeconds
-		elseif cameraTrackLength > 0
-		then cameraTrackLength + 0.5
+		elseif longestTrackLength > 0
+		then longestTrackLength + 0.5
 		else FALLBACK_DURATION_SECONDS
 	debugCutscene(
 		"Prepared",
@@ -2477,6 +2560,8 @@ function POTGCutsceneController:_play(payload)
 		string.format("%.2f", durationSeconds),
 		"cameraTrackLength",
 		string.format("%.2f", cameraTrackLength),
+		"longestTrackLength",
+		string.format("%.2f", longestTrackLength),
 		"cutsceneId",
 		tostring(cutsceneSpec.id)
 	)
@@ -2485,12 +2570,6 @@ function POTGCutsceneController:_play(payload)
 		clone = clone,
 		cutsceneSpec = cutsceneSpec,
 		cameraBone = cameraBone :: BasePart,
-		bombVisual = bombVisual,
-		bombVisualRoot = bombVisualRoot,
-		bombAttachment = bombAttachment,
-		bombHandle = bombHandle,
-		bombGripOffset = bombGripOffset,
-		authoredBombPlaceholders = authoredBombPlaceholders,
 		placementAnchor = placementAnchor,
 		dofEffect = dofEffect,
 		motionSourcePivot = motionSourcePivot,
@@ -2503,6 +2582,9 @@ function POTGCutsceneController:_play(payload)
 		fadeTween = nil,
 		connections = {},
 		tracks = tracks,
+		heldTracks = heldTracks,
+		cameraTrackHold = cameraTrackHold,
+		cameraHoldCFrame = nil,
 		endAt = math.huge,
 		durationSeconds = durationSeconds,
 		playbackStartedAt = 0,
@@ -2520,7 +2602,6 @@ function POTGCutsceneController:_play(payload)
 	local preparedCamera = workspace.CurrentCamera
 	if preparedCamera and active.cameraBone.Parent then
 		applyCutsceneMotion(active, 0)
-		updateCutsceneBombVisual(active)
 		attachCameraToCameraBone(active, preparedCamera, 0)
 	end
 	self._active = active
@@ -2579,6 +2660,8 @@ function POTGCutsceneController:OnStart()
 		self._characterRemovingConnection:Disconnect()
 		self._characterRemovingConnection = nil
 	end
+
+	prewarmConfiguredAnimations()
 
 	self._remote = getRemote()
 	if self._remote then

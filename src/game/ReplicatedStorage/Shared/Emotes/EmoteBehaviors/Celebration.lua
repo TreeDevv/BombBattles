@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Celebration = EmoteEffect.Create("Celebration", { catalogOrder = 6 })
+local Celebration = EmoteEffect.Create("Celebration", { catalogOrder = 7, rarity = "Mythic" })
 
 function Celebration:Begin(_character: Model, runtime)
 	local root = runtime:GetRoot()

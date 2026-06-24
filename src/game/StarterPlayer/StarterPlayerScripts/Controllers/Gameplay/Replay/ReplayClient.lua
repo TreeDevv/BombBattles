@@ -59,6 +59,7 @@ ReplayClient._activeReplay = nil
 ReplayClient._replayBuildInProgress = false
 ReplayClient._pendingKillReplayPayload = nil
 ReplayClient._pendingKillReplayKey = nil
+ReplayClient._pendingLocalKillReplayKey = nil
 ReplayClient._killReplayFadeSerial = 0
 ReplayClient._visualsEnabled = nil
 ReplayClient._boundRemotes = {}
@@ -78,25 +79,21 @@ local REPLAY_RENDER_PRIORITY = Enum.RenderPriority.Last.Value + 1
 local LOCAL_REPLAY_ATTR = "BombBattlesLocalReplay"
 local REPLAY_ASSETS_FOLDER_NAME = "ReplayAssets"
 local REPLAY_VISUALS_ENABLED_ATTR = "ReplayVisualsEnabled"
+local CAMERA_SPECTATING_ATTR = "Camera_Spectating"
 local BASE_BOMB_SIZE = Vector3.new(1.4, 1.4, 1.4)
 local MAX_REPLAY_DURATION_SECONDS = 12
 local MAX_REPLAY_WALL_SECONDS = MAX_REPLAY_DURATION_SECONDS + 4
 local MAX_REPLAY_OBJECTS = 720
 local MAX_KILL_REPLAY_PLAYER_VISUALS = 6
 local MAX_POTG_REPLAY_PLAYER_VISUALS = 10
+local MAX_KILL_REPLAY_BOMB_VISUALS = 12
+local MAX_POTG_REPLAY_BOMB_VISUALS = 32
 local MAX_EVENT_VISUALS = 160
 local MAX_EVENTS_PER_STEP = 12
 local EXPLOSION_VFX_CLEANUP_SECONDS = 4
 local BURST_MARKER_LIFETIME = 0.45
 local CAMERA_SMOOTH_RESPONSIVENESS = 8
 local CAMERA_DEFAULT_FOV = 72
-local CAMERA_BOMB_FOV = 74
-local CAMERA_IMPACT_FOV = 78
-local KILLCAM_SLOW_MO_WINDOW = 0.85
-local KILLCAM_SLOW_MO_SCALE = 0.45
-local KILLCAM_KILLER_INTRO_SECONDS = 0.75
-local KILLCAM_IMPACT_FOCUS_SECONDS = 1.15
-local KILLCAM_BOMB_FOLLOW_END_LEAD = 0.65
 local ANIMATION_STATE_SEND_RATE = 15
 local ANIMATION_STATE_SEND_INTERVAL = 1 / ANIMATION_STATE_SEND_RATE
 local MAX_AVATAR_TEMPLATE_CACHE = 32
@@ -1303,6 +1300,7 @@ local function preprocessEvents(rawEvents, startTime: number, endTime: number)
 end
 local findKillTimestamp = ReplayPayloadPrep.FindKillTimestamp
 local collectExplosionPositions = ReplayPayloadPrep.CollectExplosionPositions
+local collectReplayMeta = ReplayPayloadPrep.CollectReplayMeta
 local collectPlayerMeta = ReplayPayloadPrep.CollectPlayerMeta
 local preloadAvatarTemplates = ReplayPayloadPrep.PrewarmAvatarTemplates
 local collectBombMeta = ReplayPayloadPrep.CollectBombMeta
@@ -1365,7 +1363,7 @@ local function createScene(): Folder
 	local existing = workspace:FindFirstChild(SCENE_NAME)
 	local sceneName = SCENE_NAME
 	if existing and existing:GetAttribute(LOCAL_REPLAY_ATTR) == true then
-		existing:Destroy()
+		ReplayMapSimulator.ScheduleDestroyScene(existing, "ExistingScene")
 	elseif existing then
 		sceneName = SCENE_NAME .. "_" .. tostring(LocalPlayer.UserId)
 	end
@@ -1436,6 +1434,7 @@ local function captureCameraState()
 		cframe = camera.CFrame,
 		focus = camera.Focus,
 		fieldOfView = camera.FieldOfView,
+		wasSpectating = LocalPlayer:GetAttribute(CAMERA_SPECTATING_ATTR),
 	}
 end
 
@@ -1445,12 +1444,17 @@ local function getFallbackCameraSubject(): Instance?
 end
 
 local function restoreCamera(state, forceCharacterCamera: boolean?)
+	local cameraState = state and state.cameraState
+	local wasSpectating = if cameraState then cameraState.wasSpectating else state and state.previousCameraSpectating
+	if state then
+		LocalPlayer:SetAttribute(CAMERA_SPECTATING_ATTR, wasSpectating == true)
+	end
+
 	local camera = workspace.CurrentCamera
 	if not camera then
 		return
 	end
 
-	local cameraState = state and state.cameraState
 	if not cameraState then
 		return
 	end
@@ -1791,91 +1795,95 @@ local function getReplayEventPhase(event): string
 	return EVENT_PHASE_PRE_IMPACT
 end
 
-local function refreshNextReplayEventIndex(state)
-	local events = state.events
+function ReplayClient.BuildReplayEventQueues(events)
 	if typeof(events) ~= "table" then
-		state.nextEventIndex = 1
-		return
+		return {
+			[EVENT_PHASE_PRE_IMPACT] = {},
+			[EVENT_PHASE_IMPACT] = {},
+			[EVENT_PHASE_POST_IMPACT] = {},
+		}, 0
 	end
 
-	local firedEventIndices = state.firedEventIndices
-	local index = 1
-	while index <= #events and typeof(firedEventIndices) == "table" and firedEventIndices[index] == true do
-		index += 1
+	local queues = {
+		[EVENT_PHASE_PRE_IMPACT] = {},
+		[EVENT_PHASE_IMPACT] = {},
+		[EVENT_PHASE_POST_IMPACT] = {},
+	}
+	local total = 0
+	for _, event in ipairs(events) do
+		if typeof(event) == "table" then
+			local phase = getReplayEventPhase(event)
+			table.insert(queues[phase], event)
+			total += 1
+		end
 	end
-	state.nextEventIndex = index
+	return queues, total
 end
 
 local function hasPendingReplayEvents(state): boolean
-	local events = state.events
-	if typeof(events) ~= "table" then
-		return false
-	end
-
-	local firedEventIndices = state.firedEventIndices
-	for index = 1, #events do
-		if not (typeof(firedEventIndices) == "table" and firedEventIndices[index] == true) then
-			return true
-		end
+	if typeof(state) == "table" and isFiniteNumber(state.pendingEventCount) then
+		return state.pendingEventCount > 0
 	end
 	return false
 end
 
 local function fireDueReplayEvents(state, replayTime: number, phase: string)
-	local events = state.events
+	local queues = state.eventQueues
+	local events = if typeof(queues) == "table" then queues[phase] else state.events
 	if typeof(events) ~= "table" then
-		return
+		return 0
 	end
 
-	if typeof(state.firedEventIndices) ~= "table" then
-		state.firedEventIndices = {}
+	if typeof(state.nextEventIndicesByPhase) ~= "table" then
+		state.nextEventIndicesByPhase = {}
 	end
-	local firedEventIndices = state.firedEventIndices
+	local nextEventIndicesByPhase = state.nextEventIndicesByPhase
+	local index = if isFiniteNumber(nextEventIndicesByPhase[phase])
+		then math.max(math.floor(nextEventIndicesByPhase[phase]), 1)
+		else 1
 	local fired = 0
-	for index, event in ipairs(events) do
+	while index <= #events do
 		if fired >= MAX_EVENTS_PER_STEP then
 			break
 		end
-		if firedEventIndices[index] == true then
-			continue
-		end
 
+		local event = events[index]
 		local timestamp = getEventTimestamp(event)
 		if timestamp and timestamp > replayTime then
 			break
 		end
-		if getReplayEventPhase(event) ~= phase then
-			continue
-		end
 
-		firedEventIndices[index] = true
+		index += 1
+		if isFiniteNumber(state.pendingEventCount) then
+			state.pendingEventCount = math.max(state.pendingEventCount - 1, 0)
+		end
 		fired += 1
 		playReplayEvent(event)
 	end
-	refreshNextReplayEventIndex(state)
+	nextEventIndicesByPhase[phase] = index
+	return fired
 end
 
-local function getFirstVisiblePlayerPosition(state): Vector3?
+local function getFallbackReplayCameraVisual(state)
+	for _, userId in ipairs({
+		state.cameraUserId,
+		state.killerUserId,
+		state.playerUserId,
+		state.victimUserId,
+	}) do
+		local key = getUserIdKey(userId)
+		local visual = key and state.playerVisuals[key]
+		if visual and getVisualPosition(visual) then
+			return visual
+		end
+	end
+
 	for _, visual in pairs(state.playerVisuals) do
-		local position = getVisualPosition(visual)
-		if position then
-			return position
+		if getVisualPosition(visual) then
+			return visual
 		end
 	end
 	return nil
-end
-
-local function getReplayPlaybackSpeed(state, replayTime: number): number
-	local killTimestamp = state.killTimestamp
-	if not isFiniteNumber(killTimestamp) then
-		return 1
-	end
-
-	if math.abs(replayTime - killTimestamp) <= KILLCAM_SLOW_MO_WINDOW then
-		return KILLCAM_SLOW_MO_SCALE
-	end
-
-	return 1
 end
 
 local function updateReplayCamera(state)
@@ -1886,25 +1894,30 @@ local function updateReplayCamera(state)
 
 	camera.CameraType = Enum.CameraType.Scriptable
 
-	local victimPosition = if state.victimUserId then getVisualPosition(state.playerVisuals[tostring(state.victimUserId)]) else nil
-	local killerPosition = if state.killerUserId then getVisualPosition(state.playerVisuals[tostring(state.killerUserId)]) else nil
-	local focus = victimPosition or killerPosition or getFirstVisiblePlayerPosition(state) or Vector3.zero
-	if victimPosition and killerPosition then
-		focus = victimPosition:Lerp(killerPosition, 0.42)
+	local visual = getFallbackReplayCameraVisual(state)
+	local position = getVisualPosition(visual)
+	if not position then
+		local lookAt = Vector3.new(0, 2, 0)
+		camera.CFrame = CFrame.lookAt(Vector3.new(0, 6, 12), lookAt)
+		camera.Focus = CFrame.new(lookAt)
+		camera.FieldOfView = CAMERA_DEFAULT_FOV
+		return
 	end
 
-	local direction = Vector3.new(0.65, 0, 1)
-	if victimPosition and killerPosition then
-		local delta = victimPosition - killerPosition
-		if delta.Magnitude > 0.05 then
-			direction = delta.Unit
-		end
+	local visualCFrame = getVisualCFrame(visual)
+	local direction = if visualCFrame then Vector3.new(visualCFrame.LookVector.X, 0, visualCFrame.LookVector.Z) else Vector3.new(0, 0, 1)
+	if direction.Magnitude <= 0.05 then
+		direction = Vector3.new(0, 0, 1)
+	else
+		direction = direction.Unit
 	end
 
-	local lookAt = focus + Vector3.new(0, 1.8, 0)
-	local cameraPosition = lookAt - direction * 18 + Vector3.new(0, 8, 0)
+	local side = Vector3.new(-direction.Z, 0, direction.X)
+	local lookAt = position + Vector3.new(0, 2.1, 0)
+	local cameraPosition = lookAt - direction * 11 + side * 1.35 + Vector3.new(0, 4.5, 0)
 	camera.CFrame = CFrame.lookAt(cameraPosition, lookAt)
 	camera.Focus = CFrame.new(lookAt)
+	camera.FieldOfView = CAMERA_DEFAULT_FOV
 end
 
 local function getRawCameraSampleTime(snapshot): number?
@@ -2060,6 +2073,10 @@ function ReplayClient.IsSameActiveReplay(activeReplay, payload): boolean
 	return activeReplay.victimUserId == payload.victimUserId
 end
 
+function ReplayClient:HasPendingLocalKillReplay(): boolean
+	return self._pendingLocalKillReplayKey ~= nil
+end
+
 function ReplayClient.BuildReplaySignalPayloadFromState(state, reason: string)
 	return {
 		type = state and state.replayType,
@@ -2139,6 +2156,7 @@ end
 
 function ReplayClient:CancelReplay(reason: string?)
 	self._killReplayFadeSerial += 1
+	self._pendingLocalKillReplayKey = nil
 	local state = self._activeReplay
 	self._activeReplay = nil
 	if not state then
@@ -2193,7 +2211,7 @@ function ReplayClient:CancelReplay(reason: string?)
 	end
 	if state.scene then
 		pcall(function()
-			state.scene:Destroy()
+			ReplayMapSimulator.ScheduleDestroyScene(state.scene, tostring(reason or "ReplayEnded"))
 		end)
 	end
 
@@ -2221,6 +2239,8 @@ function ReplayClient:_getStateBuilderDeps()
 		maxReplayObjects = MAX_REPLAY_OBJECTS,
 		maxKillReplayPlayerVisuals = MAX_KILL_REPLAY_PLAYER_VISUALS,
 		maxPOTGReplayPlayerVisuals = MAX_POTG_REPLAY_PLAYER_VISUALS,
+		maxKillReplayBombVisuals = MAX_KILL_REPLAY_BOMB_VISUALS,
+		maxPOTGReplayBombVisuals = MAX_POTG_REPLAY_BOMB_VISUALS,
 		createScene = createScene,
 		takePreparedSceneContext = function(payload)
 			return ReplayMapSimulator.TakePreparedScene(payload)
@@ -2231,9 +2251,11 @@ function ReplayClient:_getStateBuilderDeps()
 		getBombKey = getBombKey,
 		findKillTimestamp = findKillTimestamp,
 		findImpactPosition = findImpactPosition,
+		buildReplayEventQueues = ReplayClient.BuildReplayEventQueues,
 		hasRecordedCameraForUser = hasRecordedCameraForUser,
 		createOverlay = createOverlay,
 		captureCameraState = captureCameraState,
+		collectReplayMeta = collectReplayMeta,
 		collectPlayerMeta = collectPlayerMeta,
 		preloadAvatarTemplates = preloadAvatarTemplates,
 		collectBombMeta = collectBombMeta,
@@ -2248,11 +2270,6 @@ function ReplayClient:_getStateBuilderDeps()
 			getVisualCFrame = getVisualCFrame,
 			cameraSmoothResponsiveness = CAMERA_SMOOTH_RESPONSIVENESS,
 			cameraDefaultFov = CAMERA_DEFAULT_FOV,
-			cameraBombFov = CAMERA_BOMB_FOV,
-			cameraImpactFov = CAMERA_IMPACT_FOV,
-			killcamKillerIntroSeconds = KILLCAM_KILLER_INTRO_SECONDS,
-			killcamImpactFocusSeconds = KILLCAM_IMPACT_FOCUS_SECONDS,
-			killcamBombFollowEndLead = KILLCAM_BOMB_FOLLOW_END_LEAD,
 		},
 	}
 end
@@ -2341,8 +2358,7 @@ function ReplayClient:_stepReplay(state, deltaTime: number?)
 		return
 	end
 
-	local speedScale = if state.hasRecordedCamera then 1 else getReplayPlaybackSpeed(state, state.playhead)
-	state.playhead = math.min(state.playhead + resolvedDeltaTime * speedScale, state.endTime)
+	state.playhead = math.min(state.playhead + resolvedDeltaTime, state.endTime)
 	local replayTime = state.playhead
 	local left, right, nextIndex, alpha = findFramePair(state.frames, replayTime, state.frameIndex)
 	state.frameIndex = nextIndex
@@ -2358,15 +2374,21 @@ function ReplayClient:_stepReplay(state, deltaTime: number?)
 	fireDueReplayEvents(state, replayTime, EVENT_PHASE_PRE_IMPACT)
 	RuntimeProfiler.End("Client/Replay/FireEvents/PreImpact", preEventToken)
 	local impactEventToken = RuntimeProfiler.Begin("Client/Replay/FireEvents/Impact")
-	fireDueReplayEvents(state, replayTime, EVENT_PHASE_IMPACT)
+	local impactEventsFired = fireDueReplayEvents(state, replayTime, EVENT_PHASE_IMPACT)
 	RuntimeProfiler.End("Client/Replay/FireEvents/Impact", impactEventToken)
-	local destructionToken = RuntimeProfiler.Begin("Client/Replay/ApplyDestructionEvents")
-	state.nextDestructionIndex =
-		ReplayMapSimulator.ApplyEventsUpTo(state.mapContext, state.destructionEvents, replayTime, state.nextDestructionIndex, {
-			spawnDebris = true,
-			maxEvents = ReplayMapSimulator.GetMaxDestructionEventsPerStep(),
-		})
-	RuntimeProfiler.End("Client/Replay/ApplyDestructionEvents", destructionToken)
+	local shouldApplyDestruction = state.replayType ~= "KillReplay"
+	if shouldApplyDestruction then
+		local destructionToken = RuntimeProfiler.Begin("Client/Replay/ApplyDestructionEvents")
+		state.nextDestructionIndex =
+			ReplayMapSimulator.ApplyEventsUpTo(state.mapContext, state.destructionEvents, replayTime, state.nextDestructionIndex, {
+				spawnDebris = true,
+				maxEvents = ReplayMapSimulator.GetMaxDestructionEventsPerStep(),
+			})
+		RuntimeProfiler.End("Client/Replay/ApplyDestructionEvents", destructionToken)
+	elseif typeof(state.destructionEvents) == "table" and state.nextDestructionIndex <= #state.destructionEvents then
+		RuntimeProfiler.Count("Client/Replay/Death/DestructionSuppressed", #state.destructionEvents - state.nextDestructionIndex + 1)
+		state.nextDestructionIndex = #state.destructionEvents + 1
+	end
 	local postEventToken = RuntimeProfiler.Begin("Client/Replay/FireEvents/PostImpact")
 	fireDueReplayEvents(state, replayTime, EVENT_PHASE_POST_IMPACT)
 	RuntimeProfiler.End("Client/Replay/FireEvents/PostImpact", postEventToken)
@@ -2381,6 +2403,11 @@ function ReplayClient:_stepReplay(state, deltaTime: number?)
 
 	local destructionPending = typeof(state.destructionEvents) == "table"
 		and state.nextDestructionIndex <= #state.destructionEvents
+	if state.replayType == "KillReplay" and state.playhead >= state.endTime and destructionPending then
+		RuntimeProfiler.Count("Client/Replay/Death/SkippedEndDestructionEvents", #state.destructionEvents - state.nextDestructionIndex + 1)
+		state.nextDestructionIndex = #state.destructionEvents + 1
+		destructionPending = false
+	end
 	if
 		state.replayType == "POTGReplay"
 		and state.potgEndFadeStarted ~= true
@@ -2426,7 +2453,7 @@ function ReplayClient:GetActiveReplayDebugInfo()
 		playhead = state.playhead,
 		events = if typeof(state.events) == "table" then #state.events else 0,
 		eventsPending = hasPendingReplayEvents(state),
-		nextEventIndex = state.nextEventIndex,
+		eventCursors = state.nextEventIndicesByPhase,
 		destructionEvents = if typeof(state.destructionEvents) == "table" then #state.destructionEvents else 0,
 		map = ReplayMapSimulator.GetDebugInfo(state.mapContext),
 	}
@@ -2477,6 +2504,8 @@ function ReplayClient:PlayReplay(payload): boolean
 		self._explosionVfxBudget.heartbeatCount = 0
 
 		started = true
+		state.previousCameraSpectating = if state.cameraState then state.cameraState.wasSpectating else LocalPlayer:GetAttribute(CAMERA_SPECTATING_ATTR)
+		LocalPlayer:SetAttribute(CAMERA_SPECTATING_ATTR, true)
 		ReplayClient.DebugReplayClient(
 			"Replay started",
 			state.replayType,
@@ -2557,6 +2586,7 @@ function ReplayClient:ReceiveKillReplay(payload)
 
 	self._killReplayFadeSerial += 1
 	local serial = self._killReplayFadeSerial
+	self._pendingLocalKillReplayKey = ReplayClient.GetReplayPayloadKey(payload) or tostring(serial)
 	task.defer(function()
 		if not ScreenEffects.IsBlack(0.01) then
 			if ScreenEffects.FadeToBlack(0.25) then
@@ -2568,11 +2598,13 @@ function ReplayClient:ReceiveKillReplay(payload)
 			return
 		end
 		if LocalPlayer:GetAttribute("RoundAlive") == true then
+			self._pendingLocalKillReplayKey = nil
 			ScreenEffects.FadeFromBlack(0.25)
 			return
 		end
 
 		ScreenEffects.HoldBlack()
+		self._pendingLocalKillReplayKey = nil
 		self:PlayKillReplay(payload)
 	end)
 	return true

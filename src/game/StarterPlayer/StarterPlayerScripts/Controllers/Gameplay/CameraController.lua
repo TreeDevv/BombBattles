@@ -41,6 +41,8 @@ CameraController._currentFallLagYOffset = 0
 CameraController._currentAirMotionOffset = Vector3.zero
 CameraController._currentAirRoll = 0
 CameraController._currentFallAnticipationYOffset = 0
+CameraController._currentHeadInfluenceOffset = Vector3.zero
+CameraController._headInfluenceBaseLocalOffset = nil :: Vector3?
 CameraController._cameraShaker = nil :: any
 CameraController._wasGrounded = false
 CameraController._hasObservedGroundedState = false
@@ -145,6 +147,14 @@ local function getHeadLockedSubject(character: Model): BasePart?
 	return if subject and subject:IsA("BasePart") then subject else nil
 end
 
+local function getHeadInfluenceSubject(character: Model): BasePart?
+	local partName = if typeof(CameraConfig.HeadInfluencePartName) == "string"
+		then CameraConfig.HeadInfluencePartName
+		else CameraConfig.HeadLockedSubjectPartName
+	local subject = character:FindFirstChild(partName)
+	return if subject and subject:IsA("BasePart") then subject else nil
+end
+
 local function isValidCameraSubject(subject: Instance?): boolean
 	return subject ~= nil and subject.Parent ~= nil
 end
@@ -190,6 +200,14 @@ end
 
 local function getDynamicFOVScale(): number
 	return PlayerSettings:GetNumberScale("dynamicFovScale")
+end
+
+local function clampVectorComponents(value: Vector3, limit: Vector3): Vector3
+	return Vector3.new(
+		math.clamp(value.X, -math.abs(limit.X), math.abs(limit.X)),
+		math.clamp(value.Y, -math.abs(limit.Y), math.abs(limit.Y)),
+		math.clamp(value.Z, -math.abs(limit.Z), math.abs(limit.Z))
+	)
 end
 
 function CameraController:_applyMouseLock(locked: boolean)
@@ -301,6 +319,61 @@ function CameraController:_publishCameraState(character: Model, firstPerson: boo
 	character:SetAttribute("Camera_FirstPerson", firstPerson)
 end
 
+function CameraController:_getHeadInfluenceOffset(
+	dt: number,
+	camera: Camera,
+	character: Model,
+	rootPart: BasePart?,
+	effectiveShiftLocked: boolean,
+	firstPerson: boolean
+): Vector3
+	if not CameraConfig.HeadInfluenceEnabled or not effectiveShiftLocked or firstPerson or not rootPart then
+		self._headInfluenceBaseLocalOffset = nil
+		self._currentHeadInfluenceOffset = smoothVector(
+			self._currentHeadInfluenceOffset,
+			Vector3.zero,
+			CameraConfig.HeadInfluenceResponsiveness,
+			dt
+		)
+		return self._currentHeadInfluenceOffset
+	end
+
+	local subject = getHeadInfluenceSubject(character)
+	if not subject then
+		self._headInfluenceBaseLocalOffset = nil
+		self._currentHeadInfluenceOffset = smoothVector(
+			self._currentHeadInfluenceOffset,
+			Vector3.zero,
+			CameraConfig.HeadInfluenceResponsiveness,
+			dt
+		)
+		return self._currentHeadInfluenceOffset
+	end
+
+	local localHeadOffset = rootPart.CFrame:VectorToObjectSpace(subject.Position - rootPart.Position)
+	if not self._headInfluenceBaseLocalOffset then
+		self._headInfluenceBaseLocalOffset = localHeadOffset
+	end
+
+	local maxLocalOffset = CameraConfig.HeadInfluenceMaxLocalOffset
+	if typeof(maxLocalOffset) ~= "Vector3" then
+		maxLocalOffset = Vector3.new(0.16, 0.12, 0.16)
+	end
+
+	local scale = math.clamp(tonumber(CameraConfig.HeadInfluenceScale) or 1, 0, 1)
+	local localDelta = clampVectorComponents(localHeadOffset - self._headInfluenceBaseLocalOffset, maxLocalOffset) * scale
+	local worldDelta = rootPart.CFrame:VectorToWorldSpace(localDelta)
+	local targetOffset = camera.CFrame:VectorToObjectSpace(worldDelta)
+
+	self._currentHeadInfluenceOffset = smoothVector(
+		self._currentHeadInfluenceOffset,
+		targetOffset,
+		CameraConfig.HeadInfluenceResponsiveness,
+		dt
+	)
+	return self._currentHeadInfluenceOffset
+end
+
 function CameraController:_resetCameraState(camera: Camera?)
 	self._currentRoll = 0
 	self._currentShoulderOffset = Vector3.zero
@@ -308,6 +381,8 @@ function CameraController:_resetCameraState(camera: Camera?)
 	self._currentAirMotionOffset = Vector3.zero
 	self._currentAirRoll = 0
 	self._currentFallAnticipationYOffset = 0
+	self._currentHeadInfluenceOffset = Vector3.zero
+	self._headInfluenceBaseLocalOffset = nil
 	self._cameraShaker = nil
 	self._wasGrounded = false
 	self._hasObservedGroundedState = false
@@ -991,12 +1066,15 @@ function CameraController:_step(dt: number)
 	local motionScale = getMotionScale()
 	local cameraMotionOffset = (self._currentAirMotionOffset + airActionOffset + Vector3.new(0, takeoffLiftYOffset, 0))
 		* motionScale
+	local headInfluenceOffset =
+		self:_getHeadInfluenceOffset(dt, camera, character, rootPart, effectiveShiftLocked, firstPerson) * motionScale
 	local cameraRoll = (self._currentRoll + self._currentAirRoll) * motionScale
 	local fallLagYOffset = self._currentFallLagYOffset * motionScale
 	local fallAnticipationYOffset = self._currentFallAnticipationYOffset * motionScale
 	local landingSettleYOffset = self._currentLandingSettleYOffset * motionScale
 	if firstPerson then
 		cameraMotionOffset = Vector3.zero
+		headInfluenceOffset = Vector3.zero
 		cameraRoll = self._currentRoll * motionScale
 	end
 
@@ -1004,6 +1082,7 @@ function CameraController:_step(dt: number)
 
 	camera.CFrame = camera.CFrame
 		* CFrame.new(self._currentShoulderOffset)
+		* CFrame.new(headInfluenceOffset)
 		* CFrame.new(cameraMotionOffset)
 		* CFrame.new(0, fallLagYOffset, 0)
 		* CFrame.new(0, fallAnticipationYOffset, 0)

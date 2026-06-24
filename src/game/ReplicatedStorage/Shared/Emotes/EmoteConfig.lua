@@ -25,9 +25,38 @@ EmoteConfig.CancelMoveSpeed = 0.75
 EmoteConfig.MovementCancelGraceSeconds = 0.25
 EmoteConfig.DefaultAnimationName = "Animation1"
 
+EmoteConfig.Rarities = table.freeze({
+	Common = "Common",
+	Rare = "Rare",
+	Epic = "Epic",
+	Legendary = "Legendary",
+	Mythic = "Mythic",
+	Divine = "Divine",
+	Secret = "Secret",
+})
+
+EmoteConfig.RarityOrder = table.freeze({
+	"Common",
+	"Rare",
+	"Epic",
+	"Legendary",
+	"Mythic",
+	"Divine",
+	"Secret",
+})
+
 local definitionCache: { [string]: any }? = nil
 local catalogCache: { any }? = nil
 local normalizedIdCache: { [string]: string }? = nil
+
+local rarityByName = {}
+for _, rarity in ipairs(EmoteConfig.RarityOrder) do
+	rarityByName[rarity] = rarity
+end
+
+local function normalizeRarity(rarity: any): string
+	return if typeof(rarity) == "string" and rarityByName[rarity] then rarity else EmoteConfig.DefaultRarity
+end
 
 local function getAssetsRoot(): Instance?
 	local assets = ReplicatedStorage:FindFirstChild("Assets")
@@ -54,7 +83,7 @@ local function makeDefinition(behavior: any, asset: Instance?, fallbackOrder: nu
 		assetName = if typeof(behavior.assetName) == "string" then behavior.assetName else behavior.id,
 		asset = asset,
 		animationName = if typeof(behavior.animationName) == "string" then behavior.animationName else EmoteConfig.DefaultAnimationName,
-		rarity = if typeof(behavior.rarity) == "string" then behavior.rarity else EmoteConfig.DefaultRarity,
+		rarity = normalizeRarity(behavior.rarity),
 		catalogOrder = catalogOrder,
 		walkSpeed = if typeof(behavior.walkSpeed) == "number" then behavior.walkSpeed else EmoteConfig.DefaultWalkSpeed,
 		autoRotate = if typeof(behavior.autoRotate) == "boolean" then behavior.autoRotate else EmoteConfig.DefaultAutoRotate,

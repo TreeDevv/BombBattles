@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Sleep = EmoteEffect.Create("Sleep", { catalogOrder = 30 })
+local Sleep = EmoteEffect.Create("Sleep", { catalogOrder = 30, rarity = "Epic" })
 
 function Sleep:Begin(_character: Model, runtime)
 	runtime:PlaySound(runtime:GetChild(runtime.vfxModule, "Sleep"), runtime:GetRoot())

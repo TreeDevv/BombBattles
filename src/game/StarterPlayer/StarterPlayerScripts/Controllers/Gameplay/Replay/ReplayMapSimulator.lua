@@ -18,15 +18,19 @@ local SCENE_NAME = "_LocalReplayScene"
 local PREPARED_SCENE_NAME_PREFIX = "_LocalReplayPreparedScene"
 local LOCAL_REPLAY_ATTR = "BombBattlesLocalReplay"
 local REPLAY_ZONE_PIVOT = CFrame.new(30000, 8000, 30000)
-local MAX_DESTRUCTION_EVENTS = 96
+local MAX_KILL_REPLAY_DESTRUCTION_EVENTS = 0
+local MAX_POTG_REPLAY_DESTRUCTION_EVENTS = 32
+local MAX_DESTRUCTION_EVENTS = MAX_POTG_REPLAY_DESTRUCTION_EVENTS
 local MAX_DESTRUCTION_EVENTS_PER_STEP = 1
 local DESTRUCTION_LEAD_SECONDS = 0.75
-local MAX_TARGETS_PER_DESTRUCTION_EVENT = 48
+local MAX_TARGETS_PER_DESTRUCTION_EVENT = 24
 local MAX_DEBRIS_PARTS_PER_EVENT = 36
 local MAX_DEBRIS_PARTS_PER_REPLAY = 180
 local MAX_PREPARED_MAP_TEMPLATES = 1
 local MAX_PREPARED_REUSABLE_SCENES = 1
 local PREWARM_TARGET_COLLECTION_BUDGET_SECONDS = 0.002
+local DESTROY_INSTANCES_PER_STEP = 96
+local DESTROY_BUDGET_SECONDS = 0.0025
 local DEBRIS_LIFETIME_SCALE = 0.85
 
 local UNSAFE_TAGS = {
@@ -108,6 +112,16 @@ local function normalizeMapId(mapId: any): string?
 	return if typeof(mapId) == "string" and mapId ~= "" then mapId else nil
 end
 
+local function getReplayDestructionEventLimit(context): number
+	if typeof(context) == "table" and context.replayType == "KillReplay" then
+		return MAX_KILL_REPLAY_DESTRUCTION_EVENTS
+	end
+	if typeof(context) == "table" and context.replayType == "POTGReplay" then
+		return MAX_POTG_REPLAY_DESTRUCTION_EVENTS
+	end
+	return MAX_DESTRUCTION_EVENTS
+end
+
 local function getPayloadMapId(payload: any): string?
 	if typeof(payload) ~= "table" then
 		return nil
@@ -148,6 +162,78 @@ local function createPreparedScene(mapId: string): Folder
 	return scene
 end
 
+function ReplayMapSimulator.ScheduleDestroyScene(root: Instance?, reason: string?)
+	if typeof(root) ~= "Instance" then
+		return false
+	end
+
+	pcall(function()
+		root.Parent = nil
+	end)
+	task.defer(function()
+		local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/DestroySceneIncremental")
+		local destroyed = 0
+		local batchDestroyed = 0
+		local batchStartedAt = os.clock()
+		local stack = {
+			{
+				instance = root,
+				visited = false,
+			},
+		}
+		local ok, err = pcall(function()
+			while #stack > 0 do
+				local entry = table.remove(stack)
+				local instance = entry and entry.instance
+				if typeof(instance) == "Instance" then
+					if entry.visited == true then
+						local destroyedOk = pcall(function()
+							instance:Destroy()
+						end)
+						if destroyedOk then
+							destroyed += 1
+							batchDestroyed += 1
+						end
+					else
+						table.insert(stack, {
+							instance = instance,
+							visited = true,
+						})
+						local childrenOk, children = pcall(function()
+							return instance:GetChildren()
+						end)
+						if childrenOk and typeof(children) == "table" then
+							for _, child in ipairs(children) do
+								table.insert(stack, {
+									instance = child,
+									visited = false,
+								})
+							end
+						end
+					end
+				end
+
+				if batchDestroyed >= DESTROY_INSTANCES_PER_STEP or os.clock() - batchStartedAt >= DESTROY_BUDGET_SECONDS then
+					RuntimeProfiler.Count("Client/Replay/MapSimulator/DestroySceneYields")
+					task.wait()
+					batchDestroyed = 0
+					batchStartedAt = os.clock()
+				end
+			end
+		end)
+		if not ok then
+			RuntimeProfiler.Count("Client/Replay/MapSimulator/DestroySceneErrors")
+			warn(("[ReplayMapSimulator] Incremental scene destroy failed: %s"):format(tostring(err)))
+		end
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/DestroyedSceneInstances", destroyed)
+		if typeof(reason) == "string" and reason ~= "" then
+			RuntimeProfiler.Count("Client/Replay/MapSimulator/DestroyedScene/" .. reason)
+		end
+		RuntimeProfiler.End("Client/Replay/MapSimulator/DestroySceneIncremental", token)
+	end)
+	return true
+end
+
 local function destroyPreparedSceneEntry(entry)
 	if not entry then
 		return
@@ -158,7 +244,7 @@ local function destroyPreparedSceneEntry(entry)
 		end)
 	end
 	if entry.scene then
-		entry.scene:Destroy()
+		ReplayMapSimulator.ScheduleDestroyScene(entry.scene, "Prepared")
 	end
 end
 
@@ -171,7 +257,7 @@ local function destroyDuplicatePreparedScenes(mapId: string, keepScene: Instance
 			continue
 		end
 		if child:GetAttribute("ReplayMapId") == mapId then
-			child:Destroy()
+			ReplayMapSimulator.ScheduleDestroyScene(child, "DuplicatePrepared")
 		end
 	end
 end
@@ -207,7 +293,7 @@ local function clearPreparedScenesExcept(keepMapId: string?)
 
 	for _, child in ipairs(Workspace:GetChildren()) do
 		if isPreparedSceneName(child.Name) and child:GetAttribute("ReplayMapId") ~= keepMapId then
-			child:Destroy()
+			ReplayMapSimulator.ScheduleDestroyScene(child, "StalePrepared")
 		end
 	end
 end
@@ -274,6 +360,24 @@ local function rememberPreparedTemplate(mapId: string, clone: Instance)
 	return clone
 end
 
+local function takePreparedTemplate(mapId: string): Instance?
+	local preparedTemplate = preparedTemplateCache[mapId]
+	if not (preparedTemplate and preparedTemplate.Parent == nil) then
+		if preparedTemplate then
+			preparedTemplateCache[mapId] = nil
+		end
+		return nil
+	end
+
+	preparedTemplateCache[mapId] = nil
+	local orderIndex = table.find(preparedTemplateOrder, mapId)
+	if orderIndex then
+		table.remove(preparedTemplateOrder, orderIndex)
+	end
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedTemplatesConsumed")
+	return preparedTemplate
+end
+
 function ReplayMapSimulator.PrewarmTemplate(mapId: any): boolean
 	mapId = normalizeMapId(mapId)
 	if not mapId then
@@ -294,10 +398,14 @@ function ReplayMapSimulator.PrewarmTemplate(mapId: any): boolean
 	end
 
 	local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmTemplate")
+	local cloneToken = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmTemplateClone")
 	local clone = template:Clone()
+	RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmTemplateClone", cloneToken)
 	clone.Name = RoundConfig.ActiveMapName
 	setReplayIdentityAttributes(clone, mapId, nil)
+	local prepareToken = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmTemplatePrepare")
 	prepareMapClone(clone)
+	RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmTemplatePrepare", prepareToken)
 	rememberPreparedTemplate(mapId, clone)
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmedTemplates")
 	RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmTemplate", token)
@@ -319,26 +427,25 @@ local function clonePreparedMapTemplate(mapId: any): Instance?
 		return nil
 	end
 
-	local preparedTemplate = preparedTemplateCache[mapId]
-	if preparedTemplate and preparedTemplate.Parent == nil then
-		local ok, clone = pcall(function()
-			return preparedTemplate:Clone()
-		end)
-		if ok and clone then
-			RuntimeProfiler.Count("Client/Replay/MapSimulator/PreparedTemplateClones")
-			return clone
-		end
-		preparedTemplateCache[mapId] = nil
+	local preparedTemplate = takePreparedTemplate(mapId)
+	if preparedTemplate then
+		preparedTemplate.Name = RoundConfig.ActiveMapName
+		setReplayIdentityAttributes(preparedTemplate, mapId, nil)
+		return preparedTemplate
 	end
 
 	local template = getMapTemplate(mapId)
 	if not template then
 		return nil
 	end
+	local cloneToken = RuntimeProfiler.Begin("Client/Replay/MapSimulator/ColdTemplateClone")
 	local clone = template:Clone()
+	RuntimeProfiler.End("Client/Replay/MapSimulator/ColdTemplateClone", cloneToken)
 	clone.Name = RoundConfig.ActiveMapName
 	setReplayIdentityAttributes(clone, mapId, nil)
+	local prepareToken = RuntimeProfiler.Begin("Client/Replay/MapSimulator/ColdTemplatePrepare")
 	prepareMapClone(clone)
+	RuntimeProfiler.End("Client/Replay/MapSimulator/ColdTemplatePrepare", prepareToken)
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/ColdTemplateClones")
 	return clone
 end
@@ -400,7 +507,7 @@ local function isReplayMapPart(part: BasePart, mapRoot: Instance): boolean
 	if part.Name == "VoxManagerHitbox" then
 		return false
 	end
-	if part:IsDescendantOf(mapRoot) ~= true then
+	if part ~= mapRoot and part:IsDescendantOf(mapRoot) ~= true then
 		return false
 	end
 	if hasUnsafeTaggedAncestor(part, mapRoot) then
@@ -409,83 +516,63 @@ local function isReplayMapPart(part: BasePart, mapRoot: Instance): boolean
 	return true
 end
 
-local function buildStaticDestructibleTargets(context): ({ BasePart }, boolean)
-	local staticRoot = context and context.staticMapRoot
-	if not staticRoot then
-		return {}, false
-	end
-
-	local targets = {}
-	local seen = {}
-	for _, descendant in ipairs(staticRoot:GetDescendants()) do
-		if not descendant:IsA("BasePart") then
-			continue
-		end
-		if not isReplayMapPart(descendant, staticRoot) then
-			continue
-		end
-		if hasDestructibleTag(descendant, staticRoot) then
-			addTarget(targets, seen, descendant)
-		end
-	end
-
-	if #targets > 0 then
-		return targets, false
-	end
-
-	for _, descendant in ipairs(staticRoot:GetDescendants()) do
-		if descendant:IsA("BasePart") and isReplayMapPart(descendant, staticRoot) then
-			addTarget(targets, seen, descendant)
-		end
-	end
-
-	return targets, true
-end
-
 local function shouldYieldForBudget(startedAt: number, budgetSeconds: number): boolean
 	return os.clock() - startedAt >= budgetSeconds
 end
 
-local function buildStaticDestructibleTargetsBudgeted(context, budgetSeconds: number): ({ BasePart }, boolean, number)
+local function scanStaticDestructibleTargets(context, budgetSeconds: number?): ({ BasePart }, boolean, number, number)
 	local staticRoot = context and context.staticMapRoot
 	if not staticRoot then
-		return {}, false, 0
+		return {}, false, 0, 0
 	end
 
-	local targets = {}
-	local seen = {}
-	local descendants = staticRoot:GetDescendants()
+	local destructibleTargets = {}
+	local destructibleSeen = {}
+	local fallbackTargets = {}
+	local fallbackSeen = {}
+	local stack = { staticRoot }
 	local frames = 1
 	local startedAt = os.clock()
-	for _, descendant in ipairs(descendants) do
-		if descendant:IsA("BasePart") and isReplayMapPart(descendant, staticRoot) and hasDestructibleTag(descendant, staticRoot) then
-			addTarget(targets, seen, descendant)
+	local maxSliceSeconds = 0
+	local shouldBudget = typeof(budgetSeconds) == "number" and budgetSeconds > 0
+
+	while #stack > 0 do
+		local instance = table.remove(stack)
+		if instance:IsA("BasePart") and isReplayMapPart(instance, staticRoot) then
+			addTarget(fallbackTargets, fallbackSeen, instance)
+			if hasDestructibleTag(instance, staticRoot) then
+				addTarget(destructibleTargets, destructibleSeen, instance)
+			end
 		end
-		if shouldYieldForBudget(startedAt, budgetSeconds) then
+
+		for _, child in ipairs(instance:GetChildren()) do
+			table.insert(stack, child)
+		end
+
+		local sliceSeconds = os.clock() - startedAt
+		if sliceSeconds > maxSliceSeconds then
+			maxSliceSeconds = sliceSeconds
+		end
+		if shouldBudget and shouldYieldForBudget(startedAt, budgetSeconds) then
 			frames += 1
 			task.wait()
 			startedAt = os.clock()
 		end
 	end
 
-	if #targets > 0 then
-		return targets, false, frames
+	if #destructibleTargets > 0 then
+		return destructibleTargets, false, frames, maxSliceSeconds * 1000
 	end
+	return fallbackTargets, true, frames, maxSliceSeconds * 1000
+end
 
-	table.clear(seen)
-	startedAt = os.clock()
-	for _, descendant in ipairs(descendants) do
-		if descendant:IsA("BasePart") and isReplayMapPart(descendant, staticRoot) then
-			addTarget(targets, seen, descendant)
-		end
-		if shouldYieldForBudget(startedAt, budgetSeconds) then
-			frames += 1
-			task.wait()
-			startedAt = os.clock()
-		end
-	end
+local function buildStaticDestructibleTargets(context): ({ BasePart }, boolean)
+	local targets, usedFallbackTargets = scanStaticDestructibleTargets(context, nil)
+	return targets, usedFallbackTargets
+end
 
-	return targets, true, frames
+local function buildStaticDestructibleTargetsBudgeted(context, budgetSeconds: number): ({ BasePart }, boolean, number, number)
+	return scanStaticDestructibleTargets(context, budgetSeconds)
 end
 
 local function prewarmStaticDestructibleTargets(context): boolean
@@ -498,7 +585,7 @@ local function prewarmStaticDestructibleTargets(context): boolean
 
 	local token = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PrewarmStaticTargets")
 	local startedAt = os.clock()
-	local staticTargets, usedFallbackTargets, frames =
+	local staticTargets, usedFallbackTargets, frames, maxSliceMs =
 		buildStaticDestructibleTargetsBudgeted(context, PREWARM_TARGET_COLLECTION_BUDGET_SECONDS)
 	context.staticTargets = staticTargets
 	context.staticUsedFallbackTargets = usedFallbackTargets
@@ -506,6 +593,7 @@ local function prewarmStaticDestructibleTargets(context): boolean
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmStaticTargetFrames", frames)
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/PrewarmStaticTargetCount", #staticTargets)
 	RuntimeProfiler.Gauge("Client/Replay/MapSimulator/PrewarmStaticTargetMs", (os.clock() - startedAt) * 1000)
+	RuntimeProfiler.Gauge("Client/Replay/MapSimulator/PrewarmStaticTargetMaxSliceMs", maxSliceMs or 0)
 	RuntimeProfiler.End("Client/Replay/MapSimulator/PrewarmStaticTargets", token)
 	return true
 end
@@ -876,7 +964,8 @@ function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, start
 		end
 		return left.timestamp < right.timestamp
 	end)
-	while #events > MAX_DESTRUCTION_EVENTS do
+	local maxDestructionEvents = getReplayDestructionEventLimit(context)
+	while #events > maxDestructionEvents do
 		table.remove(events, 1)
 		skippedBeforeWindow += 1
 	end
@@ -1089,6 +1178,7 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 		scene = scene,
 		livePivot = livePivot,
 		replayPivot = REPLAY_ZONE_PIVOT,
+		replayType = if typeof(payload) == "table" and typeof(payload.type) == "string" then payload.type else nil,
 		mapId = payloadMapId,
 		roundId = payloadRoundId,
 		mapRoot = nil,
@@ -1130,8 +1220,12 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 
 	clone.Name = RoundConfig.ActiveMapName
 	setReplayIdentityAttributes(clone, payloadMapId, payloadRoundId)
+	local pivotToken = RuntimeProfiler.Begin("Client/Replay/MapSimulator/PivotMapClone")
 	pivotInstance(clone, context.replayPivot)
+	RuntimeProfiler.End("Client/Replay/MapSimulator/PivotMapClone", pivotToken)
+	local parentToken = RuntimeProfiler.Begin("Client/Replay/MapSimulator/ParentMapClone")
 	clone.Parent = mapFolder
+	RuntimeProfiler.End("Client/Replay/MapSimulator/ParentMapClone", parentToken)
 	context.staticMapRoot = clone
 
 	local outputFolder = Instance.new("Folder")
@@ -1356,7 +1450,7 @@ function ReplayMapSimulator.PrewarmReusableScene(mapId: any, options): boolean
 					return
 				end
 				if not (mapContext and mapContext.mapRoot) then
-					scene:Destroy()
+					ReplayMapSimulator.ScheduleDestroyScene(scene, "InvalidPrewarm")
 					return
 				end
 
@@ -1450,7 +1544,7 @@ function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
 
 	local existing = Workspace:FindFirstChild(SCENE_NAME)
 	if existing and existing ~= entry.scene then
-		existing:Destroy()
+		ReplayMapSimulator.ScheduleDestroyScene(existing, "ExistingActive")
 	end
 
 	entry.scene.Name = SCENE_NAME
@@ -1461,6 +1555,7 @@ function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
 		then payload.mapPivot
 		else CFrame.new()
 	entry.mapContext.scene = entry.scene
+	entry.mapContext.replayType = if typeof(payload) == "table" and typeof(payload.type) == "string" then payload.type else nil
 	entry.mapContext.mapId = mapId
 	entry.mapContext.roundId = roundId
 	if entry.mapContext.mapFolder then
@@ -1493,6 +1588,7 @@ function ReplayMapSimulator.GetDebugInfo(context)
 
 	return {
 		mapId = context.mapId,
+		replayType = context.replayType,
 		normalizedDestructionEvents = context.normalizedDestructionEvents or 0,
 		skippedDestructionEventsBeforeWindow = context.skippedDestructionEventsBeforeWindow or 0,
 		skippedDestructionEventsAfterWindow = context.skippedDestructionEventsAfterWindow or 0,

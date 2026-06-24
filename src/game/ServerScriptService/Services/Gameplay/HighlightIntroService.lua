@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local HighlightIntroConfig = require(ReplicatedStorage.Shared.Config.HighlightIntroConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
@@ -28,6 +29,7 @@ local HighlightIntroService = {}
 
 local requestRemote: RemoteEvent? = nil
 local requestWindows: { [Player]: RequestWindow } = {}
+local roundService = nil
 
 local function ensureRemotesFolder(): Folder
 	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
@@ -55,6 +57,20 @@ local function isRateLimited(player: Player): boolean
 
 	window.count += 1
 	return window.count > MAX_REQUESTS_PER_SECOND
+end
+
+local function getRoundService()
+	if not roundService then
+		roundService = require(script.Parent.RoundService)
+	end
+
+	return roundService
+end
+
+local function isInventoryLocked(): boolean
+	local state = getRoundService():GetState()
+	local stateName = typeof(state) == "table" and state.state or nil
+	return stateName == RoundStates.AssigningTeams or stateName == RoundStates.RoundStarting or stateName == RoundStates.Active
 end
 
 local function normalizeOwnedHighlightIntros(value): ({ [string]: boolean }, boolean)
@@ -183,7 +199,7 @@ local function sanitizePlayerData(player: Player): string
 	return equippedIntro
 end
 
-local function respond(player: Player, request, ok: boolean, code: string, message: string?)
+local function respond(player: Player, request, ok: boolean, code: string, message: string?, extra)
 	local remote = requestRemote
 	if not remote then
 		return
@@ -196,13 +212,20 @@ local function respond(player: Player, request, ok: boolean, code: string, messa
 		highlightIntroId = request.highlightIntroId
 	end
 
-	remote:FireClient(player, {
+	local response = {
 		action = action,
 		highlightIntroId = highlightIntroId,
 		ok = ok,
 		code = code,
 		message = message,
-	})
+	}
+	if typeof(extra) == "table" then
+		for key, value in pairs(extra) do
+			response[key] = value
+		end
+	end
+
+	remote:FireClient(player, response)
 end
 
 local function fail(player: Player, request, code: string, message: string?)
@@ -254,14 +277,20 @@ local function handleRequest(player: Player, rawRequest)
 		fail(player, rawRequest, "InvalidRequest", "Invalid highlight intro request.")
 		return
 	end
+	if isInventoryLocked() then
+		fail(player, request, "InventoryLocked", "Inventory is locked during battle.")
+		return
+	end
 
-	local ok, message = HighlightIntroService:EquipHighlightIntro(player, request.highlightIntroId)
+	local ok, message, equipResult = HighlightIntroService:EquipHighlightIntro(player, request.highlightIntroId)
 	if not ok then
 		fail(player, request, "EquipFailed", message or "Highlight intro equip failed.")
 		return
 	end
 
-	respond(player, request, true, "Equipped")
+	respond(player, request, true, "Equipped", nil, {
+		equippedHighlightIntroId = if typeof(equipResult) == "table" then equipResult.highlightIntroId else request.highlightIntroId,
+	})
 end
 
 function HighlightIntroService:GetEquippedHighlightIntroId(player: Player): string

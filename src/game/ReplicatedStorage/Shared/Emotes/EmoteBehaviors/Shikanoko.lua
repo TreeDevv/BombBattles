@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Shikanoko = EmoteEffect.Create("Shikanoko", { catalogOrder = 27 })
+local Shikanoko = EmoteEffect.Create("Shikanoko", { catalogOrder = 27, rarity = "Legendary" })
 
 function Shikanoko:Begin(_character: Model, runtime)
 	local root = runtime:GetRoot()

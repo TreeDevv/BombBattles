@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local KazotskyKick = EmoteEffect.Create("Kazotsky Kick", { catalogOrder = 16 })
+local KazotskyKick = EmoteEffect.Create("Kazotsky Kick", { catalogOrder = 16, rarity = "Common" })
 
 function KazotskyKick:Begin(_character: Model, runtime)
 	runtime:PlaySound(runtime:GetVfxChild("KazotskySound"), runtime:GetRoot())

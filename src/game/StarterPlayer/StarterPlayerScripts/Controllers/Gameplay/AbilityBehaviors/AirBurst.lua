@@ -109,6 +109,18 @@ local function applyVerticalRescue(definition: AbilityDefinition)
 	local targetVelocity = math.max(getDefinitionNumber(definition, "verticalVelocity", 80), 0)
 	local currentVelocity = rootPart.AssemblyLinearVelocity
 	local upwardDelta = math.max(targetVelocity - currentVelocity.Y, 0)
+	if humanoid.FloorMaterial == Enum.Material.Air and currentVelocity.Y > 0 then
+		local minAirborneDelta = math.max(getDefinitionNumber(definition, "minAirborneUpwardDelta", 42), 0)
+		local maxAirborneVelocity = math.max(
+			getDefinitionNumber(definition, "maxAirborneVerticalVelocity", 110),
+			targetVelocity
+		)
+		local airborneTargetVelocity = math.min(
+			math.max(targetVelocity, currentVelocity.Y + minAirborneDelta),
+			maxAirborneVelocity
+		)
+		upwardDelta = math.max(airborneTargetVelocity - currentVelocity.Y, upwardDelta)
+	end
 	if upwardDelta > 0 then
 		rootPart:ApplyImpulse(Vector3.yAxis * upwardDelta * rootPart.AssemblyMass)
 	end

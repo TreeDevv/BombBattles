@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Shuffle = EmoteEffect.Create("Shuffle", { catalogOrder = 26,previewPauseTimeSeconds = 1.5 })
+local Shuffle = EmoteEffect.Create("Shuffle", { catalogOrder = 26, rarity = "Common", previewPauseTimeSeconds = 1.5 })
 
 
 function Shuffle:Begin(_character: Model, runtime)

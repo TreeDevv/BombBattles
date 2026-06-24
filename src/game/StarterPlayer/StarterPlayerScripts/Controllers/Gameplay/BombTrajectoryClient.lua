@@ -2,10 +2,12 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local CollisionGroupConfig = require(ReplicatedStorage.Shared.Config.CollisionGroupConfig)
 local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 
 local BombTrajectoryClient = {}
+local BOMB_PROJECTILE_COLLISION_GROUP = CollisionGroupConfig.Groups.BombProjectile
 
 local MIN_AIM_HORIZONTAL = 0.08
 
@@ -97,6 +99,14 @@ local function createPreviewSweepParams(character: Model?): RaycastParams
 	params.FilterType = Enum.RaycastFilterType.Exclude
 	params.FilterDescendantsInstances = if character then { character } else {}
 	params.IgnoreWater = true
+	local collisionGroupSet = pcall(function()
+		params.CollisionGroup = BOMB_PROJECTILE_COLLISION_GROUP
+	end)
+	if not collisionGroupSet then
+		pcall(function()
+			params.CollisionGroup = "Default"
+		end)
+	end
 	params.RespectCanCollide = true
 	return params
 end

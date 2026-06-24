@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local PenguinWalk = EmoteEffect.Create("Penguin Walk", { catalogOrder = 23 })
+local PenguinWalk = EmoteEffect.Create("Penguin Walk", { catalogOrder = 23, rarity = "Common" })
 
 
 

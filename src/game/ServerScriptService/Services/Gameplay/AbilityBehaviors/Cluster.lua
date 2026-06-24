@@ -313,6 +313,10 @@ local function spawnMiniBombs(context: ServerHookContext, record: ClusterRecord,
 
 	for index, direction in ipairs(getRingDirections(count)) do
 		local projectileId = createProjectileId("ClusterMini", record.player, index)
+		local explosion = buildScaledExplosionConfig(definition, powerScale)
+		explosion.ownerClientLaunchGroupId = record.groupId
+		explosion.ownerClientRepeatLaunchMultiplier = getDefinitionNumber(definition, "miniRepeatKnockbackMultiplier", 0)
+		explosion.ownerClientLaunchGroupWindowSeconds = repeatWindowSeconds
 		local launched = projectileService:Launch({
 			owner = record.player,
 			projectileId = projectileId,
@@ -344,7 +348,7 @@ local function spawnMiniBombs(context: ServerHookContext, record: ClusterRecord,
 					playerContactExplodes = false,
 					playerContactImpacts = false,
 				},
-				explosion = buildScaledExplosionConfig(definition, powerScale),
+				explosion = explosion,
 				visuals = {
 					visualScale = visualScale,
 				},

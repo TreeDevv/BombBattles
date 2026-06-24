@@ -227,7 +227,7 @@ function BombExplosionRuntime.HandleExplode(controller, context, payload, payloa
 	local explosionVisibility = ExplosionVisibility.Choose(payload, getVisibilityOptions(context))
 	BombExplosionRuntime.RememberVisibility(controller, payload.position, explosionVisibility)
 	if payload.player == context.localPlayer then
-		OwnerExplosionLaunch.ApplyForPlayer(context.localPlayer, payload.position)
+		OwnerExplosionLaunch.ApplyForPlayer(context.localPlayer, payload.position, payload)
 		context.playLocalExplosionShake()
 		context.priorityFullVfx = true
 	end

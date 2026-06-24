@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
@@ -28,6 +29,7 @@ local BombSkinService = {}
 
 local requestRemote: RemoteEvent? = nil
 local requestWindows: { [Player]: RequestWindow } = {}
+local roundService = nil
 
 local function ensureRemotesFolder(): Folder
 	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
@@ -54,6 +56,20 @@ local function isRateLimited(player: Player): boolean
 
 	window.count += 1
 	return window.count > MAX_REQUESTS_PER_SECOND
+end
+
+local function getRoundService()
+	if not roundService then
+		roundService = require(script.Parent.RoundService)
+	end
+
+	return roundService
+end
+
+local function isInventoryLocked(): boolean
+	local state = getRoundService():GetState()
+	local stateName = typeof(state) == "table" and state.state or nil
+	return stateName == RoundStates.AssigningTeams or stateName == RoundStates.RoundStarting or stateName == RoundStates.Active
 end
 
 local function normalizeOwnedSkins(value): ({ [string]: boolean }, boolean)
@@ -379,6 +395,10 @@ local function handleRequest(player: Player, rawRequest)
 	local request = resolveRequest(rawRequest)
 	if not request then
 		fail(player, rawRequest, "InvalidRequest", "Invalid skin request.")
+		return
+	end
+	if isInventoryLocked() then
+		fail(player, request, "InventoryLocked", "Inventory is locked during battle.")
 		return
 	end
 

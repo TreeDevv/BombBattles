@@ -688,6 +688,9 @@ function SpectateController:_isKillReplayActive(): boolean
 	if not (ReplayClient and type(ReplayClient.GetActiveReplayDebugInfo) == "function") then
 		return false
 	end
+	if type(ReplayClient.HasPendingLocalKillReplay) == "function" and ReplayClient:HasPendingLocalKillReplay() then
+		return true
+	end
 
 	local debugInfo = ReplayClient:GetActiveReplayDebugInfo()
 	return typeof(debugInfo) == "table" and debugInfo.replayType == "KillReplay"

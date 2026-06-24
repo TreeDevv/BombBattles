@@ -5,6 +5,7 @@ local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local CollisionGroupConfig = require(ReplicatedStorage.Shared.Config.CollisionGroupConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
@@ -38,6 +39,7 @@ local KNOCKBACK_MOVEMENT_SUPPRESS_SECONDS = math.max(tonumber(BombConfig.Knockba
 local ATTR = BombConfig.Attributes
 local RESULT_KIND = AbilityResult.Kind
 local DEBUG_REPLAY_EVENTS = false
+local BOMB_PROJECTILE_COLLISION_GROUP = CollisionGroupConfig.Groups.BombProjectile
 local MIN_AIM_HORIZONTAL = 0.08
 local NORMAL_PROJECTILE_PHYSICS = ProjectilePhysics.ResolvePhysicsConfig(
 	BombProjectileConfig.Defaults,
@@ -501,6 +503,10 @@ local function readOptionalPositiveNumber(value: any, fallback: number?): number
 	return if typeof(value) == "number" and value == value and value > 0 then value else fallback
 end
 
+local function readOptionalNonNegativeNumber(value: any, fallback: number?): number?
+	return if typeof(value) == "number" and value == value and value >= 0 then value else fallback
+end
+
 local function readNonNegativeNumber(value: any, fallback: number): number
 	return if typeof(value) == "number" and value == value and value >= 0 then value else fallback
 end
@@ -627,6 +633,18 @@ local function resolveExplosionConfig(override)
 			override.maxKnockbackAngularSpeed,
 			BombConfig.KnockbackMaxAngularSpeed
 		),
+		ownerClientLaunchGroupId = if typeof(override.ownerClientLaunchGroupId) == "string"
+				and override.ownerClientLaunchGroupId ~= ""
+			then override.ownerClientLaunchGroupId
+			else nil,
+		ownerClientRepeatLaunchMultiplier = readOptionalNonNegativeNumber(
+			override.ownerClientRepeatLaunchMultiplier,
+			nil
+		),
+		ownerClientLaunchGroupWindowSeconds = readOptionalNonNegativeNumber(
+			override.ownerClientLaunchGroupWindowSeconds,
+			nil
+		),
 		explosionVisualScale = readPositiveNumber(override.explosionVisualScale, 1),
 		chargeScale = readPositiveNumber(override.chargeScale, 1),
 	}
@@ -678,6 +696,17 @@ local function applyExplosionResult(config, result)
 	config.maxKnockbackAngularSpeed = readOptionalPositiveNumber(
 		result.maxKnockbackAngularSpeed,
 		config.maxKnockbackAngularSpeed
+	)
+	if typeof(result.ownerClientLaunchGroupId) == "string" and result.ownerClientLaunchGroupId ~= "" then
+		config.ownerClientLaunchGroupId = result.ownerClientLaunchGroupId
+	end
+	config.ownerClientRepeatLaunchMultiplier = readOptionalNonNegativeNumber(
+		result.ownerClientRepeatLaunchMultiplier,
+		config.ownerClientRepeatLaunchMultiplier
+	)
+	config.ownerClientLaunchGroupWindowSeconds = readOptionalNonNegativeNumber(
+		result.ownerClientLaunchGroupWindowSeconds,
+		config.ownerClientLaunchGroupWindowSeconds
 	)
 	config.explosionVisualScale = readPositiveNumber(result.explosionVisualScale, config.explosionVisualScale)
 	config.chargeScale = readPositiveNumber(result.chargeScale, config.chargeScale)
@@ -1068,6 +1097,14 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		nearRadius = explosionConfig.nearRadius,
 		outerRadius = explosionConfig.outerRadius,
 		terrainRadius = explosionConfig.terrainRadius,
+		knockbackHorizontal = explosionConfig.knockbackHorizontal,
+		knockbackVertical = explosionConfig.knockbackVertical,
+		maxKnockbackHorizontalSpeed = explosionConfig.maxKnockbackHorizontalSpeed,
+		maxKnockbackVerticalSpeed = explosionConfig.maxKnockbackVerticalSpeed,
+		maxKnockbackAngularSpeed = explosionConfig.maxKnockbackAngularSpeed,
+		ownerClientLaunchGroupId = explosionConfig.ownerClientLaunchGroupId,
+		ownerClientRepeatLaunchMultiplier = explosionConfig.ownerClientRepeatLaunchMultiplier,
+		ownerClientLaunchGroupWindowSeconds = explosionConfig.ownerClientLaunchGroupWindowSeconds,
 		explosionVisualScale = explosionConfig.explosionVisualScale,
 		chargeScale = explosionConfig.chargeScale,
 		hitUserIds = hitUserIds,
@@ -1197,6 +1234,7 @@ local function createSweepParams(owner: Player): RaycastParams
 	local character = owner.Character
 	params.FilterDescendantsInstances = if character then { character } else {}
 	params.IgnoreWater = true
+	params.CollisionGroup = BOMB_PROJECTILE_COLLISION_GROUP
 	params.RespectCanCollide = true
 	return params
 end
@@ -1214,6 +1252,7 @@ local function createPhysicalGroundParams(state: ProjectileState): RaycastParams
 	end
 	params.FilterDescendantsInstances = excluded
 	params.IgnoreWater = true
+	params.CollisionGroup = BOMB_PROJECTILE_COLLISION_GROUP
 	params.RespectCanCollide = true
 	return params
 end

@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Lounge = EmoteEffect.Create("Lounge", { catalogOrder = 21 })
+local Lounge = EmoteEffect.Create("Lounge", { catalogOrder = 21, rarity = "Rare" })
 
 function Lounge:Begin(_character: Model, runtime)
 	local root = runtime:GetRoot()

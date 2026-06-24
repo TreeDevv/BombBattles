@@ -38,6 +38,7 @@ local ABILITIES_FOLDER_NAME = "Abilities"
 local INTERCEPTOR_FOLDER_NAME = "Interceptor"
 local OWNER_ATTR = "InterceptorOwnerUserId"
 local ID_ATTR = "InterceptorId"
+local PLACEMENT_DISTANCE = 3
 local ACTIVE_INTERCEPTORS: { [Player]: { InterceptorRecord } } = {}
 local SERIALS: { [Player]: number } = {}
 local abilityService: AbilityServiceLike? = nil
@@ -153,30 +154,29 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findSurface(player: Player, rootPart: BasePart, definition: AbilityDefinition, payload: any): FloorPlacement?
-	return PlacementSurfaceUtil.ResolvePayloadSurfacePlacement({
+local function findPlacement(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
+	return PlacementSurfaceUtil.ResolveForwardSolidPlacement({
 		rootPart = rootPart,
 		definition = definition,
-		payload = payload,
-		targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap()),
-		unsafeTags = UNSAFE_TAGS,
+		distance = PLACEMENT_DISTANCE,
 		excludeInstances = if player.Character then { player.Character } else {},
 	})
 end
 
 local function validatePlacement(player: Player, definition: AbilityDefinition, centerTemplate: Instance, payload: any): FloorPlacement?
 	local _ = centerTemplate
+	local _payload = payload
 	local rootPart = getCharacterRoot(player)
 	if not rootPart then
 		return nil
 	end
 
-	local surface = findSurface(player, rootPart, definition, payload)
-	if not surface then
+	local placement = findPlacement(player, rootPart, definition)
+	if not placement then
 		return nil
 	end
 
-	return surface
+	return placement
 end
 
 local function prepareCenterPiece(centerPiece: Instance)

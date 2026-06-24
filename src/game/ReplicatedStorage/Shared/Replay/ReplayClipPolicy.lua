@@ -5,7 +5,8 @@ local ReplayClipPolicy = {}
 
 local KILL_REPLAY_WINDOW_SECONDS = ReplayConstants.KILL_REPLAY_PRE_SECONDS + ReplayConstants.KILL_REPLAY_POST_SECONDS
 local POTG_REPLAY_WINDOW_SECONDS = ReplayConstants.POTG_PRE_SECONDS + ReplayConstants.POTG_POST_SECONDS
-local MAX_ROUND_DESTRUCTION_EVENTS = 260
+local MAX_KILL_REPLAY_DESTRUCTION_EVENTS = 0
+local MAX_POTG_REPLAY_DESTRUCTION_EVENTS = 32
 local MAX_CLIP_SANITIZE_DEPTH = 8
 
 ReplayClipPolicy.MinKillReplayFrames =
@@ -45,7 +46,7 @@ function ReplayClipPolicy.GetKillClipCaps()
 		maxPlayersPerFrame = ReplayConstants.MAX_REPLAY_PLAYERS,
 		maxBombsPerFrame = math.min(24, ReplayConstants.MAX_REPLAY_BOMBS),
 		maxEvents = 160,
-		maxDestructionEvents = MAX_ROUND_DESTRUCTION_EVENTS,
+		maxDestructionEvents = MAX_KILL_REPLAY_DESTRUCTION_EVENTS,
 	}
 end
 
@@ -55,7 +56,7 @@ function ReplayClipPolicy.GetPOTGClipCaps()
 		maxPlayersPerFrame = ReplayConstants.MAX_REPLAY_PLAYERS,
 		maxBombsPerFrame = math.min(24, ReplayConstants.MAX_REPLAY_BOMBS),
 		maxEvents = 220,
-		maxDestructionEvents = MAX_ROUND_DESTRUCTION_EVENTS,
+		maxDestructionEvents = MAX_POTG_REPLAY_DESTRUCTION_EVENTS,
 	}
 end
 

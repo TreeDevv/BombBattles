@@ -1,7 +1,7 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
 
-local Conga = EmoteEffect.Create("Conga", { catalogOrder = 8 })
+local Conga = EmoteEffect.Create("Conga", { catalogOrder = 9, rarity = "Rare" })
 
 function Conga:Begin(_character: Model, runtime)
 	local root = runtime:GetRoot()

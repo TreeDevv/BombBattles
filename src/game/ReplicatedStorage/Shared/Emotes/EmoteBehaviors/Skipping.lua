@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Skipping = EmoteEffect.Create("Skipping", { catalogOrder = 29,previewPauseTimeSeconds = .5 })
+local Skipping = EmoteEffect.Create("Skipping", { catalogOrder = 29, rarity = "Common", previewPauseTimeSeconds = .5 })
 
 function Skipping:Begin(_character: Model, runtime)
 	runtime:PlaySound(runtime:GetChild(runtime.vfxModule, "Music"), runtime:GetRoot())

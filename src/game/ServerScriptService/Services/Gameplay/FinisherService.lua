@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
@@ -30,6 +31,7 @@ local FinisherService = {}
 local playedRemote: RemoteEvent? = nil
 local requestRemote: RemoteEvent? = nil
 local requestWindows: { [Player]: RequestWindow } = {}
+local roundService = nil
 
 local function ensurePlayedRemote(): RemoteEvent
 	playedRemote = RemoteUtil.EnsureRemoteEventInFolder(ReplicatedStorage, REMOTES_FOLDER_NAME, PLAYED_REMOTE_NAME, true)
@@ -62,6 +64,20 @@ local function isRateLimited(player: Player): boolean
 
 	window.count += 1
 	return window.count > MAX_REQUESTS_PER_SECOND
+end
+
+local function getRoundService()
+	if not roundService then
+		roundService = require(script.Parent.RoundService)
+	end
+
+	return roundService
+end
+
+local function isInventoryLocked(): boolean
+	local state = getRoundService():GetState()
+	local stateName = typeof(state) == "table" and state.state or nil
+	return stateName == RoundStates.AssigningTeams or stateName == RoundStates.RoundStarting or stateName == RoundStates.Active
 end
 
 local function normalizeOwnedFinishers(value): ({ [string]: boolean }, boolean)
@@ -256,6 +272,10 @@ local function handleRequest(player: Player, rawRequest)
 	local request = resolveRequest(rawRequest)
 	if not request then
 		fail(player, rawRequest, "InvalidRequest", "Invalid finisher request.")
+		return
+	end
+	if isInventoryLocked() then
+		fail(player, request, "InventoryLocked", "Inventory is locked during battle.")
 		return
 	end
 

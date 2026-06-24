@@ -236,6 +236,16 @@ local function getSortedOwnedDefinitions(): { any }
 	return favoriteDefinitions
 end
 
+local function findEmoteListTemplate(scroller: Instance, rarity: string?, fallbackTemplate: ImageButton?): ImageButton?
+	local rarityName = if typeof(rarity) == "string" and rarity ~= "" then rarity else EmoteConfig.DefaultRarity
+	local template = scroller:FindFirstChild(rarityName .. TEMPLATE_SUFFIX)
+	if template and template:IsA("ImageButton") then
+		return template
+	end
+
+	return fallbackTemplate
+end
+
 local function slotRotation(slotIndex: number): number
 	return 22.5 + ((slotIndex - 1 + SELECTOR_VISUAL_SLOT_OFFSET) * 45)
 end
@@ -873,17 +883,22 @@ function EmoteController:_populateEmotesList()
 	disconnectAll(self._listConnections)
 	self:_clearListTiles()
 
-	local template = scroller:FindFirstChild(EmoteConfig.DefaultRarity .. TEMPLATE_SUFFIX)
-	if not (template and template:IsA("ImageButton")) then
-		template = scroller:FindFirstChild("RareTemplate")
+	local fallbackTemplate = scroller:FindFirstChild(EmoteConfig.DefaultRarity .. TEMPLATE_SUFFIX)
+	if not (fallbackTemplate and fallbackTemplate:IsA("ImageButton")) then
+		fallbackTemplate = scroller:FindFirstChild("RareTemplate")
 	end
-	if not (template and template:IsA("ImageButton")) then
+	if not (fallbackTemplate and fallbackTemplate:IsA("ImageButton")) then
 		warn("[EmoteController] Missing RareTemplate in EmotesList.ScrollingFrame")
 		return
 	end
 
 	local favorites = getFavoriteEmotes()
 	for index, definition in ipairs(getSortedOwnedDefinitions()) do
+		local template = findEmoteListTemplate(scroller, definition.rarity, fallbackTemplate)
+		if not template then
+			continue
+		end
+
 		local tile = template:Clone()
 		tile.Name = "Emote_" .. string.gsub(definition.id, "%W", "_")
 		tile.LayoutOrder = index

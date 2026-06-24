@@ -22,6 +22,7 @@ local RoundDeathRuntime = require(ServerScriptService.Services.RoundDeathRuntime
 local RoundKillFeedRuntime = require(ServerScriptService.Services.RoundKillFeedRuntime)
 local RoundLightingRuntime = require(ServerScriptService.Services.RoundLightingRuntime)
 local RoundMapRuntime = require(ServerScriptService.Services.RoundMapRuntime)
+local RoundPOTGIntroRuntime = require(ServerScriptService.Services.RoundPOTGIntroRuntime)
 local RoundPlayerStateRuntime = require(ServerScriptService.Services.RoundPlayerStateRuntime)
 local RoundRagdollRuntime = require(ServerScriptService.Services.RoundRagdollRuntime)
 local RoundReplayRuntime = require(ServerScriptService.Services.RoundReplayRuntime)
@@ -191,6 +192,7 @@ local lobbyVoidResettingPlayers: { [Player]: boolean } = {}
 local characterReadinessWatchdogSerials: { [Player]: number } = {}
 local characterReadinessWatchdogRecoveries: { [Player]: { startedAt: number, count: number } } = {}
 RoundFlow.POTGIntroCompletions = {}
+RoundFlow.PreparedPOTGIntroClones = {}
 RespawnFlow.VoidFallPadding = 70
 RespawnFlow.LobbyDeathBoundAttribute = "LobbyDeathBound"
 RespawnFlow.RoundDeathBoundAttribute = "RoundDeathBound"
@@ -409,6 +411,19 @@ function RoundFlow.ensurePOTGIntroCompleteRemote(): RemoteEvent
 	return ensureRoundRemote(RoundFlow.getEndFlowConfig().Remotes.POTGIntroComplete)
 end
 
+function RoundFlow.cleanupPreparedPOTGIntroClones()
+	RoundPOTGIntroRuntime.Cleanup(RoundFlow.PreparedPOTGIntroClones)
+end
+
+function RoundFlow.preparePOTGIntroTemplate(payload): Instance?
+	return RoundPOTGIntroRuntime.Prepare(payload, {
+		clones = RoundFlow.PreparedPOTGIntroClones,
+		lifetimeSeconds = RoundFlow.getPOTGIntroMaxDuration() + 5,
+		roundId = roundId,
+		serial = #RoundFlow.PreparedPOTGIntroClones + 1,
+	})
+end
+
 function RoundFlow.getWinnerBeatDuration(): number
 	return RoundFlow.getConfiguredDuration(RoundFlow.getEndFlowConfig().WinnerBeatSeconds, 1.5)
 end
@@ -449,6 +464,7 @@ end
 
 function RoundFlow.firePOTGIntro(recipients: { Player }, winnerTeam: string)
 	RoundFlow.POTGIntroCompletions = {}
+	RoundFlow.cleanupPreparedPOTGIntroClones()
 	if #recipients == 0 then
 		return
 	end
@@ -470,6 +486,12 @@ function RoundFlow.firePOTGIntro(recipients: { Player }, winnerTeam: string)
 		end
 	end
 
+	local preparedIntro = RoundFlow.preparePOTGIntroTemplate(payload)
+	if preparedIntro then
+		payload.preparedHighlightIntroName = preparedIntro.Name
+		payload.appearanceAppliedOnServer = true
+	end
+
 	for _, player in ipairs(recipients) do
 		if player.Parent == Players and roundPlayers[player] == true then
 			remote:FireClient(player, payload)
@@ -481,6 +503,7 @@ function RoundFlow.waitForPOTGIntroCompletion(recipients: { Player }, maxWaitSec
 	local deadline = os.clock() + math.max(maxWaitSeconds, 0)
 	while os.clock() < deadline do
 		if pendingAdminReset or pendingAdminForceStartMapId or pendingAdminWinnerTeam then
+			RoundFlow.cleanupPreparedPOTGIntroClones()
 			return false
 		end
 
@@ -492,12 +515,14 @@ function RoundFlow.waitForPOTGIntroCompletion(recipients: { Player }, maxWaitSec
 		end
 
 		if pendingCount <= 0 then
+			RoundFlow.cleanupPreparedPOTGIntroClones()
 			return true
 		end
 
 		task.wait(0.1)
 	end
 
+	RoundFlow.cleanupPreparedPOTGIntroClones()
 	return false
 end
 

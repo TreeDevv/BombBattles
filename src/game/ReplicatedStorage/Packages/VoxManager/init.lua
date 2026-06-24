@@ -8,6 +8,12 @@
 local Voxelizer = require(script.Voxelizer)
 local ObjectCache = require(script.ObjectCache)
 
+local VOXEL_CACHE_INITIAL_SIZE = 10000
+local VOXEL_CACHE_EXPAND_AMOUNT = 1000
+local VOXEL_CACHE_ASYNC_THRESHOLD = 1500
+local VOXEL_CACHE_ASYNC_TARGET_FREE = 3000
+local VOXEL_CACHE_ASYNC_BATCH_SIZE = 100
+
 local VoxManager = {
 	VoxelCache = nil,
 	VoxelFolder = nil,
@@ -55,8 +61,15 @@ function VoxManager:_createVoxelCache()
 	VoxManager.VoxelFolder.Name = "VoxelCache"
 	VoxManager.VoxelFolder.Parent = workspace
 
-	VoxManager.VoxelCache = ObjectCache.new(template, 10000, VoxManager.VoxelFolder)
-	VoxManager.VoxelCache:SetExpandAmount(100)
+	VoxManager.VoxelCache = ObjectCache.new(template, VOXEL_CACHE_INITIAL_SIZE, VoxManager.VoxelFolder)
+	VoxManager.VoxelCache:SetExpandAmount(VOXEL_CACHE_EXPAND_AMOUNT)
+	if type(VoxManager.VoxelCache.SetAsyncExpandOptions) == "function" then
+		VoxManager.VoxelCache:SetAsyncExpandOptions(
+			VOXEL_CACHE_ASYNC_THRESHOLD,
+			VOXEL_CACHE_ASYNC_TARGET_FREE,
+			VOXEL_CACHE_ASYNC_BATCH_SIZE
+		)
+	end
 
 	template:Destroy()
 end

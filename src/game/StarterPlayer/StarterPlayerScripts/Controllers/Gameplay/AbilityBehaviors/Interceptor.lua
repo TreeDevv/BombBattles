@@ -79,6 +79,7 @@ local ABILITIES_FOLDER_NAME = "Abilities"
 local INTERCEPTOR_FOLDER_NAME = "Interceptor"
 local HIGHLIGHT_STEP_SECONDS = 0.1
 local HIGHLIGHT_NAME = "InterceptorTeammateHighlight"
+local PLACEMENT_DISTANCE = 3
 
 local UNSAFE_TAGS = {
 	RoundConfig.Tags.TeamCore,
@@ -922,9 +923,9 @@ local function startPreview(context: ClientActivateRequestedContext): boolean
 		commitActionName = COMMIT_ACTION_NAME,
 		template = centerTemplate,
 		context = context,
-		mode = "Surface",
-		resolveTargetRoot = getTargetRoot,
-		unsafeTags = UNSAFE_TAGS,
+		mode = "ForwardSolid",
+		placementDistance = PLACEMENT_DISTANCE,
+		alwaysValid = true,
 		styleGhost = styleGhost,
 		setGhostColor = setGhostColor,
 	})
@@ -932,7 +933,7 @@ end
 
 function Interceptor.OnActivateRequested(context: ClientActivateRequestedContext): boolean
 	if preview.active then
-		cancelPreview()
+		AbilityPlacementFlow.Cancel(preview, RENDER_STEP_NAME, COMMIT_ACTION_NAME)
 		return true
 	end
 

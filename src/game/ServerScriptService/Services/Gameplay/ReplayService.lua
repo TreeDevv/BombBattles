@@ -1320,7 +1320,7 @@ local function copyDestructionEvent(event, includeDebrisPayloads: boolean?)
 	return copy
 end
 
-local function getDestructionEventsForClip(endTime: number, debrisStartTime: number?)
+local function getDestructionEventsForClip(endTime: number, debrisStartTime: number?, caps)
 	local token = RuntimeProfiler.Begin("Server/Replay/Death/GetDestructionEventsForClip")
 	local events = {}
 	if not isFiniteNumber(endTime) then
@@ -1328,7 +1328,21 @@ local function getDestructionEventsForClip(endTime: number, debrisStartTime: num
 		return events
 	end
 
-	for _, event in ipairs(roundDestructionEvents) do
+	local maxEvents = if typeof(caps) == "table" and isFiniteNumber(caps.maxDestructionEvents)
+		then math.max(math.floor(caps.maxDestructionEvents), 0)
+		else math.huge
+	if maxEvents <= 0 then
+		RuntimeProfiler.Count("Server/Replay/Death/DestructionEventsSkippedByCap", #roundDestructionEvents)
+		RuntimeProfiler.End("Server/Replay/Death/GetDestructionEventsForClip", token)
+		return events
+	end
+
+	local copied = 0
+	for index = #roundDestructionEvents, 1, -1 do
+		if copied >= maxEvents then
+			break
+		end
+		local event = roundDestructionEvents[index]
 		if typeof(event) ~= "table" or not isFiniteNumber(event.timestamp) then
 			continue
 		end
@@ -1339,7 +1353,8 @@ local function getDestructionEventsForClip(endTime: number, debrisStartTime: num
 		local includeDebrisPayloads = isFiniteNumber(debrisStartTime) and event.timestamp >= debrisStartTime - 0.001
 		local copy = copyDestructionEvent(event, includeDebrisPayloads)
 		if copy then
-			table.insert(events, copy)
+			table.insert(events, 1, copy)
+			copied += 1
 		end
 	end
 	RuntimeProfiler.Count("Server/Replay/Death/DestructionEventsScanned", #roundDestructionEvents)
@@ -1398,7 +1413,7 @@ local function getDebugRecentKillReplayWindow(currentTime: number, windowSeconds
 	return startTime, endTime, latestDestructionEvent
 end
 
-local function addMapFieldsToPayload(payload, endTime: number)
+local function addMapFieldsToPayload(payload, endTime: number, caps)
 	local token = RuntimeProfiler.Begin("Server/Replay/Death/AddMapFields")
 	if typeof(payload) ~= "table" then
 		RuntimeProfiler.End("Server/Replay/Death/AddMapFields", token)
@@ -1420,7 +1435,7 @@ local function addMapFieldsToPayload(payload, endTime: number)
 		end
 	end
 	local debrisStartTime = if isFiniteNumber(payload.startTime) then payload.startTime else nil
-	payload.destructionEvents = getDestructionEventsForClip(endTime, debrisStartTime)
+	payload.destructionEvents = getDestructionEventsForClip(endTime, debrisStartTime, caps)
 	RuntimeProfiler.End("Server/Replay/Death/AddMapFields", token)
 	return payload
 end
@@ -1444,6 +1459,7 @@ local function buildKillReplayPayload(killEvent)
 	RuntimeProfiler.End("Server/Replay/Death/BuildKill/GetClip", clipToken)
 
 	local mapToken = RuntimeProfiler.Begin("Server/Replay/Death/BuildKill/AddMapFields")
+	local caps = getKillClipCaps()
 	local payloadWithMap = addMapFieldsToPayload({
 		type = "KillReplay",
 		killerUserId = killEvent.killerUserId,
@@ -1466,11 +1482,11 @@ local function buildKillReplayPayload(killEvent)
 		endTime = clip.endTime,
 		frames = clip.frames,
 		events = clip.events,
-	}, clip.endTime)
+	}, clip.endTime, caps)
 	RuntimeProfiler.End("Server/Replay/Death/BuildKill/AddMapFields", mapToken)
 
 	local optimizeToken = RuntimeProfiler.Begin("Server/Replay/Death/BuildKill/Optimize")
-	local payload = optimizeClipPayloadForSend(payloadWithMap, getKillClipCaps(), "KillReplay")
+	local payload = optimizeClipPayloadForSend(payloadWithMap, caps, "KillReplay")
 	RuntimeProfiler.End("Server/Replay/Death/BuildKill/Optimize", optimizeToken)
 	RuntimeProfiler.End("Server/Replay/BuildKillPayload", token)
 	return payload
@@ -1626,6 +1642,7 @@ local function buildPOTGReplayPayload(candidate)
 	end
 
 	local clip = ensureBuffer():GetClip(candidate.startTime, candidate.endTime)
+	local caps = getPOTGClipCaps()
 	local payload = optimizeClipPayloadForSend(addMapFieldsToPayload({
 		type = "POTGReplay",
 		playerUserId = math.floor(candidate.playerUserId),
@@ -1645,7 +1662,7 @@ local function buildPOTGReplayPayload(candidate)
 		endTime = clip.endTime,
 		frames = clip.frames,
 		events = clip.events,
-	}, clip.endTime), getPOTGClipCaps(), "POTGReplay")
+	}, clip.endTime, caps), caps, "POTGReplay")
 	RuntimeProfiler.End("Server/Replay/BuildPOTGPayload", token)
 	return payload
 end
@@ -2419,6 +2436,7 @@ function ReplayService.DebugSendRecentKillReplay(first, second, third)
 		then destructionEvent.sourceType
 		else "ReplayDebug"
 	local clip = ensureBuffer():GetClip(startTime, endTime)
+	local caps = getKillClipCaps()
 	local payload = optimizeClipPayloadForSend(addMapFieldsToPayload({
 		type = "KillReplay",
 		killerUserId = player.UserId,
@@ -2429,7 +2447,7 @@ function ReplayService.DebugSendRecentKillReplay(first, second, third)
 		endTime = clip.endTime,
 		frames = clip.frames,
 		events = clip.events,
-	}, clip.endTime), getKillClipCaps(), "DebugKillReplay")
+	}, clip.endTime, caps), caps, "DebugKillReplay")
 
 	if typeof(payload.frames) ~= "table" or #payload.frames == 0 then
 		return false, "No replay frames available for debug kill replay"

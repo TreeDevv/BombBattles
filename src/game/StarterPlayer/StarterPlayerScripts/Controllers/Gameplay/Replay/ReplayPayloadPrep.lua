@@ -196,34 +196,79 @@ function ReplayPayloadPrep.CollectExplosionPositions(events)
 	return positionsBySourceId
 end
 
-function ReplayPayloadPrep.CollectPlayerMeta(frames)
-	local meta = {}
+function ReplayPayloadPrep.CollectReplayMeta(frames)
+	local playerMeta = {}
+	local bombMeta = {}
+	if typeof(frames) ~= "table" then
+		return playerMeta, bombMeta
+	end
+
 	for _, frame in ipairs(frames) do
-		for key, snapshot in pairs(frame.players) do
-			if not meta[key] then
-				meta[key] = {
-					userId = snapshot.userId,
-					name = snapshot.name,
-					displayName = snapshot.displayName or snapshot.name,
-					isNPC = snapshot.isNPC == true,
-					teamName = snapshot.teamName,
-					hasPose = getSnapshotPose(snapshot) ~= nil,
-					bombSkinId = snapshot.bombSkinId
+		local players = if typeof(frame) == "table" and typeof(frame.players) == "table" then frame.players else nil
+		if players then
+			for key, snapshot in pairs(players) do
+				if typeof(snapshot) ~= "table" then
+					continue
+				end
+				if not playerMeta[key] then
+					playerMeta[key] = {
+						userId = snapshot.userId,
+						name = snapshot.name,
+						displayName = snapshot.displayName or snapshot.name,
+						isNPC = snapshot.isNPC == true,
+						teamName = snapshot.teamName,
+						hasPose = getSnapshotPose(snapshot) ~= nil,
+						bombSkinId = snapshot.bombSkinId
+							or (snapshot.animationState and snapshot.animationState.bombSkinId)
+							or BombSkinConfig.DefaultSkinId,
+					}
+				elseif not playerMeta[key].hasPose and getSnapshotPose(snapshot) ~= nil then
+					playerMeta[key].hasPose = true
+				elseif playerMeta[key].displayName == nil then
+					playerMeta[key].displayName = snapshot.displayName or snapshot.name
+				elseif playerMeta[key].bombSkinId == nil then
+					playerMeta[key].bombSkinId = snapshot.bombSkinId
 						or (snapshot.animationState and snapshot.animationState.bombSkinId)
-						or BombSkinConfig.DefaultSkinId,
-				}
-			elseif not meta[key].hasPose and getSnapshotPose(snapshot) ~= nil then
-				meta[key].hasPose = true
-			elseif meta[key].displayName == nil then
-				meta[key].displayName = snapshot.displayName or snapshot.name
-			elseif meta[key].bombSkinId == nil then
-				meta[key].bombSkinId = snapshot.bombSkinId
-					or (snapshot.animationState and snapshot.animationState.bombSkinId)
-					or BombSkinConfig.DefaultSkinId
+						or BombSkinConfig.DefaultSkinId
+				end
+			end
+		end
+
+		local bombs = if typeof(frame) == "table" and typeof(frame.bombs) == "table" then frame.bombs else nil
+		if bombs then
+			for key, snapshot in pairs(bombs) do
+				if typeof(snapshot) ~= "table" then
+					continue
+				end
+				local record = bombMeta[key]
+				if not record then
+					record = {
+						bombId = snapshot.bombId,
+						bombType = snapshot.bombType,
+						bombSkinId = snapshot.bombSkinId,
+						ownerUserId = snapshot.ownerUserId,
+					}
+					bombMeta[key] = record
+				else
+					if record.bombType == nil and typeof(snapshot.bombType) == "string" and snapshot.bombType ~= "" then
+						record.bombType = snapshot.bombType
+					end
+					if record.bombSkinId == nil and typeof(snapshot.bombSkinId) == "string" and snapshot.bombSkinId ~= "" then
+						record.bombSkinId = snapshot.bombSkinId
+					end
+					if record.ownerUserId == nil and isFiniteNumber(snapshot.ownerUserId) then
+						record.ownerUserId = snapshot.ownerUserId
+					end
+				end
 			end
 		end
 	end
-	return meta
+	return playerMeta, bombMeta
+end
+
+function ReplayPayloadPrep.CollectPlayerMeta(frames)
+	local playerMeta = ReplayPayloadPrep.CollectReplayMeta(frames)
+	return playerMeta
 end
 
 function ReplayPayloadPrep.PrewarmAvatarTemplates(playerMeta)
@@ -243,32 +288,8 @@ function ReplayPayloadPrep.PrewarmAvatarTemplates(playerMeta)
 end
 
 function ReplayPayloadPrep.CollectBombMeta(frames)
-	local meta = {}
-	for _, frame in ipairs(frames) do
-		for key, snapshot in pairs(frame.bombs) do
-			local record = meta[key]
-			if not record then
-				record = {
-					bombId = snapshot.bombId,
-					bombType = snapshot.bombType,
-					bombSkinId = snapshot.bombSkinId,
-					ownerUserId = snapshot.ownerUserId,
-				}
-				meta[key] = record
-			else
-				if record.bombType == nil and typeof(snapshot.bombType) == "string" and snapshot.bombType ~= "" then
-					record.bombType = snapshot.bombType
-				end
-				if record.bombSkinId == nil and typeof(snapshot.bombSkinId) == "string" and snapshot.bombSkinId ~= "" then
-					record.bombSkinId = snapshot.bombSkinId
-				end
-				if record.ownerUserId == nil and isFiniteNumber(snapshot.ownerUserId) then
-					record.ownerUserId = snapshot.ownerUserId
-				end
-			end
-		end
-	end
-	return meta
+	local _, bombMeta = ReplayPayloadPrep.CollectReplayMeta(frames)
+	return bombMeta
 end
 
 function ReplayPayloadPrep.FindFramePair(frames, replayTime: number, startIndex: number)

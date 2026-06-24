@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Gambler = EmoteEffect.Create("Gambler", { catalogOrder = 12 })
+local Gambler = EmoteEffect.Create("Gambler", { catalogOrder = 12, rarity = "Legendary" })
 
 function Gambler:Begin(_character: Model, runtime)
 	local root = runtime:GetRoot()

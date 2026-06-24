@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local Walk = EmoteEffect.Create("Walk", { catalogOrder = 33 })
+local Walk = EmoteEffect.Create("Walk", { catalogOrder = 33, rarity = "Common" })
 
 function Walk:Begin(_character: Model, runtime)
 	runtime:PlaySound(runtime:GetChild(runtime.vfxModule, "Kinetix M"), runtime:GetRoot())

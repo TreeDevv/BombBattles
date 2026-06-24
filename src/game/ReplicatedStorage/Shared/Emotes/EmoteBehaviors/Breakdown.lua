@@ -1,7 +1,7 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
 
-local Breakdown = EmoteEffect.Create("Breakdown", { catalogOrder = 9 })
+local Breakdown = EmoteEffect.Create("Breakdown", { catalogOrder = 10, rarity = "Common" })
 
 
 function Breakdown:Begin(_character: Model, runtime)

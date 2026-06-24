@@ -8,10 +8,12 @@ local AudioSettings = require(ReplicatedStorage.Shared.Audio.AudioSettings)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
 local HighlightIntroConfig = require(ReplicatedStorage.Shared.Config.HighlightIntroConfig)
+local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 
 local DataController = require(script.Parent:WaitForChild("DataController"))
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
+local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -126,9 +128,11 @@ SkillsInventoryController._statusByAbilityId = {} :: { [string]: string }
 SkillsInventoryController._statusBySkinId = {} :: { [string]: string }
 SkillsInventoryController._statusByFinisherId = {} :: { [string]: string }
 SkillsInventoryController._statusByHighlightIntroId = {} :: { [string]: string }
+SkillsInventoryController._skillsButton = nil :: ImageButton?
 SkillsInventoryController._lastHudToggleAt = 0
 
 local warnedMissingTextStyles = {}
+local equippedHighlightIntroOverride: string? = nil
 
 local function track(list: { RBXScriptConnection }, connection: RBXScriptConnection?)
 	if connection then
@@ -182,6 +186,10 @@ local function setButtonVisible(button: ImageButton?, visible: boolean)
 
 	button.Visible = visible
 	setButtonEnabled(button, visible)
+end
+
+local function isLockedRoundState(stateName: any): boolean
+	return stateName == RoundStates.AssigningTeams or stateName == RoundStates.RoundStarting or stateName == RoundStates.Active
 end
 
 local function setBuyPrice(button: ImageButton?, price: any)
@@ -447,6 +455,11 @@ local function getEquippedFinisherId(): string
 end
 
 local function getEquippedHighlightIntroId(): string
+	local overrideIntroId = HighlightIntroConfig.NormalizeHighlightIntroId(equippedHighlightIntroOverride)
+	if overrideIntroId ~= "" then
+		return overrideIntroId
+	end
+
 	local introId = HighlightIntroConfig.NormalizeHighlightIntroId(DataController:Get(EQUIPPED_HIGHLIGHT_INTRO_KEY))
 	return if introId ~= "" then introId else HighlightIntroConfig.DefaultHighlightIntroId
 end
@@ -833,6 +846,7 @@ end
 
 function SkillsInventoryController:_disconnectHud()
 	disconnectAll(self._hudConnections)
+	self._skillsButton = nil
 end
 
 function SkillsInventoryController:_disconnectSkinTiles()
@@ -1293,6 +1307,20 @@ end
 function SkillsInventoryController:_refresh()
 	self:_updateTileStates()
 	self:_updateRightPanel()
+end
+
+function SkillsInventoryController:_isInventoryLocked(): boolean
+	local state = RoundController:GetState()
+	return typeof(state) == "table" and isLockedRoundState(state.state)
+end
+
+function SkillsInventoryController:_syncRoundLock()
+	local locked = self:_isInventoryLocked()
+	setButtonEnabled(self._skillsButton, not locked)
+
+	if locked then
+		FrameController:CloseFrame(FRAME_NAME, true)
+	end
 end
 
 function SkillsInventoryController:_selectAbility(abilityId: string)
@@ -2081,6 +2109,11 @@ function SkillsInventoryController:_toggleFrameFromHud()
 	end
 
 	self._lastHudToggleAt = now
+	if self:_isInventoryLocked() then
+		self:_syncRoundLock()
+		return
+	end
+
 	FrameController:ToggleFrame(FRAME_NAME)
 end
 
@@ -2113,12 +2146,14 @@ function SkillsInventoryController:_bindHud(hud: Instance?)
 
 	skillsButton.Active = true
 	skillsButton.Selectable = true
+	self._skillsButton = skillsButton
 	track(self._hudConnections, skillsButton.Activated:Connect(function()
 		self:_toggleFrameFromHud()
 	end))
 	track(self._hudConnections, skillsButton.MouseButton1Click:Connect(function()
 		self:_toggleFrameFromHud()
 	end))
+	self:_syncRoundLock()
 end
 
 function SkillsInventoryController:_bindCurrentHud()
@@ -2189,6 +2224,11 @@ function SkillsInventoryController:_bindRemote()
 				self._statusByHighlightIntroId[introId] =
 					if response.ok == true then nil else tostring(response.message or "Highlight intro action failed.")
 			end
+			local equippedIntroId = HighlightIntroConfig.NormalizeHighlightIntroId(response.equippedHighlightIntroId)
+			if response.ok == true and equippedIntroId ~= "" then
+				equippedHighlightIntroOverride = equippedIntroId
+				LocalPlayer:SetAttribute(HighlightIntroConfig.AttributeName, equippedIntroId)
+			end
 
 			self:_refresh()
 		end))
@@ -2210,6 +2250,7 @@ function SkillsInventoryController:OnStart()
 		if child.Name == FRAMES_GUI_NAME then
 			task.defer(function()
 				self:_bindCurrentFrame()
+				self:_syncRoundLock()
 			end)
 		elseif child.Name == HUD_GUI_NAME then
 			task.defer(function()
@@ -2217,6 +2258,18 @@ function SkillsInventoryController:OnStart()
 			end)
 		end
 	end))
+
+	track(self._connections, RoundController.StateReceived:Connect(function()
+		self:_syncRoundLock()
+	end))
+	track(self._connections, RoundController.StateUpdated:Connect(function(key)
+		if key == "state" then
+			self:_syncRoundLock()
+		end
+	end))
+	if RoundController.Loaded then
+		self:_syncRoundLock()
+	end
 
 	track(self._connections, DataController.DataReceived:Connect(function()
 		if self._containers[SKINS_TAB_NAME] then
@@ -2273,6 +2326,7 @@ function SkillsInventoryController:OnStart()
 		elseif key == EQUIPPED_FINISHER_KEY then
 			self:_refresh()
 		elseif key == EQUIPPED_HIGHLIGHT_INTRO_KEY then
+			equippedHighlightIntroOverride = nil
 			self:_refresh()
 		end
 	end))

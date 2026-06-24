@@ -137,6 +137,9 @@
         "RoundKillFeedRuntime": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundKillFeedRuntime.lua"
         },
+        "RoundPOTGIntroRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundPOTGIntroRuntime.lua"
+        },
         "RoundReplayRuntime": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundReplayRuntime.lua"
         },

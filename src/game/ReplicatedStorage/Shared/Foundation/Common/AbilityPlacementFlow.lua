@@ -13,6 +13,7 @@ local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 export type TargetRootResolver = () -> Instance?
 export type GhostStyler = (Instance, any) -> ()
 export type GhostColorer = (Instance, any, boolean) -> ()
+type PreviewMode = "Surface" | "Floor" | "ForwardOffsetFloat" | "ForwardSolid"
 export type PlacementState = {
 	active: boolean,
 	controller: any?,
@@ -37,7 +38,7 @@ export type PreviewOptions = {
 	commitActionName: string,
 	template: Instance,
 	context: any,
-	mode: "Surface" | "Floor" | "ForwardOffsetFloat",
+	mode: PreviewMode,
 	resolveTargetRoot: TargetRootResolver?,
 	unsafeTags: { string }?,
 	extraExcludeInstances: { Instance }?,
@@ -196,6 +197,20 @@ function AbilityPlacementFlow.ResolveForwardOffsetPlacement(options): PlacementS
 	})
 end
 
+function AbilityPlacementFlow.ResolveForwardSolidPlacement(options): PlacementSurfaceUtil.FloorPlacement?
+	local rootPart = AbilityPlacementFlow.GetRootPart()
+	if not rootPart then
+		return nil
+	end
+
+	return PlacementSurfaceUtil.ResolveForwardSolidPlacement({
+		rootPart = rootPart,
+		definition = options.definition,
+		distance = options.placementDistance,
+		excludeInstances = AbilityPlacementFlow.GetExcludes(options.previewFolderName or "", options.extraExcludeInstances),
+	})
+end
+
 function AbilityPlacementFlow.Cancel(state: PlacementState, renderStepName: string, commitActionName: string)
 	RunService:UnbindFromRenderStep(renderStepName)
 	ContextActionService:UnbindAction(commitActionName)
@@ -229,7 +244,7 @@ end
 local function setStatePlacement(
 	state: PlacementState,
 	placement: PlacementSurfaceUtil.FloorPlacement,
-	mode: "Surface" | "Floor" | "ForwardOffsetFloat"
+	mode: PreviewMode
 )
 	state.facing = placement.facing
 	if mode == "Surface" then
@@ -237,7 +252,7 @@ local function setStatePlacement(
 		state.surfaceNormal = placement.normal
 		state.floorPosition = nil
 		state.floatingPosition = nil
-	elseif mode == "ForwardOffsetFloat" then
+	elseif mode == "ForwardOffsetFloat" or mode == "ForwardSolid" then
 		state.surfacePosition = nil
 		state.surfaceNormal = nil
 		state.floorPosition = nil
@@ -254,7 +269,7 @@ function AbilityPlacementFlow.Commit(
 	state: PlacementState,
 	renderStepName: string,
 	commitActionName: string,
-	mode: "Surface" | "Floor" | "ForwardOffsetFloat"
+	mode: PreviewMode
 )
 	if not state.active or not state.valid or not state.controller then
 		return
@@ -271,6 +286,8 @@ function AbilityPlacementFlow.Commit(
 		payload = {
 			facing = state.facing,
 		}
+	elseif mode == "ForwardSolid" then
+		payload = nil
 	else
 		payload = {
 			floorPosition = state.floorPosition,
@@ -335,6 +352,13 @@ function AbilityPlacementFlow.StartPreview(options: PreviewOptions): boolean
 		elseif options.mode == "ForwardOffsetFloat" then
 			placement = AbilityPlacementFlow.ResolveForwardOffsetPlacement({
 				definition = definition,
+				placementDistance = options.placementDistance,
+			})
+		elseif options.mode == "ForwardSolid" then
+			placement = AbilityPlacementFlow.ResolveForwardSolidPlacement({
+				definition = definition,
+				previewFolderName = options.previewFolderName,
+				extraExcludeInstances = options.extraExcludeInstances,
 				placementDistance = options.placementDistance,
 			})
 		else

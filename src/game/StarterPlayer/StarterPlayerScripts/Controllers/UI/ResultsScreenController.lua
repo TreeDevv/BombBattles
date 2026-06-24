@@ -338,12 +338,6 @@ function ResultsScreenController:_setPersonalStats(playerResult: PlayerResult?)
 	setStatLabel(statsFrame, "CoinsEarned", getRewardValue(rewards, "baseCoins"))
 	setStatLabel(statsFrame, "VIPBonus", getRewardValue(rewards, "vipBonusCoins"))
 	setStatLabel(statsFrame, "TotalCoins", getRewardValue(rewards, "totalCoins"))
-	setStatLabel(statsFrame, "CompleteMatch", getRewardValue(rewards, "completeMatchCoins"))
-	setStatLabel(statsFrame, "EliminationsReward", getRewardValue(rewards, "eliminationCoins"))
-	setStatLabel(statsFrame, "AssistsReward", getRewardValue(rewards, "assistCoins"))
-	setStatLabel(statsFrame, "WinReward", getRewardValue(rewards, "winCoins"))
-	setStatLabel(statsFrame, "POTGReward", getRewardValue(rewards, "potgCoins"))
-	setStatLabel(statsFrame, "DamageReward", getRewardValue(rewards, "damageCoins"))
 end
 
 function ResultsScreenController:_setBanner(results, playerResult: PlayerResult?)

@@ -1,7 +1,7 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
 
-local Reanimated = EmoteEffect.Create("Reanimated", { catalogOrder = 24,previewPauseTimeSeconds = 2 })
+local Reanimated = EmoteEffect.Create("Reanimated", { catalogOrder = 24, rarity = "Common", previewPauseTimeSeconds = 2 })
 
 
 function Reanimated:Begin(_character: Model, runtime)

@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local HonoredOne = EmoteEffect.Create("Honored One", { catalogOrder = 36, previewPauseTimeSeconds = 2 })
+local HonoredOne = EmoteEffect.Create("Honored One", { catalogOrder = 36, rarity = "Divine", previewPauseTimeSeconds = 2 })
 
 
 function HonoredOne:Begin(_character: Model, runtime)

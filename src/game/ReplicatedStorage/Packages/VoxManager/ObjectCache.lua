@@ -3,6 +3,9 @@
 
 local FAR_AWAY_CFRAME = CFrame.new(2 ^ 24, 2 ^ 24, 2 ^ 24)
 local EXPAND_BY_AMOUNT = 50
+local ASYNC_EXPAND_THRESHOLD = 500
+local ASYNC_EXPAND_TARGET_FREE = 1500
+local ASYNC_EXPAND_BATCH_SIZE = 100
 
 local MovingParts = table.create(10000)
 local MovingCFrames = table.create(10000)
@@ -26,7 +29,12 @@ local UpdateMovementThread = coroutine.create(UpdateMovement)
 local Cache = {}
 Cache.__index = Cache
 
-function Cache:_GetNew(Amount: number, Warn: boolean)
+function Cache:_Expand(Amount: number, Warn: boolean)
+	Amount = math.max(math.floor(Amount), 0)
+	if Amount <= 0 then
+		return
+	end
+
 	if Warn then
 		warn(`ObjectCache: Cache retrieval exceeded preallocated amount! expanding by {Amount}...`)
 	end
@@ -59,12 +67,43 @@ function Cache:_GetNew(Amount: number, Warn: boolean)
 		local ObjectInstance = Object :: Instance
 		ObjectInstance.Parent = CacheHolder
 	end
+end
 
-	return table.remove(FreeObjectsContainer)
+function Cache:_GetNew(Amount: number, Warn: boolean)
+	self:_Expand(Amount, Warn)
+	return table.remove(self._FreeObjects)
+end
+
+function Cache:_ScheduleAsyncExpand()
+	if self._AsyncExpansionScheduled then
+		return
+	end
+	local threshold = self._AsyncExpandThreshold or ASYNC_EXPAND_THRESHOLD
+	if #self._FreeObjects > threshold then
+		return
+	end
+
+	self._AsyncExpansionScheduled = true
+	task.spawn(function()
+		local ok, err = pcall(function()
+			local targetFree = math.max(self._AsyncExpandTargetFree or ASYNC_EXPAND_TARGET_FREE, threshold)
+			local batchSize = math.max(self._AsyncExpandBatchSize or ASYNC_EXPAND_BATCH_SIZE, 1)
+			while self.CacheHolder and self.CacheHolder.Parent and #self._FreeObjects < targetFree do
+				local amount = math.min(batchSize, targetFree - #self._FreeObjects)
+				self:_Expand(amount, false)
+				task.wait()
+			end
+		end)
+		self._AsyncExpansionScheduled = false
+		if not ok then
+			warn(`ObjectCache: Async cache expansion failed: {err}`)
+		end
+	end)
 end
 
 function Cache:GetPart(PartCFrame: CFrame?): BasePart
 	local Part = table.remove(self._FreeObjects) or self:_GetNew(self._ExpandAmount, true)
+	self:_ScheduleAsyncExpand()
 
 	self._Objects[Part] = nil
 	if PartCFrame then
@@ -103,18 +142,30 @@ end
 
 function Cache:ExpandCache(Amount: number)
 	assert(
-		typeof(Amount) ~= "number" or Amount >= 0,
+		typeof(Amount) == "number" and Amount >= 0,
 		`Invalid argument #1 to 'ObjectCache:ExpandCache' (positive number expected, got {typeof(Amount)})`
 	)
-	self:_GetNew(Amount, false)
+	self:_Expand(Amount, false)
 end
 
 function Cache:SetExpandAmount(Amount: number)
 	assert(
-		typeof(Amount) ~= "number" or Amount > 0,
+		typeof(Amount) == "number" and Amount > 0,
 		`Invalid argument #1 to 'ObjectCache:SetExpandAmount' (positive number expected, got {typeof(Amount)})`
 	)
 	self._ExpandAmount = Amount
+end
+
+function Cache:SetAsyncExpandOptions(threshold: number?, targetFree: number?, batchSize: number?)
+	if typeof(threshold) == "number" and threshold >= 0 then
+		self._AsyncExpandThreshold = math.floor(threshold)
+	end
+	if typeof(targetFree) == "number" and targetFree >= 0 then
+		self._AsyncExpandTargetFree = math.floor(targetFree)
+	end
+	if typeof(batchSize) == "number" and batchSize > 0 then
+		self._AsyncExpandBatchSize = math.floor(batchSize)
+	end
 end
 
 function Cache:IsInUse(Object: BasePart): boolean
@@ -182,6 +233,10 @@ function Constructor.new(Template: BasePart | Model, CacheSize: number?, CachesC
 		_Objects = Objects :: { [BasePart]: boolean },
 		_IsTemplateModel = IsTemplateModel,
 		_PreallocatedAmount = PreallocAmount,
+		_AsyncExpandThreshold = ASYNC_EXPAND_THRESHOLD,
+		_AsyncExpandTargetFree = ASYNC_EXPAND_TARGET_FREE,
+		_AsyncExpandBatchSize = ASYNC_EXPAND_BATCH_SIZE,
+		_AsyncExpansionScheduled = false,
 	}, Cache)
 end
 

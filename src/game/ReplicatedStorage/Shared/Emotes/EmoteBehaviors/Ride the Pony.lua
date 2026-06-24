@@ -1,6 +1,6 @@
 local EmoteEffect = require(script.Parent.Parent.EmoteEffect)
 
-local RidethePony = EmoteEffect.Create("Ride the Pony", { catalogOrder = 13 })
+local RidethePony = EmoteEffect.Create("Ride the Pony", { catalogOrder = 13, rarity = "Common" })
 
 
 

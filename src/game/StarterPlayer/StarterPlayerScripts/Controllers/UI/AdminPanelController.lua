@@ -5,6 +5,7 @@ local UserInputService = game:GetService("UserInputService")
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
+local HighlightIntroConfig = require(ReplicatedStorage.Shared.Config.HighlightIntroConfig)
 local CrateRollController = require(script.Parent:WaitForChild("CrateRollController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -44,6 +45,17 @@ local function getRemote(): RemoteFunction?
 
 	local remote = remotes:WaitForChild(AdminConfig.RequestRemoteName, 10)
 	return if remote and remote:IsA("RemoteFunction") then remote else nil
+end
+
+local function getCurrentHighlightIntroPayload()
+	local introId = HighlightIntroConfig.NormalizeHighlightIntroId(LocalPlayer:GetAttribute(HighlightIntroConfig.AttributeName))
+	if introId == "" then
+		return {}
+	end
+
+	return {
+		cutsceneId = introId,
+	}
 end
 
 local function createCorner(parent: Instance, radius: number?)
@@ -520,7 +532,7 @@ function AdminPanelController:_buildPanel()
 
 	self:_addSection(scroller, "Cutscene")
 	self:_addButton(scroller, "Play POTG Cutscene", function()
-		self:_runCommand("cutscene.playPOTG", {})
+		self:_runCommand("cutscene.playPOTG", getCurrentHighlightIntroPayload())
 	end)
 
 	self:_addSection(scroller, "Player")

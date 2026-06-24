@@ -6,6 +6,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
+local HighlightIntroConfig = require(ReplicatedStorage.Shared.Config.HighlightIntroConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
 local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
@@ -13,6 +14,7 @@ local BombService = require(ServerScriptService.Services.BombService)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
 local DataService = require(ServerScriptService.Services.DataService)
 local FinisherService = require(ServerScriptService.Services.FinisherService)
+local HighlightIntroService = require(ServerScriptService.Services.HighlightIntroService)
 local ReplayService = require(ServerScriptService.Services.ReplayService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
@@ -66,6 +68,19 @@ local function isDebugAllowedUserId(userId: number): boolean
 	end
 
 	return isAllowedUserId(userId)
+end
+
+local function getRequestedHighlightIntroId(payload): string?
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+
+	local cutsceneId = HighlightIntroConfig.NormalizeHighlightIntroId(payload.cutsceneId or payload.highlightIntroId)
+	if cutsceneId ~= "" and HighlightIntroConfig.IsKnownHighlightIntroId(cutsceneId) then
+		return cutsceneId
+	end
+
+	return nil
 end
 
 local function isGameCreator(player: Player): boolean
@@ -336,7 +351,9 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 	elseif command == "cutscene.playPOTG" then
 		local remote = potgCutsceneRemote or ensurePOTGCutsceneRemote()
 		potgCutsceneRemote = remote
+		local cutsceneId = getRequestedHighlightIntroId(payload) or HighlightIntroService:GetEquippedHighlightIntroId(adminPlayer)
 		remote:FireClient(adminPlayer, {
+			cutsceneId = cutsceneId,
 			requestedAt = workspace:GetServerTimeNow(),
 		})
 		return result(true, "Playing POTG cutscene", getStatePayload())

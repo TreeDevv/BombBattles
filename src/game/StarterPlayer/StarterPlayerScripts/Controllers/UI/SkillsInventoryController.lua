@@ -7,6 +7,7 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AudioSettings = require(ReplicatedStorage.Shared.Audio.AudioSettings)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
+local HighlightIntroConfig = require(ReplicatedStorage.Shared.Config.HighlightIntroConfig)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 
 local DataController = require(script.Parent:WaitForChild("DataController"))
@@ -23,12 +24,15 @@ local SKILLS_BUTTON_NAME = "Skills"
 local SKILLS_LABEL_TEXT = "SKILLS"
 local SKINS_TAB_NAME = "Skins"
 local FINISHERS_TAB_NAME = "Finishers"
+local INTROS_TAB_NAME = "Intros"
+local LEGACY_HIGHLIGHT_INTROS_TAB_NAME = "HighlightIntros"
 local HUD_TOGGLE_DEBOUNCE_SECONDS = 0.08
 local TILE_SLOT_NAME = "SkillsInventoryTileSlot"
 local TILE_SCALE_NAME = "SkillsInventoryVisualScale"
 local SKIN_TEMPLATE_SUFFIX = "Template"
 local SKIN_RUNTIME_TILE_ATTRIBUTE = "RuntimeSkinTile"
 local FINISHER_RUNTIME_TILE_ATTRIBUTE = "RuntimeFinisherTile"
+local HIGHLIGHT_INTRO_RUNTIME_TILE_ATTRIBUTE = "RuntimeHighlightIntroTile"
 local TILE_HOVER_SIZE_FACTOR = 1.01
 local TILE_PRESSED_SIZE_FACTOR = 0.9
 local TILE_TWEEN_INFO = TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -44,6 +48,9 @@ local EQUIPPED_SKIN_KEY = Schema.EquippedBombSkin and Schema.EquippedBombSkin.ke
 local OWNED_FINISHERS_KEY = Schema.OwnedFinishers and Schema.OwnedFinishers.key or "ownedFinishers"
 local FINISHER_COPIES_KEY = Schema.FinisherCopies and Schema.FinisherCopies.key or "finisherCopies"
 local EQUIPPED_FINISHER_KEY = Schema.EquippedFinisher and Schema.EquippedFinisher.key or "equippedFinisher"
+local OWNED_HIGHLIGHT_INTROS_KEY = Schema.OwnedHighlightIntros and Schema.OwnedHighlightIntros.key or "ownedHighlightIntros"
+local HIGHLIGHT_INTRO_COPIES_KEY = Schema.HighlightIntroCopies and Schema.HighlightIntroCopies.key or "highlightIntroCopies"
+local EQUIPPED_HIGHLIGHT_INTRO_KEY = Schema.EquippedHighlightIntro and Schema.EquippedHighlightIntro.key or "equippedHighlightIntro"
 
 type TileRecord = {
 	button: ImageButton,
@@ -62,6 +69,12 @@ type SkinTileRecord = {
 type FinisherTileRecord = {
 	button: ImageButton,
 	finisherId: string,
+	normalSize: UDim2,
+}
+
+type HighlightIntroTileRecord = {
+	button: ImageButton,
+	highlightIntroId: string,
 	normalSize: UDim2,
 }
 
@@ -89,6 +102,7 @@ SkillsInventoryController._hudConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._tileConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._skinTileConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._finisherTileConnections = {} :: { RBXScriptConnection }
+SkillsInventoryController._highlightIntroTileConnections = {} :: { RBXScriptConnection }
 SkillsInventoryController._frame = nil :: GuiObject?
 SkillsInventoryController._right = nil :: Instance?
 SkillsInventoryController._topbar = nil :: Instance?
@@ -96,18 +110,22 @@ SkillsInventoryController._containers = {} :: { [string]: GuiObject }
 SkillsInventoryController._tilesByAbilityId = {} :: { [string]: TileRecord }
 SkillsInventoryController._skinTilesBySkinId = {} :: { [string]: SkinTileRecord }
 SkillsInventoryController._finisherTilesByFinisherId = {} :: { [string]: FinisherTileRecord }
+SkillsInventoryController._highlightIntroTilesById = {} :: { [string]: HighlightIntroTileRecord }
 SkillsInventoryController._tileTweens = {} :: { [ImageButton]: Tween }
 SkillsInventoryController._selectedTab = AbilityConfig.Slots.Offensive
 SkillsInventoryController._selectedSlot = AbilityConfig.Slots.Offensive
 SkillsInventoryController._selectedAbilityId = ""
 SkillsInventoryController._selectedSkinId = BombSkinConfig.DefaultSkinId
 SkillsInventoryController._selectedFinisherId = FinisherConfig.DefaultFinisherId
+SkillsInventoryController._selectedHighlightIntroId = HighlightIntroConfig.DefaultHighlightIntroId
 SkillsInventoryController._remote = nil :: RemoteEvent?
 SkillsInventoryController._skinRemote = nil :: RemoteEvent?
 SkillsInventoryController._finisherRemote = nil :: RemoteEvent?
+SkillsInventoryController._highlightIntroRemote = nil :: RemoteEvent?
 SkillsInventoryController._statusByAbilityId = {} :: { [string]: string }
 SkillsInventoryController._statusBySkinId = {} :: { [string]: string }
 SkillsInventoryController._statusByFinisherId = {} :: { [string]: string }
+SkillsInventoryController._statusByHighlightIntroId = {} :: { [string]: string }
 SkillsInventoryController._lastHudToggleAt = 0
 
 local warnedMissingTextStyles = {}
@@ -166,7 +184,7 @@ local function setButtonVisible(button: ImageButton?, visible: boolean)
 	setButtonEnabled(button, visible)
 end
 
-local function setBuyPrice(button: ImageButton?, price: number)
+local function setBuyPrice(button: ImageButton?, price: any)
 	if not button then
 		return
 	end
@@ -174,7 +192,11 @@ local function setBuyPrice(button: ImageButton?, price: number)
 	local cost = button:FindFirstChild("Cost")
 	local statNumber = findTextLabel(cost, "StatNumber")
 	if statNumber then
-		statNumber.Text = tostring(math.max(math.floor(price), 0))
+		if typeof(price) == "number" then
+			statNumber.Text = tostring(math.max(math.floor(price), 0))
+		else
+			statNumber.Text = tostring(price or "")
+		end
 	end
 end
 
@@ -209,6 +231,7 @@ local function getInventoryTabs(): { string }
 		AbilityConfig.Slots.Defensive,
 		SKINS_TAB_NAME,
 		FINISHERS_TAB_NAME,
+		INTROS_TAB_NAME,
 	}
 end
 
@@ -239,6 +262,16 @@ local function getFinisherRemote(): RemoteEvent?
 	end
 
 	local remote = remotes:WaitForChild(FinisherConfig.InventoryRequestRemoteName, 10)
+	return if remote and remote:IsA("RemoteEvent") then remote else nil
+end
+
+local function getHighlightIntroRemote(): RemoteEvent?
+	local remotes = ReplicatedStorage:WaitForChild(HighlightIntroConfig.RemotesFolderName, 10)
+	if not remotes then
+		return nil
+	end
+
+	local remote = remotes:WaitForChild(HighlightIntroConfig.InventoryRequestRemoteName, 10)
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
 end
 
@@ -346,6 +379,16 @@ local function getOwnedFinishers(): { [string]: boolean }
 	return owned
 end
 
+local function getOwnedHighlightIntros(): { [string]: boolean }
+	local owned = {}
+	for _, introId in ipairs(HighlightIntroConfig.GetCatalogIds()) do
+		if HighlightIntroConfig.IsKnownHighlightIntroId(introId) then
+			owned[introId] = true
+		end
+	end
+	return owned
+end
+
 local function getFinisherCopies(): { [string]: number }
 	local rawCopies = DataController:Get(FINISHER_COPIES_KEY)
 	local owned = getOwnedFinishers()
@@ -370,6 +413,30 @@ local function getFinisherCopies(): { [string]: number }
 	return copies
 end
 
+local function getHighlightIntroCopies(): { [string]: number }
+	local rawCopies = DataController:Get(HIGHLIGHT_INTRO_COPIES_KEY)
+	local owned = getOwnedHighlightIntros()
+	local copies = {}
+
+	if typeof(rawCopies) == "table" then
+		for rawIntroId, rawCount in pairs(rawCopies) do
+			local introId = HighlightIntroConfig.NormalizeHighlightIntroId(rawIntroId)
+			local count = math.floor(tonumber(rawCount) or 0)
+			if introId ~= "" and owned[introId] == true and count > 0 then
+				copies[introId] = count
+			end
+		end
+	end
+
+	for introId in pairs(owned) do
+		if (copies[introId] or 0) < 1 then
+			copies[introId] = 1
+		end
+	end
+
+	return copies
+end
+
 local function getEquippedSkinId(): string
 	local skinId = BombSkinConfig.NormalizeSkinId(DataController:Get(EQUIPPED_SKIN_KEY))
 	return if skinId ~= "" then skinId else BombSkinConfig.DefaultSkinId
@@ -377,6 +444,11 @@ end
 
 local function getEquippedFinisherId(): string
 	return FinisherConfig.NormalizeFinisherId(DataController:Get(EQUIPPED_FINISHER_KEY))
+end
+
+local function getEquippedHighlightIntroId(): string
+	local introId = HighlightIntroConfig.NormalizeHighlightIntroId(DataController:Get(EQUIPPED_HIGHLIGHT_INTRO_KEY))
+	return if introId ~= "" then introId else HighlightIntroConfig.DefaultHighlightIntroId
 end
 
 local function getLoadout(): { [string]: string }
@@ -398,6 +470,11 @@ end
 local finisherRarityRank = {}
 for index, rarity in ipairs(FinisherConfig.RarityOrder) do
 	finisherRarityRank[rarity] = index
+end
+
+local highlightIntroRarityRank = {}
+for index, rarity in ipairs(HighlightIntroConfig.RarityOrder) do
+	highlightIntroRarityRank[rarity] = index
 end
 
 local function getSortedOwnedSkinIds(): { string }
@@ -456,6 +533,34 @@ local function getSortedOwnedFinisherIds(): { string }
 	return finisherIds
 end
 
+local function getSortedOwnedHighlightIntroIds(): { string }
+	local owned = getOwnedHighlightIntros()
+	local introIds = {}
+
+	for introId in pairs(owned) do
+		if HighlightIntroConfig.IsKnownHighlightIntroId(introId) then
+			table.insert(introIds, introId)
+		end
+	end
+
+	table.sort(introIds, function(leftId, rightId)
+		local left = HighlightIntroConfig.GetDefinition(leftId)
+		local right = HighlightIntroConfig.GetDefinition(rightId)
+		local leftRank = if left then highlightIntroRarityRank[left.rarity] or math.huge else math.huge
+		local rightRank = if right then highlightIntroRarityRank[right.rarity] or math.huge else math.huge
+
+		if leftRank == rightRank then
+			local leftOrder = if left then tonumber(left.catalogOrder) or 0 else 0
+			local rightOrder = if right then tonumber(right.catalogOrder) or 0 else 0
+			return leftOrder < rightOrder
+		end
+
+		return leftRank < rightRank
+	end)
+
+	return introIds
+end
+
 local function findAbilityContainer(frame: Instance, name: string): GuiObject?
 	for _, child in ipairs(frame:GetChildren()) do
 		if child.Name == name and child:IsA("GuiObject") and child:FindFirstChildWhichIsA("ScrollingFrame") then
@@ -484,6 +589,34 @@ local function findFinisherTemplate(scroller: ScrollingFrame, rarity: string?): 
 	end
 
 	return if template and template:IsA("ImageButton") then template else nil
+end
+
+local function findHighlightIntroTemplate(scroller: ScrollingFrame, rarity: string?): ImageButton?
+	local templateName = tostring(rarity or HighlightIntroConfig.Rarities.Common) .. SKIN_TEMPLATE_SUFFIX
+	local template = scroller:FindFirstChild(templateName)
+	if not (template and template:IsA("ImageButton")) then
+		template = scroller:FindFirstChild(HighlightIntroConfig.Rarities.Common .. SKIN_TEMPLATE_SUFFIX)
+	end
+
+	return if template and template:IsA("ImageButton") then template else nil
+end
+
+local function ensureHighlightIntroContainer(frame: Instance): GuiObject?
+	local existing = findAbilityContainer(frame, INTROS_TAB_NAME)
+	if existing then
+		return existing
+	end
+
+	local source = findAbilityContainer(frame, FINISHERS_TAB_NAME) or findAbilityContainer(frame, SKINS_TAB_NAME)
+	if not source then
+		return nil
+	end
+
+	local clone = source:Clone()
+	clone.Name = INTROS_TAB_NAME
+	clone.Visible = false
+	clone.Parent = frame
+	return clone
 end
 
 local function formatSkinTileName(definition, copyCount: number): string
@@ -726,6 +859,18 @@ function SkillsInventoryController:_disconnectFinisherTiles()
 	table.clear(self._finisherTilesByFinisherId)
 end
 
+function SkillsInventoryController:_disconnectHighlightIntroTiles()
+	for _, record in pairs(self._highlightIntroTilesById) do
+		self:_cancelTileTween(record.button)
+		if record.button.Parent then
+			record.button.Size = record.normalSize
+		end
+	end
+
+	disconnectAll(self._highlightIntroTileConnections)
+	table.clear(self._highlightIntroTilesById)
+end
+
 function SkillsInventoryController:_disconnectTiles()
 	for button, tween in pairs(self._tileTweens) do
 		tween:Cancel()
@@ -740,6 +885,7 @@ function SkillsInventoryController:_disconnectTiles()
 	table.clear(self._tilesByAbilityId)
 	self:_disconnectSkinTiles()
 	self:_disconnectFinisherTiles()
+	self:_disconnectHighlightIntroTiles()
 end
 
 function SkillsInventoryController:_disconnectFrame()
@@ -767,7 +913,13 @@ function SkillsInventoryController:_setTopbarState(slot: string)
 			or child.Name == AbilityConfig.Slots.Defensive
 			or child.Name == SKINS_TAB_NAME
 			or child.Name == FINISHERS_TAB_NAME
+			or child.Name == INTROS_TAB_NAME
 		local isSelected = child.Name == slot
+		if child.Name == LEGACY_HIGHLIGHT_INTROS_TAB_NAME then
+			isEnabledTab = false
+			isSelected = false
+			child.Visible = false
+		end
 		child:SetAttribute("Selected", isSelected)
 		child:SetAttribute("Disabled", not isEnabledTab)
 		setButtonEnabled(child, isEnabledTab)
@@ -784,6 +936,7 @@ function SkillsInventoryController:_updateTileStates()
 	local owned = getOwnedAbilities()
 	local equippedSkinId = getEquippedSkinId()
 	local equippedFinisherId = getEquippedFinisherId()
+	local equippedHighlightIntroId = getEquippedHighlightIntroId()
 
 	for abilityId, record in pairs(self._tilesByAbilityId) do
 		local isSelected = AbilityConfig.IsKnownSlot(self._selectedTab) and abilityId == self._selectedAbilityId
@@ -807,6 +960,15 @@ function SkillsInventoryController:_updateTileStates()
 	for finisherId, record in pairs(self._finisherTilesByFinisherId) do
 		local isSelected = self._selectedTab == FINISHERS_TAB_NAME and finisherId == self._selectedFinisherId
 		local isEquipped = equippedFinisherId == finisherId
+
+		record.button:SetAttribute("Selected", isSelected)
+		record.button:SetAttribute("Owned", true)
+		record.button:SetAttribute("Equipped", isEquipped)
+	end
+
+	for introId, record in pairs(self._highlightIntroTilesById) do
+		local isSelected = self._selectedTab == INTROS_TAB_NAME and introId == self._selectedHighlightIntroId
+		local isEquipped = equippedHighlightIntroId == introId
 
 		record.button:SetAttribute("Selected", isSelected)
 		record.button:SetAttribute("Owned", true)
@@ -956,6 +1118,77 @@ function SkillsInventoryController:_updateFinisherRightPanel()
 	end
 end
 
+function SkillsInventoryController:_updateHighlightIntroRightPanel()
+	local right = self._right
+	if not right then
+		return
+	end
+
+	local introId = self._selectedHighlightIntroId
+	local definition = HighlightIntroConfig.GetDefinition(introId)
+	local owned = getOwnedHighlightIntros()
+	local icon = findImage(right, "Icon")
+	local nameLabel = findTextLabel(right, "AbilityName")
+	local descriptionLabel = findTextLabel(right, "Description")
+	local buyButton = findButton(right, "BuyButton")
+	local equipButton = findButton(right, "EquipButton")
+	local unequipButton = findButton(right, "UnequipButton")
+	local favoriteButton = findButton(right, "FavoriteButton")
+	local warning = findTextLabel(right, "Warning")
+
+	if not (definition and owned[definition.id] == true) then
+		if icon then
+			icon.Image = ""
+		end
+		if nameLabel then
+			nameLabel.Text = ""
+		end
+		if descriptionLabel then
+			descriptionLabel.Text = ""
+		end
+		setButtonVisible(buyButton, false)
+		setButtonVisible(equipButton, false)
+		setButtonVisible(unequipButton, false)
+		setButtonVisible(favoriteButton, false)
+		if warning then
+			warning.Visible = false
+		end
+		return
+	end
+
+	local isEquipped = getEquippedHighlightIntroId() == definition.id
+
+	if icon then
+		icon.Image = definition.iconImage or ""
+	end
+	if nameLabel then
+		nameLabel.Text = definition.displayName or definition.id
+	end
+	if descriptionLabel then
+		descriptionLabel.Text = definition.description or ""
+	end
+
+	setButtonLabel(equipButton, "EQUIP")
+	setButtonLabel(unequipButton, "EQUIPPED")
+	setButtonVisible(buyButton, false)
+	setButtonVisible(equipButton, not isEquipped)
+	setButtonVisible(unequipButton, isEquipped)
+	if isEquipped then
+		setButtonEnabled(unequipButton, false)
+	end
+	setButtonVisible(favoriteButton, false)
+
+	if warning then
+		local statusText = self._statusByHighlightIntroId[definition.id]
+		if statusText and statusText ~= "" then
+			warning.Text = statusText
+			warning.Visible = true
+		else
+			warning.Visible = false
+		end
+	end
+end
+
 function SkillsInventoryController:_updateRightPanel()
 	if self._selectedTab == SKINS_TAB_NAME then
 		self:_updateSkinRightPanel()
@@ -963,6 +1196,10 @@ function SkillsInventoryController:_updateRightPanel()
 	end
 	if self._selectedTab == FINISHERS_TAB_NAME then
 		self:_updateFinisherRightPanel()
+		return
+	end
+	if self._selectedTab == INTROS_TAB_NAME then
+		self:_updateHighlightIntroRightPanel()
 		return
 	end
 
@@ -1007,6 +1244,9 @@ function SkillsInventoryController:_updateRightPanel()
 	local isOwned = owned[definition.id] == true
 	local isEquipped = loadout[definition.slot] == definition.id
 	local price = math.max(math.floor(tonumber(definition.price) or 0), 0)
+	local purchaseKind = definition.purchaseKind or AbilityConfig.PurchaseKinds.Coins
+	local canBuyWithCoins = purchaseKind == AbilityConfig.PurchaseKinds.Coins and price > 0
+	local isBundleOnly = purchaseKind == AbilityConfig.PurchaseKinds.Bundle
 
 	if icon then
 		icon.Image = definition.icon or ""
@@ -1018,12 +1258,20 @@ function SkillsInventoryController:_updateRightPanel()
 		descriptionLabel.Text = definition.description or ""
 	end
 
-	setButtonLabel(buyButton, "BUY")
-	setBuyPrice(buyButton, price)
+	if isBundleOnly then
+		setButtonLabel(buyButton, "LOCKED")
+		setBuyPrice(buyButton, definition.bundleLabel or "Bundle only")
+	else
+		setButtonLabel(buyButton, "BUY")
+		setBuyPrice(buyButton, price)
+	end
 	setButtonLabel(equipButton, "EQUIP")
 	setButtonLabel(unequipButton, "UNEQUIP")
 
-	setButtonVisible(buyButton, not isOwned)
+	setButtonVisible(buyButton, not isOwned and (canBuyWithCoins or isBundleOnly))
+	if buyButton and isBundleOnly and not isOwned then
+		setButtonEnabled(buyButton, false)
+	end
 	setButtonVisible(equipButton, isOwned and not isEquipped)
 	setButtonVisible(unequipButton, isOwned and isEquipped)
 	setButtonVisible(favoriteButton, false)
@@ -1032,6 +1280,9 @@ function SkillsInventoryController:_updateRightPanel()
 		local statusText = self._statusByAbilityId[definition.id]
 		if statusText and statusText ~= "" then
 			warning.Text = statusText
+			warning.Visible = true
+		elseif isBundleOnly and not isOwned then
+			warning.Text = definition.bundleLabel or "Bundle only"
 			warning.Visible = true
 		else
 			warning.Visible = false
@@ -1094,6 +1345,24 @@ function SkillsInventoryController:_selectFinisher(finisherId: string)
 	self:_refresh()
 end
 
+function SkillsInventoryController:_selectHighlightIntro(highlightIntroId: string)
+	local definition = HighlightIntroConfig.GetDefinition(highlightIntroId)
+	if not definition then
+		return
+	end
+
+	local owned = getOwnedHighlightIntros()
+	if owned[definition.id] ~= true then
+		return
+	end
+
+	self._selectedTab = INTROS_TAB_NAME
+	self._selectedHighlightIntroId = definition.id
+	self:_setContainerVisible(INTROS_TAB_NAME)
+	self:_setTopbarState(INTROS_TAB_NAME)
+	self:_refresh()
+end
+
 function SkillsInventoryController:_selectSlot(slot: string)
 	if slot == SKINS_TAB_NAME then
 		self._selectedTab = SKINS_TAB_NAME
@@ -1142,6 +1411,35 @@ function SkillsInventoryController:_selectSlot(slot: string)
 			self:_selectFinisher(firstFinisherId)
 		else
 			self._selectedFinisherId = FinisherConfig.DefaultFinisherId
+			self:_refresh()
+		end
+		return
+	end
+
+	if slot == INTROS_TAB_NAME then
+		self._selectedTab = INTROS_TAB_NAME
+		self:_setContainerVisible(INTROS_TAB_NAME)
+		self:_setTopbarState(INTROS_TAB_NAME)
+
+		local owned = getOwnedHighlightIntros()
+		local selectedIntro = HighlightIntroConfig.GetDefinition(self._selectedHighlightIntroId)
+		if selectedIntro and owned[selectedIntro.id] == true then
+			self:_refresh()
+			return
+		end
+
+		local equippedIntroId = getEquippedHighlightIntroId()
+		if owned[equippedIntroId] == true then
+			self:_selectHighlightIntro(equippedIntroId)
+			return
+		end
+
+		local introIds = getSortedOwnedHighlightIntroIds()
+		local firstIntroId = introIds[1]
+		if firstIntroId then
+			self:_selectHighlightIntro(firstIntroId)
+		else
+			self._selectedHighlightIntroId = HighlightIntroConfig.DefaultHighlightIntroId
 			self:_refresh()
 		end
 		return
@@ -1202,6 +1500,24 @@ function SkillsInventoryController:_sendFinisherAction(action: string)
 	})
 end
 
+function SkillsInventoryController:_sendHighlightIntroAction(action: string)
+	if action ~= HighlightIntroConfig.InventoryActions.Equip then
+		return
+	end
+
+	local remote = self._highlightIntroRemote
+	local definition = HighlightIntroConfig.GetDefinition(self._selectedHighlightIntroId)
+	if not (remote and definition) then
+		return
+	end
+
+	self._statusByHighlightIntroId[definition.id] = nil
+	remote:FireServer({
+		action = action,
+		highlightIntroId = definition.id,
+	})
+end
+
 function SkillsInventoryController:_sendAction(action: string)
 	if self._selectedTab == SKINS_TAB_NAME then
 		self:_sendSkinAction(action)
@@ -1211,11 +1527,29 @@ function SkillsInventoryController:_sendAction(action: string)
 		self:_sendFinisherAction(action)
 		return
 	end
+	if self._selectedTab == INTROS_TAB_NAME then
+		self:_sendHighlightIntroAction(action)
+		return
+	end
 
 	local remote = self._remote
 	local definition = AbilityConfig.GetDefinition(self._selectedAbilityId)
 	if not (remote and definition) then
 		return
+	end
+
+	if action == AbilityConfig.InventoryActions.Buy then
+		local purchaseKind = definition.purchaseKind or AbilityConfig.PurchaseKinds.Coins
+		local price = math.max(math.floor(tonumber(definition.price) or 0), 0)
+		if purchaseKind == AbilityConfig.PurchaseKinds.Bundle then
+			self._statusByAbilityId[definition.id] = definition.bundleLabel or "Bundle only"
+			self:_refresh()
+			return
+		elseif purchaseKind ~= AbilityConfig.PurchaseKinds.Coins or price <= 0 then
+			self._statusByAbilityId[definition.id] = "This skill is already unlocked."
+			self:_refresh()
+			return
+		end
 	end
 
 	self._statusByAbilityId[definition.id] = nil
@@ -1370,6 +1704,48 @@ function SkillsInventoryController:_bindFinisherTileButton(button: ImageButton, 
 	track(self._finisherTileConnections, button.MouseButton1Click:Connect(function()
 		button:SetAttribute("Pressed", false)
 		self:_selectFinisher(finisherId)
+	end))
+end
+
+function SkillsInventoryController:_bindHighlightIntroTileButton(button: ImageButton, highlightIntroId: string)
+	local normalSize = button.Size
+	local bigSize = scaleUDim2(normalSize, TILE_HOVER_SIZE_FACTOR)
+	local smallSize = scaleUDim2(normalSize, TILE_PRESSED_SIZE_FACTOR)
+
+	button.Active = true
+	button.Selectable = true
+	button.AutoButtonColor = true
+	button:SetAttribute("defaultSize", normalSize)
+	button:SetAttribute("Hovered", false)
+	button:SetAttribute("Pressed", false)
+
+	track(self._highlightIntroTileConnections, button.MouseEnter:Connect(function()
+		button:SetAttribute("Hovered", true)
+		self:_tweenTileButton(button, bigSize)
+	end))
+
+	track(self._highlightIntroTileConnections, button.MouseLeave:Connect(function()
+		button:SetAttribute("Hovered", false)
+		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, normalSize)
+	end))
+
+	track(self._highlightIntroTileConnections, button.MouseButton1Down:Connect(function()
+		button:SetAttribute("Pressed", true)
+		self:_tweenTileButton(button, smallSize)
+	end))
+	track(self._highlightIntroTileConnections, button.MouseButton1Up:Connect(function()
+		button:SetAttribute("Pressed", false)
+		self:_tweenTileButton(button, bigSize)
+	end))
+	track(self._highlightIntroTileConnections, button.Activated:Connect(function()
+		button:SetAttribute("Pressed", false)
+		playClick()
+		self:_selectHighlightIntro(highlightIntroId)
+	end))
+	track(self._highlightIntroTileConnections, button.MouseButton1Click:Connect(function()
+		button:SetAttribute("Pressed", false)
+		self:_selectHighlightIntro(highlightIntroId)
 	end))
 end
 
@@ -1575,6 +1951,68 @@ function SkillsInventoryController:_populateFinishers(container: GuiObject?)
 	end
 end
 
+function SkillsInventoryController:_populateHighlightIntros(container: GuiObject?)
+	if not container then
+		return
+	end
+
+	local scroller = container:FindFirstChildWhichIsA("ScrollingFrame")
+	if not scroller then
+		return
+	end
+
+	self:_disconnectHighlightIntroTiles()
+	disableAuthoredTileTweenScripts(scroller)
+	removeRuntimeTileScales(scroller)
+	clearCosmeticTiles(scroller, HIGHLIGHT_INTRO_RUNTIME_TILE_ATTRIBUTE)
+
+	local introIds = getSortedOwnedHighlightIntroIds()
+	local introCopies = getHighlightIntroCopies()
+
+	for index, introId in ipairs(introIds) do
+		local definition = HighlightIntroConfig.GetDefinition(introId)
+		if not definition then
+			continue
+		end
+
+		local template = findHighlightIntroTemplate(scroller, definition.rarity)
+		if not template then
+			warn(("[SkillsInventoryController] Missing highlight intro inventory template for rarity '%s'."):format(tostring(definition.rarity)))
+			continue
+		end
+
+		local button = template:Clone()
+		button.Name = "HighlightIntro_" .. definition.id
+		button.LayoutOrder = index
+		button.Visible = true
+		button.Active = true
+		button.Selectable = true
+		button:SetAttribute(HIGHLIGHT_INTRO_RUNTIME_TILE_ATTRIBUTE, true)
+		button:SetAttribute("HighlightIntroId", definition.id)
+		button:SetAttribute("Rarity", definition.rarity)
+
+		local label = findTextLabel(button, "Label")
+		if label then
+			label.Text = formatSkinTileName(definition, introCopies[definition.id] or 1)
+		end
+
+		local icon = findImage(button, "Icon")
+		if icon then
+			icon.Image = definition.iconImage or ""
+		end
+
+		button.Parent = scroller
+
+		self._highlightIntroTilesById[definition.id] = {
+			button = button,
+			highlightIntroId = definition.id,
+			normalSize = button.Size,
+		}
+
+		self:_bindHighlightIntroTileButton(button, definition.id)
+	end
+end
+
 function SkillsInventoryController:_bindFrame(frame: GuiObject?)
 	self:_disconnectFrame()
 	self._frame = frame
@@ -1594,12 +2032,15 @@ function SkillsInventoryController:_bindFrame(frame: GuiObject?)
 	self._containers[AbilityConfig.Slots.Defensive] = findAbilityContainer(frame, "DefensiveAbilities")
 	self._containers[SKINS_TAB_NAME] = findAbilityContainer(frame, SKINS_TAB_NAME)
 	self._containers[FINISHERS_TAB_NAME] = findAbilityContainer(frame, FINISHERS_TAB_NAME)
+	self._containers[INTROS_TAB_NAME] = ensureHighlightIntroContainer(frame)
 
 	for slot, container in pairs(self._containers) do
 		if slot == SKINS_TAB_NAME then
 			self:_populateSkins(container)
 		elseif slot == FINISHERS_TAB_NAME then
 			self:_populateFinishers(container)
+		elseif slot == INTROS_TAB_NAME then
+			self:_populateHighlightIntros(container)
 		else
 			self:_populateSlot(slot, container)
 		end
@@ -1735,6 +2176,23 @@ function SkillsInventoryController:_bindRemote()
 			self:_refresh()
 		end))
 	end
+
+	self._highlightIntroRemote = getHighlightIntroRemote()
+	if self._highlightIntroRemote then
+		track(self._connections, self._highlightIntroRemote.OnClientEvent:Connect(function(response)
+			if typeof(response) ~= "table" then
+				return
+			end
+
+			local introId = HighlightIntroConfig.NormalizeHighlightIntroId(response.highlightIntroId)
+			if introId ~= "" then
+				self._statusByHighlightIntroId[introId] =
+					if response.ok == true then nil else tostring(response.message or "Highlight intro action failed.")
+			end
+
+			self:_refresh()
+		end))
+	end
 end
 
 function SkillsInventoryController:OnStart()
@@ -1767,10 +2225,15 @@ function SkillsInventoryController:OnStart()
 		if self._containers[FINISHERS_TAB_NAME] then
 			self:_populateFinishers(self._containers[FINISHERS_TAB_NAME])
 		end
+		if self._containers[INTROS_TAB_NAME] then
+			self:_populateHighlightIntros(self._containers[INTROS_TAB_NAME])
+		end
 		if self._selectedTab == SKINS_TAB_NAME then
 			self:_selectSlot(SKINS_TAB_NAME)
 		elseif self._selectedTab == FINISHERS_TAB_NAME then
 			self:_selectSlot(FINISHERS_TAB_NAME)
+		elseif self._selectedTab == INTROS_TAB_NAME then
+			self:_selectSlot(INTROS_TAB_NAME)
 		else
 			self:_refresh()
 		end
@@ -1796,9 +2259,20 @@ function SkillsInventoryController:OnStart()
 			else
 				self:_refresh()
 			end
+		elseif key == OWNED_HIGHLIGHT_INTROS_KEY or key == HIGHLIGHT_INTRO_COPIES_KEY then
+			if self._containers[INTROS_TAB_NAME] then
+				self:_populateHighlightIntros(self._containers[INTROS_TAB_NAME])
+			end
+			if self._selectedTab == INTROS_TAB_NAME then
+				self:_selectSlot(INTROS_TAB_NAME)
+			else
+				self:_refresh()
+			end
 		elseif key == EQUIPPED_SKIN_KEY then
 			self:_refresh()
 		elseif key == EQUIPPED_FINISHER_KEY then
+			self:_refresh()
+		elseif key == EQUIPPED_HIGHLIGHT_INTRO_KEY then
 			self:_refresh()
 		end
 	end))

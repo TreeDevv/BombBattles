@@ -15,7 +15,7 @@ local function cf(
 	return CFrame.lookAt(position, position + Vector3.new(lookX, lookY, lookZ), Vector3.new(upX, upY, upZ))
 end
 
-POTGCutsceneConfig.DefaultCutsceneId = "HollowPurple"
+POTGCutsceneConfig.DefaultCutsceneId = "TooFast"
 POTGCutsceneConfig.FallbackCutsceneId = "DefaultHighlightIntro"
 
 POTGCutsceneConfig.AnimationSourceTypes = table.freeze({
@@ -220,6 +220,126 @@ EmitModule:Emit(workspace.HighlightIntros["Hollow Purple"].Burst)
 				keys = table.freeze({
 					table.freeze({ time = 0, cframe = cf(22.808, 7.740, -16.726, 0, 0, -1, 0, 1, 0) }),
 					table.freeze({ time = 21 / 60, cframe = cf(23.456, 13.215, -7.154, 0, -0.305, -0.952, 0, 0.952, -0.305) }),
+				}),
+			}),
+		}),
+	}),
+
+	TooFast = table.freeze({
+		id = "TooFast",
+		assetFolderName = "Too Fast",
+		replicatedAssetName = "TooFastHighlightIntro",
+		characterRigName = "TemplateR6",
+		cameraRigName = "CamRigWithLetterBox1",
+		cameraBoneName = "cameraBone",
+		pivotPartName = "Pivot",
+		useRuntimeBombVisual = false,
+		motionSourcePivotCFrame = cf(
+			-35.645168,
+			2.840100,
+			-19.513357,
+			0.062199350,
+			0.471390247,
+			0.879728615,
+			-0.388809651,
+			0.823245466,
+			-0.413634658
+		),
+		characterAnimation = table.freeze({
+			type = POTGCutsceneConfig.AnimationSourceTypes.AnimationId,
+			animationId = "rbxassetid://137853408176426",
+		}),
+		cameraAnimation = table.freeze({
+			type = POTGCutsceneConfig.AnimationSourceTypes.AnimationId,
+			animationId = "rbxassetid://132172183490412",
+		}),
+		durationSeconds = 5,
+		cameraFovKeys = table.freeze({
+			table.freeze({ time = 0, value = 60 }),
+			table.freeze({ time = 11 / 60, value = 70 }),
+			table.freeze({ time = 300 / 60, value = 70 }),
+		}),
+		dof = table.freeze({
+			enabled = false,
+		}),
+		events = table.freeze({
+			table.freeze({
+				time = 7 / 60,
+				type = "Code",
+				effectName = "Explosion",
+				code = [[
+local EmitModule = require(game.ReplicatedStorage.VFXHandler)
+EmitModule:Emit(workspace.HighlightIntros["Too Fast"].Explosion)
+				]],
+			}),
+			table.freeze({
+				time = 22 / 60,
+				type = "Code",
+				effectName = "Explosion2",
+				code = [[
+local EmitModule = require(game.ReplicatedStorage.VFXHandler)
+EmitModule:Emit(workspace.HighlightIntros["Too Fast"].Explosion2)
+				]],
+			}),
+			table.freeze({
+				time = 50 / 60,
+				type = "Code",
+				effectName = "Explosion3",
+				code = [[
+local EmitModule = require(game.ReplicatedStorage.VFXHandler)
+EmitModule:Emit(workspace.HighlightIntros["Too Fast"].Explosion3)
+				]],
+			}),
+			table.freeze({
+				time = 105 / 60,
+				type = "Code",
+				effectName = "Explosion4",
+				code = [[
+local EmitModule = require(game.ReplicatedStorage.VFXHandler)
+EmitModule:Emit(workspace.HighlightIntros["Too Fast"].Explosion4)
+				]],
+			}),
+		}),
+		motionTracks = table.freeze({
+			table.freeze({
+				path = "Bomb",
+				apply = "WorldCFrame",
+				keys = table.freeze({
+					table.freeze({
+						time = 0,
+						cframe = cf(-24.928884, 3.624886, -14.968243, 1, 0, 0, 0, 0.998629510, 0.052335940),
+						easingStyle = Enum.EasingStyle.Linear,
+					}),
+					table.freeze({ time = 5 / 60, cframe = cf(-28.816070, -2.932691, -0.727367, 1, 0, 0, 0, 0.998629510, 0.052335940) }),
+				}),
+			}),
+			table.freeze({
+				path = "Bomb2",
+				apply = "WorldCFrame",
+				keys = table.freeze({
+					table.freeze({
+						time = 0,
+						cframe = cf(-34.834693, 7.251448, -20.115728, 1, 0, 0, 0, 0.998629510, 0.052335940),
+						easingStyle = Enum.EasingStyle.Linear,
+					}),
+					table.freeze({ time = 22 / 60, cframe = cf(-38.401822, -2.199681, 2.677660, 1, 0, 0, 0, 0.998629510, 0.052335940) }),
+				}),
+			}),
+			table.freeze({
+				path = "Bomb3",
+				apply = "WorldCFrame",
+				keys = table.freeze({
+					table.freeze({
+						time = 0,
+						cframe = cf(-30.851001, 3.539335, -24.918444, 1, 0, 0, 0, 0.998629510, 0.052335940),
+						easingStyle = Enum.EasingStyle.Linear,
+					}),
+					table.freeze({
+						time = 29 / 60,
+						cframe = cf(-36.688536, 3.251975, -24.519615, 1, 0, 0, 0, 0.998629570, 0.052335944),
+						easingStyle = Enum.EasingStyle.Linear,
+					}),
+					table.freeze({ time = 55 / 60, cframe = cf(-54.388889, -2.791458, 1.963671, 1, 0, 0, 0, 0.830796480, 0.556576312) }),
 				}),
 			}),
 		}),

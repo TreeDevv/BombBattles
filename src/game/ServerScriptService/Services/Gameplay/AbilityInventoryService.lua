@@ -19,6 +19,7 @@ local LOADOUT_KEY = Schema.AbilityLoadout and Schema.AbilityLoadout.key or "abil
 local CASH_KEY = Schema.Cash and Schema.Cash.key or "cash"
 
 local MAX_REQUESTS_PER_SECOND = 12
+local DEFAULT_ABILITY_BY_SLOT = AbilityConfig.DefaultLoadout
 
 type RequestWindow = {
 	startedAt: number,
@@ -91,6 +92,18 @@ local function normalizeOwnedAbilities(value): ({ [string]: boolean }, boolean)
 	return owned, changed
 end
 
+local function addDefaultOwnedAbilities(ownedAbilities: { [string]: boolean }): boolean
+	local changed = false
+	for abilityId in pairs(AbilityConfig.StarterAbilities) do
+		local definition = AbilityConfig.GetDefinition(abilityId)
+		if definition and AbilityConfig.IsCatalogAbility(abilityId) and ownedAbilities[definition.id] ~= true then
+			ownedAbilities[definition.id] = true
+			changed = true
+		end
+	end
+	return changed
+end
+
 local function ownedMatches(left, right): boolean
 	if typeof(right) ~= "table" then
 		return false
@@ -121,7 +134,13 @@ local function sanitizeLoadout(value, ownedAbilities): ({ [string]: string }, bo
 		if abilityId ~= "" and definition and definition.slot == slot and ownedAbilities[abilityId] == true then
 			loadout[slot] = definition.id
 		else
-			loadout[slot] = ""
+			local defaultAbilityId = AbilityConfig.NormalizeAbilityId(DEFAULT_ABILITY_BY_SLOT[slot])
+			local defaultDefinition = AbilityConfig.GetDefinition(defaultAbilityId)
+			if defaultDefinition and defaultDefinition.slot == slot and ownedAbilities[defaultDefinition.id] == true then
+				loadout[slot] = defaultDefinition.id
+			else
+				loadout[slot] = ""
+			end
 		end
 
 		if rawAbilityId ~= loadout[slot] then
@@ -242,17 +261,55 @@ local function buyAbility(player: Player, request)
 		return
 	end
 
-	local price = math.max(math.floor(tonumber(definition.price) or 0), 0)
-	if price > 0 then
-		local cash = tonumber(DataService:Get(player, CASH_KEY)) or 0
-		if cash < price then
-			fail(player, request, "InsufficientCash", "Not enough cash.")
-			return
-		end
+	local purchaseKind = definition.purchaseKind or AbilityConfig.PurchaseKinds.Coins
+	if purchaseKind == AbilityConfig.PurchaseKinds.Starter then
+		fail(player, request, "StarterAbility", "This starter skill is already unlocked.")
+		return
+	elseif purchaseKind == AbilityConfig.PurchaseKinds.Bundle then
+		local bundleLabel = if typeof(definition.bundleLabel) == "string" and definition.bundleLabel ~= ""
+			then definition.bundleLabel
+			else "Bundle only"
+		fail(player, request, "BundleOnly", bundleLabel .. ".")
+		return
+	elseif purchaseKind ~= AbilityConfig.PurchaseKinds.Coins then
+		fail(player, request, "Unavailable", "This skill cannot be bought with coins.")
+		return
+	end
 
+	local price = math.max(math.floor(tonumber(definition.price) or 0), 0)
+	if price <= 0 then
+		fail(player, request, "Unavailable", "This skill cannot be bought with coins.")
+		return
+	end
+
+	local spent = false
+	local cash = tonumber(DataService:Get(player, CASH_KEY)) or 0
+	if cash < price then
+		fail(player, request, "InsufficientCash", "Not enough cash.")
+		return
+	end
+
+	DataService:Set(player, CASH_KEY, function(currentValue)
+		local currentCash = tonumber(currentValue) or 0
+		if currentCash < price then
+			return currentCash
+		end
+		spent = true
+		return currentCash - price
+	end)
+
+	if not spent then
+		fail(player, request, "InsufficientCash", "Not enough cash.")
+		return
+	end
+
+	local ownedAfterSpend = getOwnedAbilities(player)
+	if ownedAfterSpend[abilityId] == true then
 		DataService:Set(player, CASH_KEY, function(currentValue)
-			return math.max(0, (tonumber(currentValue) or 0) - price)
+			return (tonumber(currentValue) or 0) + price
 		end)
+		respond(player, request, true, "AlreadyOwned")
+		return
 	end
 
 	DataService:Set(player, OWNED_KEY, function(currentValue)
@@ -365,9 +422,10 @@ function AbilityInventoryService:OnPlayerAdded(player: Player)
 	end
 
 	local ownedAbilities, ownedChanged = normalizeOwnedAbilities(data[OWNED_KEY])
+	local defaultOwnedChanged = addDefaultOwnedAbilities(ownedAbilities)
 	local loadout, loadoutChanged = sanitizeLoadout(data[LOADOUT_KEY], ownedAbilities)
 
-	if ownedChanged or not ownedMatches(ownedAbilities, data[OWNED_KEY] or {}) then
+	if ownedChanged or defaultOwnedChanged or not ownedMatches(ownedAbilities, data[OWNED_KEY] or {}) then
 		DataService:Set(player, OWNED_KEY, ownedAbilities)
 	end
 	if loadoutChanged or not loadoutMatches(loadout, data[LOADOUT_KEY] or {}) then

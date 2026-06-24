@@ -803,8 +803,13 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 	local damage = getDefinitionNumber(definition, "damageOnEnemyHit", 20)
 	local humanoid = enemyPlayer.Character and enemyPlayer.Character:FindFirstChildOfClass("Humanoid")
 	if humanoid and damage > 0 then
+		local healthBefore = humanoid.Health
 		local resolvedDamage, blocked = resolveEnemyHitDamage(context.player, enemyPlayer, humanoid, enemyRoot, damage)
-		if not blocked and resolvedDamage > 0 then
+		if healthBefore > 0 and not blocked and resolvedDamage > 0 then
+			RoundService:RecordPlayerDamage(context.player, enemyPlayer, math.min(resolvedDamage, healthBefore), {
+				sourceType = "Ability",
+				sourceId = "GrappleHook",
+			})
 			humanoid:TakeDamage(resolvedDamage)
 		end
 	end

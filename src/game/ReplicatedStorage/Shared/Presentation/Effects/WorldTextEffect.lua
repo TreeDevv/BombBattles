@@ -23,6 +23,10 @@ local function isFiniteVector3(value: any): boolean
 		and isFiniteNumber(value.Z)
 end
 
+local function isColor3(value: any): boolean
+	return typeof(value) == "Color3"
+end
+
 local function playTween(instance: Instance, tweenInfo: TweenInfo, goals)
 	local ok, tween = pcall(function()
 		return TweenService:Create(instance, tweenInfo, goals)
@@ -97,15 +101,54 @@ local function getBillboards(root: Instance): { BillboardGui }
 	return billboards
 end
 
-local function animateBillboards(root: Instance, lifetime: number, maxDistance: number?)
+local function applyDynamicText(root: Instance, descriptor)
+	local text = descriptor.text
+	if typeof(text) ~= "string" and typeof(text) ~= "number" then
+		return
+	end
+
+	local textValue = tostring(text)
+	local labelName = if typeof(descriptor.textLabelName) == "string" and descriptor.textLabelName ~= ""
+		then descriptor.textLabelName
+		else "Value"
+
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") or descendant:IsA("TextBox") then
+			if descendant.Name ~= labelName then
+				continue
+			end
+
+			descendant.Text = textValue
+			if isColor3(descriptor.textColor) then
+				descendant.TextColor3 = descriptor.textColor
+			end
+			if isColor3(descriptor.textStrokeColor) then
+				descendant.TextStrokeColor3 = descriptor.textStrokeColor
+			end
+			if isFiniteNumber(descriptor.textStrokeTransparency) then
+				descendant.TextStrokeTransparency = math.clamp(descriptor.textStrokeTransparency, 0, 1)
+			end
+		elseif descendant:IsA("UIStroke") then
+			if isColor3(descriptor.strokeColor) then
+				descendant.Color = descriptor.strokeColor
+			end
+			if isFiniteNumber(descriptor.strokeTransparency) then
+				descendant.Transparency = math.clamp(descriptor.strokeTransparency, 0, 1)
+			end
+		end
+	end
+end
+
+local function animateBillboards(root: Instance, lifetime: number, maxDistance: number?, sizeScale: number?)
 	local popTween = TweenInfo.new(math.min(POP_SECONDS, lifetime * 0.4), Enum.EasingStyle.Back, Enum.EasingDirection.Out)
 	local fadeDelay = math.max(lifetime * 0.45, 0)
 	local fadeSeconds = math.max(lifetime - fadeDelay, 0.05)
 	local fadeTween = TweenInfo.new(fadeSeconds, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	local resolvedSizeScale = if isFiniteNumber(sizeScale) then math.clamp(sizeScale, 0.35, 2.5) else 1
 
 	for _, billboard in ipairs(getBillboards(root)) do
 		local authoredSize = billboard.Size
-		local finalSize = scaleUDim2(authoredSize, FINAL_SIZE_SCALE)
+		local finalSize = scaleUDim2(authoredSize, FINAL_SIZE_SCALE * resolvedSizeScale)
 		billboard.AlwaysOnTop = true
 		billboard.MaxDistance = maxDistance or DEFAULT_MAX_DISTANCE
 		billboard.Size = scaleUDim2(finalSize, START_SIZE_SCALE)
@@ -222,11 +265,12 @@ function WorldTextEffect.Play(parent: Instance, descriptor)
 	local anchor = template:Clone()
 	anchor.Name = "WorldText_" .. templateName
 	prepareClone(anchor, position)
+	applyDynamicText(anchor, descriptor)
 	anchor.Parent = parent
 	table.insert(activeAnchors, anchor)
 
 	tweenAnchor(anchor, position, position + lift, lifetime)
-	animateBillboards(anchor, lifetime, maxDistance)
+	animateBillboards(anchor, lifetime, maxDistance, descriptor.sizeScale)
 
 	task.delay(lifetime + 0.05, function()
 		destroyAnchor(anchor)

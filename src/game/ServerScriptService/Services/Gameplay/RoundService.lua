@@ -350,6 +350,37 @@ local function getPlayerRootPosition(player: Player): Vector3?
 	return if rootPart and rootPart:IsA("BasePart") then rootPart.Position else nil
 end
 
+function RoundFlow.getPlayerWorldTextAttacker(attacker: any): Player?
+	return if typeof(attacker) == "Instance" and attacker:IsA("Player") and attacker.Parent == Players then attacker else nil
+end
+
+function RoundFlow.copyWorldTextSourcePayload(sourceContext)
+	local payload = {}
+	if typeof(sourceContext) ~= "table" then
+		return payload
+	end
+
+	for _, key in ipairs({
+		"sourceType",
+		"sourceId",
+		"bombId",
+		"bombType",
+		"abilityName",
+		"abilityId",
+		"sourceDetail",
+	}) do
+		if typeof(sourceContext[key]) == "string" then
+			payload[key] = sourceContext[key]
+		end
+	end
+
+	if sourceContext.directHit == true then
+		payload.directHit = true
+	end
+
+	return payload
+end
+
 local function setReplayPerformanceCritical(isCritical: boolean)
 	RoundReplayRuntime.SetPerformanceCritical(isCritical, DEBUG_REPLAY_EVENTS)
 end
@@ -516,11 +547,13 @@ end
 
 local function publishRoundResults(winnerTeam: string)
 	local selectedMapId = if typeof(gameStateData.selectedMapId) == "string" then gameStateData.selectedMapId else ""
+	local potgWinnerUserId = RoundReplayRuntime.GetScoredPOTGWinnerUserId(DEBUG_REPLAY_EVENTS)
 	local results = RoundResultsRuntime.Publish({
 		winnerTeam = winnerTeam,
 		roundId = roundId,
 		selectedMapId = selectedMapId,
 		activeRoundStartedAt = activeRoundStartedAt,
+		potgWinnerUserId = potgWinnerUserId,
 		roundPlayers = roundPlayers,
 		scoreboardPlatforms = scoreboardState.platforms,
 		rewardedRoundIds = rewardedRoundIds,
@@ -1558,7 +1591,7 @@ function RoundFlow.syncVoteChoices()
 	setReplicaValue({ "voteVoters" }, voters)
 end
 
-local function isCurrentChoice(choiceId: string): boolean
+function RoundFlow.isCurrentChoice(choiceId: string): boolean
 	return RoundVotingRuntime.HasChoice(currentChoices, choiceId)
 end
 
@@ -1622,7 +1655,7 @@ function RoundFlow.setPlayerAFK(player: Player, afk: boolean, source: string): b
 	return true
 end
 
-local function buildForcedVoteChoice(mapConfig: MapConfig): VoteChoice
+function RoundFlow.buildForcedVoteChoice(mapConfig: MapConfig): VoteChoice
 	return RoundVotingRuntime.MakeChoice(mapConfig, 1)
 end
 
@@ -1885,7 +1918,7 @@ function RoundService:_runRoundLoop()
 
 		if forcedMapId then
 			local forcedMap = getConfiguredMap(forcedMapId)
-			currentChoices = if forcedMap then { buildForcedVoteChoice(forcedMap) } else {}
+			currentChoices = if forcedMap then { RoundFlow.buildForcedVoteChoice(forcedMap) } else {}
 		else
 			currentChoices = chooseVoteOptions()
 		end
@@ -1998,7 +2031,7 @@ function RoundService:_runRoundLoop()
 end
 
 function RoundService:RecordPlayerDamage(attacker: any, target: Player, damage: number, sourceContext)
-	RoundDamageRuntime.RecordPlayerDamage({
+	local recorded = RoundDamageRuntime.RecordPlayerDamage({
 		isRoundActive = currentState == RoundStates.Active,
 		attacker = attacker,
 		target = target,
@@ -2012,6 +2045,24 @@ function RoundService:RecordPlayerDamage(attacker: any, target: Player, damage: 
 		end,
 		syncScoreboardStats = syncScoreboardStats,
 	})
+
+	if not recorded then
+		return
+	end
+
+	local position = getPlayerRootPosition(target)
+	if not position then
+		return
+	end
+
+	sendWorldText(
+		"PlayerDamaged",
+		RoundFlow.getPlayerWorldTextAttacker(attacker),
+		target,
+		damage,
+		position,
+		RoundFlow.copyWorldTextSourcePayload(sourceContext)
+	)
 end
 
 function RoundService:RecordMapDestruction(sourceContext, targetsHit: number, position: Vector3?)
@@ -2070,7 +2121,7 @@ function RoundService:OnStart()
 		if playerVotes[player] == choiceId then
 			return
 		end
-		if not isCurrentChoice(choiceId) then
+		if not RoundFlow.isCurrentChoice(choiceId) then
 			return
 		end
 

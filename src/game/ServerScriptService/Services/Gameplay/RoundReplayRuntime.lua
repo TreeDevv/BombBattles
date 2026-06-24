@@ -132,6 +132,23 @@ function RoundReplayRuntime.GetPOTGIntroCandidate(recipients, debugEnabled: bool
 	return if ok and typeof(candidate) == "table" then candidate else nil
 end
 
+function RoundReplayRuntime.GetScoredPOTGWinnerUserId(debugEnabled: boolean?): number?
+	local service = RoundReplayRuntime.GetService(debugEnabled)
+	if not (service and type(service.GetScoredPOTGWinnerUserId) == "function") then
+		return nil
+	end
+
+	local userId = nil
+	local ok, err = pcall(function()
+		userId = service.GetScoredPOTGWinnerUserId()
+	end)
+	if debugEnabled and not ok then
+		warn("[RoundReplayRuntime] Scored POTG lookup failed:", err)
+	end
+
+	return if ok and typeof(userId) == "number" then userId else nil
+end
+
 function RoundReplayRuntime.PlayPOTG(roundPlayers, maxWaitSeconds: number, debugEnabled: boolean?): boolean
 	local service = RoundReplayRuntime.GetService(debugEnabled)
 	if not (service and type(service.PlayPOTG) == "function") then

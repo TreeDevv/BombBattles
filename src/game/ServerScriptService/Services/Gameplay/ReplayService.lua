@@ -10,6 +10,7 @@ local ReplayUtil = require(ReplicatedStorage.Shared.Replay.ReplayUtil)
 local ReplayClipPolicy = require(ReplicatedStorage.Shared.Replay.ReplayClipPolicy)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local RemoteUtil = require(ReplicatedStorage.Shared.Common.RemoteUtil)
+local HighlightIntroService = require(ServerScriptService.Services.HighlightIntroService)
 local POTGService = require(ServerScriptService.Services.POTGService)
 local StudioAICombatants = require(ServerScriptService.Services.StudioAICombatants)
 local ReplayBuffer = require(script.Parent.Replay.ReplayBuffer)
@@ -1969,6 +1970,8 @@ local function buildPOTGIntroCandidatePayload(candidate)
 	end
 
 	local playerUserId = math.floor(candidate.playerUserId)
+	local player = Players:GetPlayerByUserId(playerUserId)
+	local cutsceneId = if player then HighlightIntroService:GetEquippedHighlightIntroId(player) else nil
 	return {
 		potgPlayerUserId = playerUserId,
 		potgPlayerName = candidate.playerName,
@@ -1977,6 +1980,7 @@ local function buildPOTGIntroCandidatePayload(candidate)
 		potgPlayerIsNPC = candidate.playerIsNPC == true,
 		potgReason = candidate.reason,
 		potgScore = candidate.score,
+		cutsceneId = cutsceneId,
 	}
 end
 
@@ -2320,6 +2324,15 @@ end
 
 function ReplayService.GetPOTGDebugCandidates(_self)
 	return POTGService.GetDebugCandidates()
+end
+
+function ReplayService.GetScoredPOTGWinnerUserId(_self)
+	local candidate = POTGService.GetBestCandidate()
+	if typeof(candidate) ~= "table" or not isFiniteNumber(candidate.playerUserId) then
+		return nil
+	end
+
+	return math.floor(candidate.playerUserId)
 end
 
 function ReplayService.GetPOTGIntroCandidate(first, second)

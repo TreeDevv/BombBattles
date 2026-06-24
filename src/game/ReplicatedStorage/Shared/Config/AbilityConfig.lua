@@ -16,6 +16,8 @@ export type AbilityDefinition = {
 	slot: AbilitySlot,
 	icon: string,
 	price: number,
+	purchaseKind: string,
+	bundleLabel: string?,
 	catalogOrder: number?,
 	cooldownSeconds: number,
 	durationSeconds: number,
@@ -79,6 +81,12 @@ AbilityConfig.InventoryActions = table.freeze({
 	Unequip = "Unequip",
 })
 
+AbilityConfig.PurchaseKinds = table.freeze({
+	Starter = "Starter",
+	Coins = "Coins",
+	Bundle = "Bundle",
+})
+
 AbilityConfig.Slots = table.freeze({
 	Offensive = "Offensive",
 	Defensive = "Defensive",
@@ -90,8 +98,13 @@ AbilityConfig.SlotOrder = table.freeze({
 })
 
 AbilityConfig.DefaultLoadout = table.freeze({
-	[AbilityConfig.Slots.Offensive] = "",
-	[AbilityConfig.Slots.Defensive] = "",
+	[AbilityConfig.Slots.Offensive] = "MegaBomb",
+	[AbilityConfig.Slots.Defensive] = "AirBurst",
+})
+
+AbilityConfig.StarterAbilities = table.freeze({
+	MegaBomb = true,
+	AirBurst = true,
 })
 
 AbilityConfig.GlobalMaxMessagesPerSecond = 40
@@ -202,6 +215,7 @@ local function buildDefinition(base, extra)
 		slot = base.slot,
 		icon = withAssetId(base.iconAssetId),
 		price = 0,
+		purchaseKind = AbilityConfig.PurchaseKinds.Coins,
 		catalogOrder = base.catalogOrder,
 		cooldownSeconds = 0,
 		durationSeconds = 0,
@@ -257,6 +271,54 @@ local offensiveCatalog = table.freeze({
 	{ id = "ChargeBomb", displayName = "Charge Bomb", inventoryTextStyleKey = "CHARGE BOMB", iconAssetId = "103666350250021" },
 	{ id = "Bullet", displayName = "Bullet Bomb", inventoryTextStyleKey = "BULLET", iconAssetId = "86783291245906" },
 	{ id = "FatBomb", displayName = "Fat Bomb", inventoryTextStyleKey = "FAT BOMB", iconAssetId = "114118294331662" },
+})
+
+local abilityPurchaseMetadata = table.freeze({
+	AirBurst = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Starter, price = 0 }),
+	MegaBomb = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Starter, price = 0 }),
+	ShockAbsorber = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 500 }),
+	FastFuse = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 500 }),
+	WallBuilder = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 750 }),
+	FreezeTnt = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 750 }),
+	GravityBoots = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 900 }),
+	BouncyBomb = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 1200 }),
+	JumpPad = table.freeze({ rarity = "Common", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 1200 }),
+	StickyBomb = table.freeze({ rarity = "Rare", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 2000 }),
+	ReflectShield = table.freeze({ rarity = "Rare", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 2000 }),
+	TripleToss = table.freeze({ rarity = "Rare", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 2750 }),
+	GrappleHook = table.freeze({ rarity = "Rare", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 2750 }),
+	WindBomb = table.freeze({ rarity = "Rare", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 3500 }),
+	AbsorbShield = table.freeze({ rarity = "Rare", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 3500 }),
+	Cluster = table.freeze({ rarity = "Epic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 4500 }),
+	Platform = table.freeze({ rarity = "Epic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 4500 }),
+	DrillBomb = table.freeze({ rarity = "Epic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 5500 }),
+	Forcefield = table.freeze({ rarity = "Epic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 6500 }),
+	CraterBomb = table.freeze({ rarity = "Epic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 6500 }),
+	MineBomb = table.freeze({ rarity = "Legendary", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 8000 }),
+	MagnetField = table.freeze({ rarity = "Legendary", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 9000 }),
+	FireBomb = table.freeze({ rarity = "Legendary", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 9500 }),
+	AcidBomb = table.freeze({ rarity = "Legendary", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 11000 }),
+	Bullet = table.freeze({ rarity = "Legendary", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 12500 }),
+	GravityField = table.freeze({ rarity = "Mythic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 14000 }),
+	Interceptor = table.freeze({ rarity = "Mythic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 16000 }),
+	BlackHole = table.freeze({ rarity = "Mythic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 17500 }),
+	PhaseShift = table.freeze({ rarity = "Mythic", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 18000 }),
+	ChargeBomb = table.freeze({ rarity = "Divine", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 20000 }),
+	TimeBubble = table.freeze({ rarity = "Divine", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 22000 }),
+	EmergencyFort = table.freeze({ rarity = "Divine", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 25000 }),
+	OrbitalStrike = table.freeze({ rarity = "Divine", purchaseKind = AbilityConfig.PurchaseKinds.Coins, price = 25000 }),
+	Infinity = table.freeze({
+		rarity = "Divine",
+		purchaseKind = AbilityConfig.PurchaseKinds.Bundle,
+		price = 0,
+		bundleLabel = "Infinity Bundle only",
+	}),
+	FatBomb = table.freeze({
+		rarity = "Divine",
+		purchaseKind = AbilityConfig.PurchaseKinds.Bundle,
+		price = 0,
+		bundleLabel = "Fat Bundle only",
+	}),
 })
 
 local extraDefinitions = {
@@ -1379,6 +1441,17 @@ local slotCatalog = {
 	[AbilityConfig.Slots.Defensive] = {},
 }
 
+local function mergeDefinitionExtras(extra, purchaseMetadata)
+	local merged = {}
+	for key, value in pairs(extra or {}) do
+		merged[key] = value
+	end
+	for key, value in pairs(purchaseMetadata or {}) do
+		merged[key] = value
+	end
+	return merged
+end
+
 local function registerCatalog(catalog, slot: string)
 	for index, entry in ipairs(catalog) do
 		local base = freezeCopy({
@@ -1389,7 +1462,10 @@ local function registerCatalog(catalog, slot: string)
 			slot = slot,
 			catalogOrder = index,
 		})
-		definitions[entry.id] = buildDefinition(base, extraDefinitions[entry.id])
+		definitions[entry.id] = buildDefinition(
+			base,
+			mergeDefinitionExtras(extraDefinitions[entry.id], abilityPurchaseMetadata[entry.id])
+		)
 		table.insert(slotCatalog[slot], entry.id)
 	end
 end
@@ -1524,6 +1600,18 @@ function AbilityConfig.IsCatalogAbility(abilityId: any, slot: string?): boolean
 	return slot == nil or definition.slot == slot
 end
 
+local function getCatalogSortPrice(definition)
+	if not definition then
+		return math.huge
+	end
+	if definition.purchaseKind == AbilityConfig.PurchaseKinds.Starter then
+		return -1
+	elseif definition.purchaseKind == AbilityConfig.PurchaseKinds.Bundle then
+		return math.huge
+	end
+	return tonumber(definition.price) or 0
+end
+
 function AbilityConfig.GetCatalogIds(slot: string): { string }
 	local source = AbilityConfig.Catalog[slot]
 	if typeof(source) ~= "table" then
@@ -1534,8 +1622,8 @@ function AbilityConfig.GetCatalogIds(slot: string): { string }
 	table.sort(ids, function(leftId, rightId)
 		local left = AbilityConfig.GetDefinition(leftId)
 		local right = AbilityConfig.GetDefinition(rightId)
-		local leftPrice = if left then tonumber(left.price) or 0 else 0
-		local rightPrice = if right then tonumber(right.price) or 0 else 0
+		local leftPrice = getCatalogSortPrice(left)
+		local rightPrice = getCatalogSortPrice(right)
 
 		if leftPrice == rightPrice then
 			local leftOrder = if left then tonumber(left.catalogOrder) or 0 else 0

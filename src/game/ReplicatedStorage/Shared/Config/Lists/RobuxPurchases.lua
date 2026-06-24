@@ -40,6 +40,16 @@ local function addPremiumCrateTokens(player, amount)
 	end)
 end
 
+local function grantInfinityBundle(player)
+	local services = getServices()
+	local AbilityInventoryService = require(services:WaitForChild("AbilityInventoryService"))
+
+	local abilityOk, abilityResult = AbilityInventoryService:GrantAbility(player, "Infinity", "InfinityBundle")
+	if not abilityOk then
+		warn("[RobuxPurchases] InfinityBundle failed to grant Infinity: " .. tostring(abilityResult))
+	end
+end
+
 local function grantFatPack(player)
 	local services = getServices()
 	local AbilityInventoryService = require(services:WaitForChild("AbilityInventoryService"))
@@ -62,6 +72,9 @@ local Purchases = {
 			displayName = "Infinity Bundle",
 			price = 1499,
 			id = 3606250976,
+			onProcessed = function(player)
+				grantInfinityBundle(player)
+			end,
 		},
 		InfinityBundleGift = {
 			displayName = "Infinity Bundle Gift",

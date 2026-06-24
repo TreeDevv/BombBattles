@@ -382,12 +382,38 @@ local function getHumanoidRigRootPart(rig: Model): BasePart?
 	return if rig.PrimaryPart and rig.PrimaryPart:IsA("BasePart") then rig.PrimaryPart else nil
 end
 
+local function getJointDrivenExternalParts(root: Model): { [BasePart]: boolean }
+	local drivenParts = {}
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if not descendant:IsA("JointInstance") then
+			continue
+		end
+
+		local part0 = descendant.Part0
+		local part1 = descendant.Part1
+		if not (part0 and part1 and part0:IsDescendantOf(root) and part1:IsDescendantOf(root)) then
+			continue
+		end
+
+		local rig0 = getHumanoidRigAncestor(root, part0)
+		local rig1 = getHumanoidRigAncestor(root, part1)
+		if rig0 and rig0 ~= rig1 and not rig1 then
+			drivenParts[part1] = true
+		elseif rig1 and rig1 ~= rig0 and not rig0 then
+			drivenParts[part0] = true
+		end
+	end
+	return drivenParts
+end
+
 local function prepCutsceneClone(root: Model)
+	local jointDrivenExternalParts = getJointDrivenExternalParts(root)
 	for _, descendant in ipairs(root:GetDescendants()) do
 		if descendant:IsA("BasePart") then
 			local humanoidRig = getHumanoidRigAncestor(root, descendant)
 			local humanoidRigRoot = if humanoidRig then getHumanoidRigRootPart(humanoidRig) else nil
-			descendant.Anchored = if humanoidRig then descendant == humanoidRigRoot else true
+			local shouldAnchor = if humanoidRig then descendant == humanoidRigRoot else not jointDrivenExternalParts[descendant]
+			descendant.Anchored = shouldAnchor
 			descendant.Massless = true
 			descendant.CanCollide = false
 			descendant.CanQuery = false
@@ -577,6 +603,10 @@ local function hideAuthoredBombPlaceholders(placeholders: { Instance })
 end
 
 local function createCutsceneBombVisual(root: Model, cutsceneSpec, payload)
+	if cutsceneSpec.useRuntimeBombVisual == false then
+		return nil, nil, nil, nil, CFrame.new(), {}
+	end
+
 	local characterRig = getCharacterRig(root, cutsceneSpec)
 	local attachment = resolveBombAttachment(root, cutsceneSpec, characterRig)
 	local handle = if attachment then nil else resolveBombHandle(root, cutsceneSpec, characterRig)
@@ -645,6 +675,110 @@ local function restoreAuthoredBombMotor(root: Model, cutsceneSpec, snapshot)
 	bombMotor.C1 = snapshot.c1
 end
 
+local function getRelativePath(root: Instance, descendant: Instance): { string }?
+	if descendant == root then
+		return {}
+	end
+	if not descendant:IsDescendantOf(root) then
+		return nil
+	end
+
+	local path = {}
+	local current: Instance? = descendant
+	while current and current ~= root do
+		table.insert(path, 1, current.Name)
+		current = current.Parent
+	end
+	return path
+end
+
+local function findByRelativePath(root: Instance, path: { string }?): Instance?
+	if not path then
+		return nil
+	end
+
+	local current: Instance? = root
+	for _, name in ipairs(path) do
+		current = current and current:FindFirstChild(name) or nil
+		if not current then
+			return nil
+		end
+	end
+	return current
+end
+
+local function captureAuthoredExternalRigJoints(root: Model, cutsceneSpec)
+	local rig = getCharacterRig(root, cutsceneSpec)
+	if not rig then
+		return {}
+	end
+
+	local snapshots = {}
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if not descendant:IsA("JointInstance") then
+			continue
+		end
+
+		local part0 = descendant.Part0
+		local part1 = descendant.Part1
+		if not (part0 and part1 and part0:IsDescendantOf(root) and part1:IsDescendantOf(root)) then
+			continue
+		end
+
+		local part0InRig = part0:IsDescendantOf(rig)
+		local part1InRig = part1:IsDescendantOf(rig)
+		if part0InRig == part1InRig then
+			continue
+		end
+
+		table.insert(snapshots, {
+			className = descendant.ClassName,
+			name = descendant.Name,
+			parentPath = getRelativePath(root, descendant.Parent),
+			part0Path = getRelativePath(root, part0),
+			part1Path = getRelativePath(root, part1),
+			c0 = descendant.C0,
+			c1 = descendant.C1,
+		})
+	end
+
+	return snapshots
+end
+
+local function restoreAuthoredExternalRigJoints(root: Model, snapshots)
+	for _, snapshot in ipairs(snapshots or {}) do
+		local parent = findByRelativePath(root, snapshot.parentPath)
+		local part0 = findByRelativePath(root, snapshot.part0Path)
+		local part1 = findByRelativePath(root, snapshot.part1Path)
+		if not (parent and part0 and part0:IsA("BasePart") and part1 and part1:IsA("BasePart")) then
+			continue
+		end
+
+		local joint: JointInstance? = nil
+		local existing = parent:FindFirstChild(snapshot.name)
+		if existing and existing:IsA("JointInstance") and existing.ClassName == snapshot.className then
+			joint = existing
+		end
+
+		if not joint then
+			local ok, created = pcall(function()
+				return Instance.new(snapshot.className)
+			end)
+			if not (ok and created and created:IsA("JointInstance")) then
+				continue
+			end
+			joint = created
+			joint.Name = snapshot.name
+			joint.Parent = parent
+		end
+
+		joint.Part0 = part0
+		joint.Part1 = part1
+		joint.C0 = snapshot.c0
+		joint.C1 = snapshot.c1
+	end
+end
+
 local function getHumanoidDescriptionForUserId(userId: number): HumanoidDescription?
 	local okPlayer, player = pcall(function()
 		return Players:GetPlayerByUserId(userId)
@@ -694,10 +828,12 @@ local function applyCandidateAppearanceToAuthoredRig(root: Model, cutsceneSpec, 
 		local description = getHumanoidDescriptionForUserId(userId)
 		if description then
 			local bombMotorSnapshot = captureAuthoredBombMotor(root, cutsceneSpec)
+			local externalJointSnapshots = captureAuthoredExternalRigJoints(root, cutsceneSpec)
 			local ok, err = pcall(function()
 				humanoid:ApplyDescriptionResetAsync(description)
 			end)
 			restoreAuthoredBombMotor(root, cutsceneSpec, bombMotorSnapshot)
+			restoreAuthoredExternalRigJoints(root, externalJointSnapshots)
 			description:Destroy()
 			if ok then
 				debugCutscene("Applied candidate appearance", "userId", tostring(userId))

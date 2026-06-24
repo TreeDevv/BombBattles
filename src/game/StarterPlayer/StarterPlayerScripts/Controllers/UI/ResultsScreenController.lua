@@ -35,7 +35,7 @@ type PlayerResult = {
 	teamName: string?,
 	platform: string?,
 	stats: { [string]: number },
-	rewards: { [string]: number },
+	rewards: { [string]: any },
 }
 
 type Row = {
@@ -214,6 +214,13 @@ local function findStatLabel(frame: Frame?, rowName: string): TextLabel?
 	return findTextLabel(row, "Stat")
 end
 
+local function setStatLabel(frame: Frame?, rowName: string, value: number)
+	local label = findStatLabel(frame, rowName)
+	if label then
+		label.Text = formatInteger(value)
+	end
+end
+
 local function collectTemplates(scrollingFrame: ScrollingFrame): { Frame }
 	local templates = {}
 	for _, child in ipairs(scrollingFrame:GetChildren()) do
@@ -318,45 +325,25 @@ function ResultsScreenController:_setPersonalStats(playerResult: PlayerResult?)
 	local deaths = getStatValue(stats, "deaths")
 	local destruction = getStatValue(stats, "destruction")
 
-	local damageLabel = findStatLabel(statsFrame, "Damage")
-	if damageLabel then
-		damageLabel.Text = formatInteger(damage)
-	end
+	setStatLabel(statsFrame, "Damage", damage)
 
 	local kdLabel = findStatLabel(statsFrame, "KD")
 	if kdLabel then
 		kdLabel.Text = formatKd(eliminations, deaths)
 	end
 
-	local elimsLabel = findStatLabel(statsFrame, "Elims")
-	if elimsLabel then
-		elimsLabel.Text = formatInteger(eliminations)
-	end
-
-	local deathsLabel = findStatLabel(statsFrame, "Deaths")
-	if deathsLabel then
-		deathsLabel.Text = formatInteger(deaths)
-	end
-
-	local destructionLabel = findStatLabel(statsFrame, "DestructionScore")
-	if destructionLabel then
-		destructionLabel.Text = formatInteger(destruction)
-	end
-
-	local coinsEarnedLabel = findStatLabel(statsFrame, "CoinsEarned")
-	if coinsEarnedLabel then
-		coinsEarnedLabel.Text = formatInteger(getRewardValue(rewards, "baseCoins"))
-	end
-
-	local vipBonusLabel = findStatLabel(statsFrame, "VIPBonus")
-	if vipBonusLabel then
-		vipBonusLabel.Text = formatInteger(getRewardValue(rewards, "vipBonusCoins"))
-	end
-
-	local totalCoinsLabel = findStatLabel(statsFrame, "TotalCoins")
-	if totalCoinsLabel then
-		totalCoinsLabel.Text = formatInteger(getRewardValue(rewards, "totalCoins"))
-	end
+	setStatLabel(statsFrame, "Elims", eliminations)
+	setStatLabel(statsFrame, "Deaths", deaths)
+	setStatLabel(statsFrame, "DestructionScore", destruction)
+	setStatLabel(statsFrame, "CoinsEarned", getRewardValue(rewards, "baseCoins"))
+	setStatLabel(statsFrame, "VIPBonus", getRewardValue(rewards, "vipBonusCoins"))
+	setStatLabel(statsFrame, "TotalCoins", getRewardValue(rewards, "totalCoins"))
+	setStatLabel(statsFrame, "CompleteMatch", getRewardValue(rewards, "completeMatchCoins"))
+	setStatLabel(statsFrame, "EliminationsReward", getRewardValue(rewards, "eliminationCoins"))
+	setStatLabel(statsFrame, "AssistsReward", getRewardValue(rewards, "assistCoins"))
+	setStatLabel(statsFrame, "WinReward", getRewardValue(rewards, "winCoins"))
+	setStatLabel(statsFrame, "POTGReward", getRewardValue(rewards, "potgCoins"))
+	setStatLabel(statsFrame, "DamageReward", getRewardValue(rewards, "damageCoins"))
 end
 
 function ResultsScreenController:_setBanner(results, playerResult: PlayerResult?)

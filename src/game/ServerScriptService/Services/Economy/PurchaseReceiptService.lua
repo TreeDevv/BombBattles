@@ -18,15 +18,16 @@ local PENDING_GIFT_TTL_SECONDS = 30 * 60
 local STARTER_PACK_KEY = "StarterPack"
 local STARTER_PACK_OWNED_ATTR = "StarterPackOwned"
 
-local SUPPORTED_GIFT_TARGETS = {
-	FatPack = true,
-}
-
 local GIFT_OWNERSHIP_REQUIREMENTS = {
 	FatPack = {
 		abilityId = "FatBomb",
 		bombSkinId = "FatGuy",
 	},
+}
+
+local GIFT_ONE_TIME_PRODUCT_TARGETS = {
+	StarterPack = true,
+	FatPack = true,
 }
 
 local PurchaseReceipt = {}
@@ -137,6 +138,65 @@ local function hasProductPurchase(player, idOrKey)
 	return typeof(products) == "table" and products[productId] ~= nil
 end
 
+local function logHasReceivedGiftTarget(purchaseLog, targetKey: string): boolean
+	purchaseLog = ensureLogTables(purchaseLog)
+	for _, payload in pairs(purchaseLog.giftsReceived) do
+		if typeof(payload) == "table" and payload.targetProductKey == targetKey then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function hasProductEntitlement(player, idOrKey)
+	if hasProductPurchase(player, idOrKey) then
+		return true
+	end
+
+	local key = idOrKey
+	if typeof(idOrKey) == "number" then
+		local config = RobuxPurchases.ProductsById[idOrKey]
+		key = config and config.key or nil
+	end
+	if typeof(key) ~= "string" or key == "" then
+		return false
+	end
+
+	return logHasReceivedGiftTarget(getLog(player), key)
+end
+
+local function dataHasProductPurchase(data, idOrKey): boolean
+	if typeof(data) ~= "table" then
+		return false
+	end
+
+	local productId = getProductIdString(idOrKey)
+	if not productId then
+		return false
+	end
+
+	local purchaseLog = ensureLogTables(data[PURCHASE_LOG_FIELD])
+	return purchaseLog.products[productId] ~= nil
+end
+
+local function dataHasProductEntitlement(data, idOrKey): boolean
+	if dataHasProductPurchase(data, idOrKey) then
+		return true
+	end
+
+	local key = idOrKey
+	if typeof(idOrKey) == "number" then
+		local config = RobuxPurchases.ProductsById[idOrKey]
+		key = config and config.key or nil
+	end
+	if typeof(key) ~= "string" or key == "" then
+		return false
+	end
+
+	return logHasReceivedGiftTarget(data[PURCHASE_LOG_FIELD], key)
+end
+
 local function hasProductReceipt(player, productId, purchaseId)
 	if purchaseId == nil then
 		return false
@@ -147,7 +207,7 @@ local function hasProductReceipt(player, productId, purchaseId)
 end
 
 local function syncStarterPackOwnedAttribute(player)
-	player:SetAttribute(STARTER_PACK_OWNED_ATTR, hasProductPurchase(player, STARTER_PACK_KEY))
+	player:SetAttribute(STARTER_PACK_OWNED_ATTR, hasProductEntitlement(player, STARTER_PACK_KEY))
 end
 
 local function getPurchaseDisplayName(kind, key, id)
@@ -263,6 +323,25 @@ local function getGiftProductKeyForTarget(targetKey: string): string?
 	return nil
 end
 
+local function isConfiguredGiftTarget(targetKey: string, giftProductKey: string): (boolean, string?)
+	local targetConfig = RobuxPurchases.Products[targetKey]
+	local giftConfig = RobuxPurchases.Products[giftProductKey]
+	if not targetConfig or not giftConfig then
+		return false, "Gift product is not configured correctly."
+	end
+	if giftConfig.giftTargetKey ~= targetKey then
+		return false, "Gift product is not configured correctly."
+	end
+	if getGiftProductKeyForTarget(targetKey) ~= giftProductKey then
+		return false, "Gift product is not configured correctly."
+	end
+	if math.floor(tonumber(giftConfig.id) or 0) <= 0 then
+		return false, "Gift product is unavailable."
+	end
+
+	return true, nil
+end
+
 local function getGiftTargetForProduct(productId: number): (string?, string?, any?)
 	local config = RobuxPurchases.ProductsById[productId]
 	if config and typeof(config.giftTargetKey) == "string" and config.giftTargetKey ~= "" then
@@ -293,27 +372,31 @@ local function profileDataOwnsTarget(data, targetKey: string): boolean
 	end
 
 	local requirements = GIFT_OWNERSHIP_REQUIREMENTS[targetKey]
-	if typeof(requirements) ~= "table" then
-		return false
-	end
-
-	local abilityId = requirements.abilityId
-	if typeof(abilityId) == "string" and abilityId ~= "" then
-		local ownedAbilities = data.ownedAbilities
-		if typeof(ownedAbilities) ~= "table" or ownedAbilities[abilityId] ~= true then
-			return false
+	if typeof(requirements) == "table" then
+		local abilityId = requirements.abilityId
+		if typeof(abilityId) == "string" and abilityId ~= "" then
+			local ownedAbilities = data.ownedAbilities
+			if typeof(ownedAbilities) ~= "table" or ownedAbilities[abilityId] ~= true then
+				return false
+			end
 		end
-	end
 
-	local bombSkinId = requirements.bombSkinId
-	if typeof(bombSkinId) == "string" and bombSkinId ~= "" then
-		local ownedBombSkins = data.ownedBombSkins
-		if typeof(ownedBombSkins) ~= "table" or ownedBombSkins[bombSkinId] ~= true then
-			return false
+		local bombSkinId = requirements.bombSkinId
+		if typeof(bombSkinId) == "string" and bombSkinId ~= "" then
+			local ownedBombSkins = data.ownedBombSkins
+			if typeof(ownedBombSkins) ~= "table" or ownedBombSkins[bombSkinId] ~= true then
+				return false
+			end
 		end
+
+		return true
 	end
 
-	return true
+	if GIFT_ONE_TIME_PRODUCT_TARGETS[targetKey] == true then
+		return dataHasProductEntitlement(data, targetKey)
+	end
+
+	return false
 end
 
 local function viewOfflineProfileData(userId: number): (any?, string?)
@@ -491,14 +574,11 @@ local function prepareGiftPurchase(player: Player, request)
 	if recipientUserId == player.UserId then
 		return makeGiftFailure("SelfGift", "You can't gift yourself.")
 	end
-	if not SUPPORTED_GIFT_TARGETS[targetKey] then
-		return makeGiftFailure("UnsupportedGift", "This item cannot be gifted yet.")
-	end
-
 	local targetConfig = RobuxPurchases.Products[targetKey]
 	local giftConfig = RobuxPurchases.Products[giftProductKey]
-	if not targetConfig or not giftConfig or giftConfig.giftTargetKey ~= targetKey then
-		return makeGiftFailure("InvalidProduct", "Gift product is not configured correctly.")
+	local configured, configuredMessage = isConfiguredGiftTarget(targetKey, giftProductKey)
+	if not configured then
+		return makeGiftFailure("InvalidProduct", configuredMessage or "Gift product is not configured correctly.")
 	end
 
 	local giftProductId = math.floor(tonumber(giftConfig.id) or 0)
@@ -579,6 +659,9 @@ local function processReceivedGift(player: Player, payload)
 	end
 
 	markGiftReceived(player, purchaseId, payload)
+	if targetKey == STARTER_PACK_KEY then
+		syncStarterPackOwnedAttribute(player)
+	end
 	local senderName = if typeof(payload.senderUsername) == "string" and payload.senderUsername ~= ""
 		then payload.senderUsername
 		else "a friend"
@@ -672,6 +755,9 @@ local function processGiftReceipt(player: Player, productId: number, purchaseId:
 			return Enum.ProductPurchaseDecision.NotProcessedYet
 		end
 		markGiftReceived(recipient, purchaseId, payload)
+		if targetKey == STARTER_PACK_KEY then
+			syncStarterPackOwnedAttribute(recipient)
+		end
 		Notify.Send(recipient, string.format("You received %s from @%s!", getPurchaseDisplayName("product", targetKey, nil), player.Name), {
 			color = "Green",
 		})
@@ -720,7 +806,7 @@ local function processProductReceipt(receiptInfo)
 
 	local config = RobuxPurchases.ProductsById[productId]
 	local key = config and config.key or nil
-	if key == STARTER_PACK_KEY and hasProductPurchase(player, productId) then
+	if key == STARTER_PACK_KEY and hasProductEntitlement(player, STARTER_PACK_KEY) then
 		syncStarterPackOwnedAttribute(player)
 		Notify.Send(player, "You already own the Starter Pack.", { color = "Red" })
 		return Enum.ProductPurchaseDecision.PurchaseGranted

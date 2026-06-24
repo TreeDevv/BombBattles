@@ -56,21 +56,21 @@ end
 function RoundDamageRuntime.RecordPlayerDamage(options)
 	local target: Player = options.target
 	if not options.isRoundActive then
-		return
+		return false
 	end
 	if not (target and target.Parent == Players) then
-		return
+		return false
 	end
 	if not options.isPlayerActive(target) then
-		return
+		return false
 	end
 	if typeof(options.damage) ~= "number" or options.damage ~= options.damage or options.damage <= 0 then
-		return
+		return false
 	end
 
 	local attackerIdentity = getAttackerIdentity(options.attacker, target, options.getTrackedTeamName)
 	if not attackerIdentity or typeof(attackerIdentity.userId) ~= "number" then
-		return
+		return false
 	end
 
 	if attackerIdentity.isPlayer then
@@ -86,6 +86,7 @@ function RoundDamageRuntime.RecordPlayerDamage(options)
 	)
 
 	options.syncScoreboardStats()
+	return true
 end
 
 function RoundDamageRuntime.RecordMapDestruction(options)

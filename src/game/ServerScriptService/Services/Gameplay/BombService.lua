@@ -814,14 +814,6 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 				victimHealthAfter = healthAfter,
 			})
 			RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/RecordDamageReplay", replayToken)
-			sendWorldText("PlayerDamaged", owner, player, appliedDamage, rootPart.Position, {
-				sourceType = explosionConfig.replaySourceType or "Bomb",
-				sourceId = explosionConfig.replaySourceId or sourceId,
-				bombId = sourceId,
-				bombType = explosionConfig.replayBombType,
-				abilityName = explosionConfig.replayAbilityName,
-				victimHealthAfter = healthAfter,
-			})
 		end
 		if hookResult.skipKnockback ~= true then
 			applyKnockback(character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)

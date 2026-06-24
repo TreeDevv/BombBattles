@@ -114,6 +114,21 @@ return {
 		value = "",
 	},
 
+	OwnedHighlightIntros = {
+		key = "ownedHighlightIntros",
+		value = {},
+	},
+
+	HighlightIntroCopies = {
+		key = "highlightIntroCopies",
+		value = {},
+	},
+
+	EquippedHighlightIntro = {
+		key = "equippedHighlightIntro",
+		value = "TooFast",
+	},
+
 	EmoteOrder = {
 		key = "emoteOrder",
 		value = {},

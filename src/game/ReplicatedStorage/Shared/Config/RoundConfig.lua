@@ -56,11 +56,12 @@ return {
 	},
 
 	Rewards = {
-		ParticipationCoins = 25,
-		WinCoins = 25,
+		CompleteMatchCoins = 40,
+		WinCoins = 50,
 		EliminationCoins = 10,
+		AssistCoins = 5,
+		POTGCoins = 25,
 		DamageCoinsPer100 = 3,
-		DestructionCoinsPerTarget = 2,
 		VipBonusMultiplier = 0,
 	},
 

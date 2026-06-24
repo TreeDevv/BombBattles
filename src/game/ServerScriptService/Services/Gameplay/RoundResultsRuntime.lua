@@ -37,28 +37,46 @@ function RoundResultsRuntime.GetMapDisplayName(mapId: string, getConfiguredMap):
 	return mapId
 end
 
-function RoundResultsRuntime.CalculateReward(stats, winnerTeam: string, playerTeam: string?)
+local function getRewardAmount(rewards, primaryKey: string, fallbackKey: string?): number
+	local value = rewards[primaryKey]
+	if value == nil and fallbackKey then
+		value = rewards[fallbackKey]
+	end
+	return RoundResultsRuntime.RoundNonNegative(value)
+end
+
+function RoundResultsRuntime.CalculateReward(stats, winnerTeam: string, playerTeam: string?, earnedPOTG: boolean?)
 	local rewards = RoundConfig.Rewards or {}
 	local damage = RoundResultsRuntime.RoundNonNegative(stats and stats.damage)
 	local eliminations = RoundResultsRuntime.RoundNonNegative(stats and stats.eliminations)
-	local destruction = RoundResultsRuntime.RoundNonNegative(stats and stats.destruction)
-	local baseCoins = RoundResultsRuntime.RoundNonNegative(rewards.ParticipationCoins)
+	local assists = RoundResultsRuntime.RoundNonNegative(stats and stats.assists)
+	local completeMatchCoins = getRewardAmount(rewards, "CompleteMatchCoins", "ParticipationCoins")
+	local eliminationCoins = eliminations * getRewardAmount(rewards, "EliminationCoins")
+	local assistCoins = assists * getRewardAmount(rewards, "AssistCoins")
+	local winCoins = 0
+	local potgCoins = if earnedPOTG == true then getRewardAmount(rewards, "POTGCoins") else 0
+	local damageCoins = math.floor(damage / 100) * getRewardAmount(rewards, "DamageCoinsPer100")
 
 	if winnerTeam ~= "Draw" and playerTeam == winnerTeam then
-		baseCoins += RoundResultsRuntime.RoundNonNegative(rewards.WinCoins)
+		winCoins = getRewardAmount(rewards, "WinCoins")
 	end
 
-	baseCoins += eliminations * RoundResultsRuntime.RoundNonNegative(rewards.EliminationCoins)
-	baseCoins += math.floor(damage / 100) * RoundResultsRuntime.RoundNonNegative(rewards.DamageCoinsPer100)
-	baseCoins += destruction * RoundResultsRuntime.RoundNonNegative(rewards.DestructionCoinsPerTarget)
+	local baseCoins = completeMatchCoins + eliminationCoins + assistCoins + winCoins + potgCoins + damageCoins
 
 	local vipBonusMultiplier = tonumber(rewards.VipBonusMultiplier) or 0
 	local vipBonusCoins = if vipBonusMultiplier > 0 then math.floor(baseCoins * vipBonusMultiplier + 0.5) else 0
 
 	return {
+		completeMatchCoins = completeMatchCoins,
+		eliminationCoins = eliminationCoins,
+		assistCoins = assistCoins,
+		winCoins = winCoins,
+		potgCoins = potgCoins,
+		damageCoins = damageCoins,
 		baseCoins = baseCoins,
 		vipBonusCoins = vipBonusCoins,
 		totalCoins = baseCoins + vipBonusCoins,
+		earnedPOTG = earnedPOTG == true,
 	}
 end
 
@@ -71,6 +89,7 @@ function RoundResultsRuntime.Build(options)
 		selectedMapId = selectedMapId,
 		mapDisplayName = RoundResultsRuntime.GetMapDisplayName(selectedMapId, options.getConfiguredMap),
 		durationSeconds = RoundResultsRuntime.RoundNonNegative(os.clock() - (tonumber(options.activeRoundStartedAt) or os.clock())),
+		potgWinnerUserId = if typeof(options.potgWinnerUserId) == "number" then math.floor(options.potgWinnerUserId) else nil,
 		players = {},
 	}
 
@@ -81,6 +100,7 @@ function RoundResultsRuntime.Build(options)
 			local stats = if typeof(options.getScoreboardStatsFor) == "function" then deepCopy(options.getScoreboardStatsFor(player)) else {}
 			local platform = options.scoreboardPlatforms and options.scoreboardPlatforms[playerKey]
 
+			local earnedPOTG = typeof(options.potgWinnerUserId) == "number" and options.potgWinnerUserId == player.UserId
 			table.insert(results.players, {
 				userId = player.UserId,
 				name = player.Name,
@@ -88,7 +108,7 @@ function RoundResultsRuntime.Build(options)
 				teamName = playerTeam or "",
 				platform = if typeof(platform) == "string" then platform else "KeyboardAndMouse",
 				stats = stats,
-				rewards = RoundResultsRuntime.CalculateReward(stats, winnerTeam, playerTeam),
+				rewards = RoundResultsRuntime.CalculateReward(stats, winnerTeam, playerTeam, earnedPOTG),
 			})
 		end
 	end

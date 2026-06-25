@@ -3,127 +3,44 @@ local SettingsConfig = {}
 SettingsConfig.RemotesFolderName = "Remotes"
 SettingsConfig.UpdateRemoteName = "UpdatePlayerSetting"
 
-SettingsConfig.Quality = table.freeze({
-	Full = "Full",
-	Reduced = "Reduced",
-	Minimal = "Minimal",
-	Off = "Off",
-})
-
 SettingsConfig.Defaults = table.freeze({
-	shiftLockKey = "LeftControl",
-	cameraShakeScale = 100,
-	cameraMotionScale = 100,
-	dynamicFovScale = 100,
-	screenEffectsScale = 100,
-	explosionVfxQuality = SettingsConfig.Quality.Full,
-	debrisVfxQuality = SettingsConfig.Quality.Full,
-	enemyHighlightsEnabled = true,
-	enemyHighlightColorHex = "",
+	explosionDebrisEnabled = true,
+	enemyOutlineColorHex = "FF4E4E",
+	friendlyOutlineColorHex = "48ABFF",
 	masterVolume = 100,
 	musicVolume = 100,
 	sfxVolume = 100,
-	uiVolume = 100,
-	uiAnimationScale = 100,
+	shiftLockKey = "LeftControl",
+	offensiveAbilityKey = "E",
+	defensiveAbilityKey = "Q",
+	emoteKey = "B",
 })
 
 SettingsConfig.Sections = table.freeze({
-	{
-		id = "Controls",
-		label = "Controls",
-		settings = {
-			{
-				id = "shiftLockKey",
-				label = "Shift Lock",
-				description = "Change the key used to toggle camera lock.",
-				kind = "keybind",
-				default = SettingsConfig.Defaults.shiftLockKey,
-			},
-		},
-	},
-	{
-		id = "GameplayFeel",
-		label = "Gameplay Feel",
-		settings = {
-			{
-				id = "cameraShakeScale",
-				label = "Camera Shake",
-				description = "Controls landing, throw, and explosion shake strength.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.cameraShakeScale,
-				min = 0,
-				max = 100,
-				step = 5,
-			},
-			{
-				id = "cameraMotionScale",
-				label = "Camera Motion",
-				description = "Controls movement bob, roll, drift, and fall lag.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.cameraMotionScale,
-				min = 0,
-				max = 100,
-				step = 5,
-			},
-			{
-				id = "dynamicFovScale",
-				label = "Dynamic FOV",
-				description = "Controls speed and action field-of-view changes.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.dynamicFovScale,
-				min = 0,
-				max = 100,
-				step = 5,
-			},
-		},
-	},
 	{
 		id = "Visuals",
 		label = "Visuals",
 		settings = {
 			{
-				id = "screenEffectsScale",
-				label = "Screen Effects",
-				description = "Controls full-screen flashes, blur, and status effects.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.screenEffectsScale,
-				min = 0,
-				max = 100,
-				step = 5,
-			},
-			{
-				id = "explosionVfxQuality",
-				label = "Explosion VFX",
-				description = "Reduces non-critical explosion visuals for performance.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.explosionVfxQuality,
-				min = 0,
-				max = 100,
-				step = 50,
-			},
-			{
-				id = "debrisVfxQuality",
-				label = "Debris VFX",
-				description = "Reduces local terrain debris visuals for performance.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.debrisVfxQuality,
-				min = 0,
-				max = 100,
-				step = 50,
-			},
-			{
-				id = "enemyHighlightsEnabled",
-				label = "Enemy Highlights",
-				description = "Shows active enemy players through combat clutter.",
+				id = "explosionDebrisEnabled",
+				label = "Explosion Debris",
+				description = "Shows terrain debris chunks from explosions.",
 				kind = "toggle",
-				default = SettingsConfig.Defaults.enemyHighlightsEnabled,
+				default = SettingsConfig.Defaults.explosionDebrisEnabled,
 			},
 			{
-				id = "enemyHighlightColorHex",
-				label = "Enemy Highlight Color",
-				description = "Override enemy highlight color for readability.",
+				id = "enemyOutlineColorHex",
+				label = "Enemy Outline Color",
+				description = "Controls enemy player outline color.",
 				kind = "color",
-				default = SettingsConfig.Defaults.enemyHighlightColorHex,
+				default = SettingsConfig.Defaults.enemyOutlineColorHex,
+			},
+			{
+				id = "friendlyOutlineColorHex",
+				label = "Friendly Outline Color",
+				description = "Controls friendly player outline color.",
+				kind = "color",
+				default = SettingsConfig.Defaults.friendlyOutlineColorHex,
 			},
 		},
 	},
@@ -161,31 +78,39 @@ SettingsConfig.Sections = table.freeze({
 				max = 100,
 				step = 5,
 			},
-			{
-				id = "uiVolume",
-				label = "UI Volume",
-				description = "Controls menu and button sounds.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.uiVolume,
-				min = 0,
-				max = 100,
-				step = 5,
-			},
 		},
 	},
 	{
-		id = "Interface",
-		label = "Interface",
+		id = "Controls",
+		label = "Controls",
 		settings = {
 			{
-				id = "uiAnimationScale",
-				label = "UI Animations",
-				description = "Controls menu and button animation intensity.",
-				kind = "slider",
-				default = SettingsConfig.Defaults.uiAnimationScale,
-				min = 0,
-				max = 100,
-				step = 5,
+				id = "shiftLockKey",
+				label = "Shift Lock",
+				description = "Change the key used to toggle camera lock.",
+				kind = "keybind",
+				default = SettingsConfig.Defaults.shiftLockKey,
+			},
+			{
+				id = "offensiveAbilityKey",
+				label = "Offensive Ability",
+				description = "Change the key used to activate your offensive ability.",
+				kind = "keybind",
+				default = SettingsConfig.Defaults.offensiveAbilityKey,
+			},
+			{
+				id = "defensiveAbilityKey",
+				label = "Defensive Ability",
+				description = "Change the key used to activate your defensive ability.",
+				kind = "keybind",
+				default = SettingsConfig.Defaults.defensiveAbilityKey,
+			},
+			{
+				id = "emoteKey",
+				label = "Emote",
+				description = "Change the key used to open the emote wheel.",
+				kind = "keybind",
+				default = SettingsConfig.Defaults.emoteKey,
 			},
 		},
 	},
@@ -224,41 +149,6 @@ local function normalizeNumber(value: any, definition): number
 	numberValue = math.clamp(numberValue, minValue, maxValue)
 	numberValue = math.floor(((numberValue - minValue) / step) + 0.5) * step + minValue
 	return math.clamp(math.floor(numberValue + 0.5), minValue, maxValue)
-end
-
-function SettingsConfig.NormalizeQualityFromSlider(value: any): string
-	local numberValue = tonumber(value)
-	if typeof(value) == "string" then
-		if value == SettingsConfig.Quality.Full
-			or value == SettingsConfig.Quality.Reduced
-			or value == SettingsConfig.Quality.Minimal
-			or value == SettingsConfig.Quality.Off
-		then
-			return value
-		end
-	end
-	if not numberValue then
-		return SettingsConfig.Quality.Full
-	end
-	if numberValue <= 0 then
-		return SettingsConfig.Quality.Off
-	elseif numberValue <= 35 then
-		return SettingsConfig.Quality.Minimal
-	elseif numberValue <= 75 then
-		return SettingsConfig.Quality.Reduced
-	end
-	return SettingsConfig.Quality.Full
-end
-
-function SettingsConfig.QualityToSlider(value: any): number
-	if value == SettingsConfig.Quality.Off then
-		return 0
-	elseif value == SettingsConfig.Quality.Minimal then
-		return 35
-	elseif value == SettingsConfig.Quality.Reduced then
-		return 65
-	end
-	return 100
 end
 
 function SettingsConfig.NormalizeColorHex(value: any): string
@@ -300,15 +190,17 @@ function SettingsConfig.NormalizeValue(id: string, value: any): any
 	if not definition then
 		return nil
 	end
+	if value == nil then
+		return definition.default
+	end
 
 	if definition.kind == "toggle" then
 		return value == true
 	elseif definition.kind == "keybind" then
 		return if typeof(value) == "string" and keyCodeNames[value] then value else definition.default
 	elseif definition.kind == "color" then
-		return SettingsConfig.NormalizeColorHex(value)
-	elseif id == "explosionVfxQuality" or id == "debrisVfxQuality" then
-		return SettingsConfig.NormalizeQualityFromSlider(value)
+		local normalized = SettingsConfig.NormalizeColorHex(value)
+		return if normalized ~= "" then normalized else definition.default
 	elseif definition.kind == "slider" then
 		return normalizeNumber(value, definition)
 	end

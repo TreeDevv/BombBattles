@@ -20,6 +20,7 @@ local RoundCoreRuntime = require(ServerScriptService.Services.RoundCoreRuntime)
 local RoundDamageRuntime = require(ServerScriptService.Services.RoundDamageRuntime)
 local RoundDeathRuntime = require(ServerScriptService.Services.RoundDeathRuntime)
 local RoundKillFeedRuntime = require(ServerScriptService.Services.RoundKillFeedRuntime)
+local RoundLateJoinRuntime = require(ServerScriptService.Services.RoundLateJoinRuntime)
 local RoundLightingRuntime = require(ServerScriptService.Services.RoundLightingRuntime)
 local RoundMapRuntime = require(ServerScriptService.Services.RoundMapRuntime)
 local RoundPOTGIntroRuntime = require(ServerScriptService.Services.RoundPOTGIntroRuntime)
@@ -52,15 +53,16 @@ local ROUND_ID_ATTR = "RoundId"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
 local ROUND_RESPAWN_ENDS_AT_ATTR = "RoundRespawnEndsAt"
-local CORE_HEALTH_ATTR = RoundConfig.Cores.HealthAttribute
-local CORE_DESTROYED_ATTR = RoundConfig.Cores.DestroyedAttribute
+local ROUND_SPAWN_PROTECTION_ENDS_AT_ATTR = "RoundSpawnProtectionEndsAt"
 local ROUND_ATTRS = {
 	roundId = ROUND_ID_ATTR,
 	roundTeam = ROUND_TEAM_ATTR,
 	roundAlive = ROUND_ALIVE_ATTR,
 	roundRespawnEndsAt = ROUND_RESPAWN_ENDS_AT_ATTR,
+	roundSpawnProtectionEndsAt = ROUND_SPAWN_PROTECTION_ENDS_AT_ATTR,
 }
 local ASSIST_WINDOW_SECONDS = 10
+local SPAWN_PROTECTION_SECONDS = 3
 local DEATH_BODY_RETAIN_SECONDS = 1.8
 local RESPAWN_LOAD_VERIFY_DELAY_SECONDS = 0.65
 local RESPAWN_LOAD_MAX_ATTEMPTS = 3
@@ -767,6 +769,17 @@ local function clearPlayerRoundState(player: Player)
 	RoundPlayerStateRuntime.ClearRoundState(player, ROUND_ATTRS)
 end
 
+local function clearSpawnProtection(player: Player)
+	player:SetAttribute(ROUND_SPAWN_PROTECTION_ENDS_AT_ATTR, 0)
+end
+
+local function startSpawnProtection(player: Player)
+	player:SetAttribute(
+		ROUND_SPAWN_PROTECTION_ENDS_AT_ATTR,
+		workspace:GetServerTimeNow() + SPAWN_PROTECTION_SECONDS
+	)
+end
+
 local function disconnectCoreConnections()
 	coreConnections:DisconnectAll()
 end
@@ -829,39 +842,20 @@ local function syncAliveCounts()
 	setReplicaValue({ "aliveCounts" }, countAlivePlayers())
 end
 
-local function isCoreAlive(core: Instance): boolean
-	return RoundCoreRuntime.IsCoreAlive(core)
-end
-
-local function countAliveCores()
-	return RoundCoreRuntime.CountAliveCores(teamCoreInstances)
-end
-
-local function buildRespawnState(_coreCounts: { [string]: number })
-	return {
-		[RoundConfig.Teams.Red.name] = true,
-		[RoundConfig.Teams.Blue.name] = true,
-	}
-end
-
 local reconcilePlayersWithoutRespawns: (() -> ())?
 local eliminatePlayer: ((Player) -> ())?
+local handlePlayerDeath: ((Player) -> boolean)?
 
 local function syncCoreState()
-	local coreCounts = countAliveCores()
+	local coreCounts = RoundCoreRuntime.CountAliveCores(teamCoreInstances)
 	setReplicaValue({ "coreCounts" }, coreCounts)
-	setReplicaValue({ "respawnsEnabled" }, buildRespawnState(coreCounts))
+	setReplicaValue({ "respawnsEnabled" }, {
+		[RoundConfig.Teams.Red.name] = true,
+		[RoundConfig.Teams.Blue.name] = true,
+	})
 	if currentState == RoundStates.Active and reconcilePlayersWithoutRespawns then
 		reconcilePlayersWithoutRespawns()
 	end
-end
-
-local function teamHasRespawns(teamName: string?): boolean
-	return isValidRoundTeam(teamName)
-end
-
-local function hasUsableCharacter(player: Player): boolean
-	return RoundCharacterRuntime.HasUsableCharacter(player)
 end
 
 local function getMissingCharacterReadiness(character: Model): ({ string }, boolean)
@@ -876,17 +870,6 @@ local function getMissingCharacterReadiness(character: Model): ({ string }, bool
 	local rootPart = character:FindFirstChild("HumanoidRootPart")
 	if not (rootPart and rootPart:IsA("BasePart")) then
 		table.insert(missing, "HumanoidRootPart")
-	end
-
-	local abilityManagerActor = character:FindFirstChild("AbilityManagerActor")
-	if not abilityManagerActor then
-		table.insert(missing, "AbilityManagerActor")
-	elseif not abilityManagerActor:FindFirstChild("Abilities") then
-		table.insert(missing, "AbilityManagerActor.Abilities")
-	end
-
-	if not character:FindFirstChildOfClass("ControllerManager") then
-		table.insert(missing, "ControllerManager")
 	end
 
 	return missing, false
@@ -922,6 +905,12 @@ function RespawnFlow.killPlayerForVoidFall(player: Player, voidKillY: number): b
 		applyDeathRagdoll = function(character: Model, reason: string)
 			RespawnFlow.applyDeathRagdoll(character, reason)
 		end,
+		handleVoidDeath = function(candidate: Player): boolean
+			if not handlePlayerDeath then
+				return false
+			end
+			return handlePlayerDeath(candidate)
+		end,
 	})
 end
 
@@ -939,6 +928,12 @@ function RespawnFlow.checkVoidFalls()
 		debugDeathFlow = debugDeathFlow,
 		applyDeathRagdoll = function(character: Model, reason: string)
 			RespawnFlow.applyDeathRagdoll(character, reason)
+		end,
+		handleVoidDeath = function(candidate: Player): boolean
+			if not handlePlayerDeath then
+				return false
+			end
+			return handlePlayerDeath(candidate)
 		end,
 	})
 end
@@ -1022,7 +1017,7 @@ function RespawnFlow.respawnPlayerToLobby(
 			return false
 		end
 		RespawnFlow.waitForUsableCharacter(player, ROUND_CHARACTER_READY_TIMEOUT_SECONDS)
-	elseif not hasUsableCharacter(player) then
+	elseif not RoundCharacterRuntime.HasUsableCharacter(player) then
 		RespawnFlow.waitForUsableCharacter(player, ROUND_CHARACTER_READY_TIMEOUT_SECONDS)
 	end
 
@@ -1032,7 +1027,7 @@ function RespawnFlow.respawnPlayerToLobby(
 	if player.Parent ~= Players or (roundPlayers[player] == true and allowRoundTracked ~= true) then
 		return false
 	end
-	if not hasUsableCharacter(player) then
+	if not RoundCharacterRuntime.HasUsableCharacter(player) then
 		warn(("[RoundService] Lobby respawn did not produce a usable character for %s during %s"):format(
 			player.Name,
 			context
@@ -1064,7 +1059,7 @@ function RespawnFlow.moveRoundCharacterToTeamSpawn(player: Player): boolean
 end
 
 function RespawnFlow.finalizeRoundRespawnIfReady(player: Player, token: number, context: string): boolean
-	return RoundRespawnRuntime.FinalizeRoundRespawnIfReady({
+	local finalized = RoundRespawnRuntime.FinalizeRoundRespawnIfReady({
 		player = player,
 		token = token,
 		context = context,
@@ -1077,14 +1072,14 @@ function RespawnFlow.finalizeRoundRespawnIfReady(player: Player, token: number, 
 		getRespawnToken = function(candidate: Player): number?
 			return respawnTokens:GetRespawn(candidate)
 		end,
-		hasUsableCharacter = hasUsableCharacter,
+		hasUsableCharacter = RoundCharacterRuntime.HasUsableCharacter,
 		isRespawnStillValid = function(candidate: Player): boolean
 			return currentState == RoundStates.Active and roundPlayers[candidate] == true and alivePlayers[candidate] == true
 		end,
 		getTeamName = function(candidate: Player): string?
 			return playerTeams[candidate]
 		end,
-		teamHasRespawns = teamHasRespawns,
+		teamHasRespawns = isValidRoundTeam,
 		moveRoundCharacterToTeamSpawn = function(candidate: Player): boolean
 			return RespawnFlow.moveRoundCharacterToTeamSpawn(candidate)
 		end,
@@ -1092,6 +1087,10 @@ function RespawnFlow.finalizeRoundRespawnIfReady(player: Player, token: number, 
 			respawnTokens:ClearPendingRoundRespawn(candidate)
 		end,
 	})
+	if finalized then
+		startSpawnProtection(player)
+	end
+	return finalized
 end
 
 function RespawnFlow.shouldRetryRoundRespawn(player: Player, token: number): boolean
@@ -1121,7 +1120,7 @@ function RespawnFlow.shouldRetryRoundRespawn(player: Player, token: number): boo
 		getTeamName = function(candidate: Player): string?
 			return playerTeams[candidate]
 		end,
-		teamHasRespawns = teamHasRespawns,
+		teamHasRespawns = isValidRoundTeam,
 	})
 end
 
@@ -1144,7 +1143,7 @@ function RespawnFlow.verifyRoundRespawn(player: Player, token: number, attempt: 
 		getCurrentState = function(): string
 			return currentState
 		end,
-		hasUsableCharacter = hasUsableCharacter,
+		hasUsableCharacter = RoundCharacterRuntime.HasUsableCharacter,
 		isRespawnStillValid = function(candidate: Player): boolean
 			return currentState == RoundStates.Active and roundPlayers[candidate] == true and alivePlayers[candidate] == true
 		end,
@@ -1157,7 +1156,7 @@ function RespawnFlow.verifyRoundRespawn(player: Player, token: number, attempt: 
 		getTeamName = function(candidate: Player): string?
 			return playerTeams[candidate]
 		end,
-		teamHasRespawns = teamHasRespawns,
+		teamHasRespawns = isValidRoundTeam,
 		moveRoundCharacterToTeamSpawn = function(candidate: Player): boolean
 			return RespawnFlow.moveRoundCharacterToTeamSpawn(candidate)
 		end,
@@ -1366,64 +1365,7 @@ local function bindLobbyCharacter(player: Player)
 	})
 end
 
-local function bindCore(core: Instance, map: Instance)
-	coreConnections:Reset(core)
-
-	local function onCoreStateChanged()
-		if currentState == RoundStates.Active then
-			syncCoreState()
-		end
-	end
-
-	coreConnections:Add(core, core:GetAttributeChangedSignal(CORE_HEALTH_ATTR):Connect(onCoreStateChanged))
-	coreConnections:Add(core, core:GetAttributeChangedSignal(CORE_DESTROYED_ATTR):Connect(onCoreStateChanged))
-	coreConnections:Add(core, core.AncestryChanged:Connect(function()
-		if not core:IsDescendantOf(map) then
-			onCoreStateChanged()
-		end
-	end))
-
-	local humanoid = core:FindFirstChildOfClass("Humanoid")
-	if humanoid then
-		coreConnections:Add(core, humanoid.Died:Connect(onCoreStateChanged))
-		coreConnections:Add(core, humanoid.HealthChanged:Connect(onCoreStateChanged))
-	end
-end
-
-local function setupTeamCores(map: Model): boolean
-	local token = RuntimeProfiler.Begin("Server/Round/Map/SetupTeamCores")
-	disconnectCoreConnections()
-	teamCoreInstances = {}
-
-	for _, teamName in ipairs(TEAM_ORDER) do
-		local findToken = RuntimeProfiler.Begin("Server/Round/Map/FindTeamCores")
-		local cores = getTeamCores(teamName, map)
-		RuntimeProfiler.End("Server/Round/Map/FindTeamCores", findToken)
-		RuntimeProfiler.Count("Server/Round/Map/TeamCoreCandidates", #cores)
-		local repairedCores = {}
-		for _, core in ipairs(cores) do
-			local coreToken = RuntimeProfiler.Begin("Server/Round/Map/PrepareTeamCore")
-			local repairedCore = RoundCoreRuntime.RepairEmptyCoreModel(core, teamName)
-			table.insert(repairedCores, RoundCoreRuntime.PrepareCoreForRound(repairedCore, teamName))
-			RuntimeProfiler.End("Server/Round/Map/PrepareTeamCore", coreToken)
-		end
-		teamCoreInstances[teamName] = repairedCores
-
-		for _, core in ipairs(repairedCores) do
-			local bindToken = RuntimeProfiler.Begin("Server/Round/Map/BindTeamCore")
-			bindCore(core, map)
-			RuntimeProfiler.End("Server/Round/Map/BindTeamCore", bindToken)
-		end
-	end
-
-	local syncToken = RuntimeProfiler.Begin("Server/Round/Map/SyncCoreState")
-	syncCoreState()
-	RuntimeProfiler.End("Server/Round/Map/SyncCoreState", syncToken)
-	RuntimeProfiler.End("Server/Round/Map/SetupTeamCores", token)
-	return true
-end
-
-local function getTimeoutWinner(): string
+function RoundFlow.getTimeoutWinner(): string
 	return getTeamKillWinner(teamKillCounts)
 end
 
@@ -1448,7 +1390,7 @@ reconcilePlayersWithoutRespawns = function()
 		alivePlayers = alivePlayers,
 		playerTeams = playerTeams,
 		roundAliveAttribute = ROUND_ALIVE_ATTR,
-		teamHasRespawns = teamHasRespawns,
+		teamHasRespawns = isValidRoundTeam,
 		debugDeathFlow = debugDeathFlow,
 		eliminatePlayer = eliminatePlayer,
 	})
@@ -1484,7 +1426,7 @@ local function respawnPlayerInRound(player: Player)
 		getTeamName = function(candidate: Player): string?
 			return playerTeams[candidate]
 		end,
-		teamHasRespawns = teamHasRespawns,
+		teamHasRespawns = isValidRoundTeam,
 		eliminatePlayer = eliminatePlayer,
 		setPendingRoundRespawn = function(candidate: Player, token: number)
 			respawnTokens:SetPendingRoundRespawn(candidate, token)
@@ -1499,17 +1441,17 @@ local function respawnPlayerInRound(player: Player)
 	})
 end
 
-local function handlePlayerDeath(player: Player)
+handlePlayerDeath = function(player: Player): boolean
 	local token = RuntimeProfiler.Begin("Server/Round/Death/HandlePlayerDeath")
 	if not alivePlayers[player] then
 		debugDeathFlow("handlePlayerDeath ignored; player not alive", player.Name)
 		RuntimeProfiler.End("Server/Round/Death/HandlePlayerDeath", token)
-		return
+		return false
 	end
 	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
 		debugDeathFlow("handlePlayerDeath ignored; player already pending death/respawn", player.Name)
 		RuntimeProfiler.End("Server/Round/Death/HandlePlayerDeath", token)
-		return
+		return false
 	end
 
 	debugDeathFlow(
@@ -1518,7 +1460,7 @@ local function handlePlayerDeath(player: Player)
 		"team",
 		tostring(playerTeams[player]),
 		"hasRespawns",
-		teamHasRespawns(playerTeams[player])
+		isValidRoundTeam(playerTeams[player])
 	)
 
 	local scoreboardToken = RuntimeProfiler.Begin("Server/Round/Death/CreditScoreboard")
@@ -1526,7 +1468,7 @@ local function handlePlayerDeath(player: Player)
 	RuntimeProfiler.End("Server/Round/Death/CreditScoreboard", scoreboardToken)
 
 	local outcomeToken = RuntimeProfiler.Begin("Server/Round/Death/RespawnOrEliminate")
-	if teamHasRespawns(playerTeams[player]) then
+	if isValidRoundTeam(playerTeams[player]) then
 		respawnPlayerInRound(player)
 	else
 		eliminatePlayer(player)
@@ -1534,6 +1476,7 @@ local function handlePlayerDeath(player: Player)
 	RuntimeProfiler.End("Server/Round/Death/RespawnOrEliminate", outcomeToken)
 	RuntimeProfiler.Count("Server/Round/Death/Handled")
 	RuntimeProfiler.End("Server/Round/Death/HandlePlayerDeath", token)
+	return true
 end
 
 local function bindCharacter(player: Player)
@@ -1725,10 +1668,55 @@ function RoundService.AssignTeams(players: { Player })
 		player:SetAttribute(ROUND_TEAM_ATTR, teamName)
 		player:SetAttribute(ROUND_ALIVE_ATTR, true)
 		player:SetAttribute(ROUND_RESPAWN_ENDS_AT_ATTR, 0)
+		clearSpawnProtection(player)
 		bindCharacter(player)
 	end
 
 	syncAliveCounts()
+end
+
+function RoundService.TryFillLateJoinPlayer(player: Player): boolean
+	return RoundLateJoinRuntime.TryFillPlayer({
+		player = player,
+		playersService = Players,
+		currentState = currentState,
+		activeState = RoundStates.Active,
+		roundPlayers = roundPlayers,
+		alivePlayers = alivePlayers,
+		playerTeams = playerTeams,
+		teamOrder = TEAM_ORDER,
+		rng = rng,
+		roundId = roundId,
+		attrs = ROUND_ATTRS,
+		getActiveMap = getActiveMap,
+		getTeam = getTeam,
+		getTeamSpawns = getTeamSpawns,
+		cancelScheduledRespawn = cancelScheduledRespawn,
+		cancelScheduledCharacterDestroy = cancelScheduledCharacterDestroy,
+		disconnectLobbyCharacterConnection = disconnectLobbyCharacterConnection,
+		disconnectCharacterConnections = disconnectCharacterConnections,
+		clearPlayerRoundState = clearPlayerRoundState,
+		bindCharacter = bindCharacter,
+		bindLobbyCharacter = bindLobbyCharacter,
+		hasUsableCharacter = RoundCharacterRuntime.HasUsableCharacter,
+		safeLoadCharacter = function(candidate: Player, reason: string): boolean
+			return RespawnFlow.safeLoadCharacter(candidate, reason)
+		end,
+		waitForUsableCharacter = function(candidate: Player, timeoutSeconds: number): boolean
+			return RespawnFlow.waitForUsableCharacter(candidate, timeoutSeconds)
+		end,
+		characterReadyTimeoutSeconds = ROUND_CHARACTER_READY_TIMEOUT_SECONDS,
+		currentStateChanged = function(): boolean
+			return currentState ~= RoundStates.Active
+		end,
+		moveRoundCharacterToTeamSpawn = function(candidate: Player): boolean
+			return RespawnFlow.moveRoundCharacterToTeamSpawn(candidate)
+		end,
+		syncAliveCounts = syncAliveCounts,
+		syncPlayerAFKMarker = function(candidate: Player)
+			RoundService.SyncPlayerAFKMarker(candidate)
+		end,
+	})
 end
 
 function RoundService.TeleportTeamsToMap(map: Model): boolean
@@ -1751,7 +1739,7 @@ function RoundService.TeleportTeamsToMap(map: Model): boolean
 		local spawns = teamName and getTeamSpawns(teamName, map) or {}
 		RuntimeProfiler.End("Server/Round/Map/GetPlayerTeamSpawns", lookupToken)
 		if #spawns > 0 then
-			if not hasUsableCharacter(player) then
+			if not RoundCharacterRuntime.HasUsableCharacter(player) then
 				local loadStartedAt = os.clock()
 				if
 					not RespawnFlow.safeLoadCharacter(player, "RoundStart")
@@ -1877,7 +1865,7 @@ function RoundFlow.runActiveRound()
 		task.wait(0.2)
 	end
 
-	RoundFlow.endRound(getTimeoutWinner())
+	RoundFlow.endRound(RoundFlow.getTimeoutWinner())
 end
 
 function RoundFlow.resetRound()
@@ -2015,7 +2003,19 @@ function RoundService:_runRoundLoop()
 		DestructionService:BeginBulkUpdate("RoundMapSetup")
 		RuntimeProfiler.End("Server/Round/Map/BeginBulkUpdate", bulkBeginToken)
 		local map = spawnActiveMap(selectedMapId)
-		local mapReady = map and setupTeamCores(map)
+		local mapReady = map and RoundCoreRuntime.SetupTeamCores({
+			map = map,
+			teamOrder = TEAM_ORDER,
+			teamCoreInstances = teamCoreInstances,
+			coreConnections = coreConnections,
+			runtimeProfiler = RuntimeProfiler,
+			disconnectCoreConnections = disconnectCoreConnections,
+			getTeamCores = getTeamCores,
+			isRoundActive = function(): boolean
+				return currentState == RoundStates.Active
+			end,
+			syncCoreState = syncCoreState,
+		})
 		local bulkEndToken = RuntimeProfiler.Begin("Server/Round/Map/EndBulkUpdate")
 		DestructionService:EndBulkUpdate("RoundMapSetup")
 		RuntimeProfiler.End("Server/Round/Map/EndBulkUpdate", bulkEndToken)
@@ -2214,6 +2214,9 @@ function RoundService:OnPlayerAdded(player: Player)
 		if player.Parent ~= Players then
 			return
 		end
+		if RoundService.TryFillLateJoinPlayer(player) then
+			return
+		end
 		RespawnFlow.respawnPlayerToLobby(player, "PlayerAddedLobby", false, nil)
 	end)
 end
@@ -2249,11 +2252,39 @@ function RoundService:IsPlayerActive(player: Player): boolean
 	return currentState == RoundStates.Active
 		and alivePlayers[player] == true
 		and player:GetAttribute(ROUND_ALIVE_ATTR) == true
-		and hasUsableCharacter(player)
+		and RoundCharacterRuntime.HasUsableCharacter(player)
+end
+
+function RoundService:IsPlayerSpawnProtected(player: Player): boolean
+	if not self:IsPlayerActive(player) then
+		return false
+	end
+
+	local protectedUntil = player:GetAttribute(ROUND_SPAWN_PROTECTION_ENDS_AT_ATTR)
+	if typeof(protectedUntil) ~= "number" or protectedUntil <= 0 then
+		return false
+	end
+	if protectedUntil <= workspace:GetServerTimeNow() then
+		clearSpawnProtection(player)
+		return false
+	end
+
+	return true
+end
+
+function RoundService:CancelSpawnProtection(player: Player)
+	if player and player.Parent == Players then
+		clearSpawnProtection(player)
+	end
+end
+
+function RoundService:IsPlayerInCurrentRound(player: Player): boolean
+	return player.Parent == Players
+		and (roundPlayers[player] == true or player:GetAttribute(ROUND_ID_ATTR) == roundId)
 end
 
 function RoundService:GetCoreCounts()
-	return countAliveCores()
+	return RoundCoreRuntime.CountAliveCores(teamCoreInstances)
 end
 
 function RoundService:MarkCoreDestroyed(core: Instance): boolean
@@ -2331,7 +2362,7 @@ function RoundService:AdminDamageTeamCore(teamName: string, damage: number): (bo
 		teamName = teamName,
 		damage = damage,
 		teamCoreInstances = teamCoreInstances,
-		isCoreAlive = isCoreAlive,
+		isCoreAlive = RoundCoreRuntime.IsCoreAlive,
 		damageCore = function(core: Instance, amount: number): boolean
 			return self:DamageCore(core, amount)
 		end,
@@ -2342,7 +2373,7 @@ function RoundService:AdminDestroyTeamCore(teamName: string): (boolean, string?)
 	return RoundAdminRuntime.DestroyTeamCore({
 		teamName = teamName,
 		teamCoreInstances = teamCoreInstances,
-		isCoreAlive = isCoreAlive,
+		isCoreAlive = RoundCoreRuntime.IsCoreAlive,
 		markCoreDestroyed = function(core: Instance): boolean
 			return self:MarkCoreDestroyed(core)
 		end,

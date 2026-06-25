@@ -27,7 +27,6 @@ CharacterPoseController._character = nil :: Model?
 CharacterPoseController._characterConnection = nil :: RBXScriptConnection?
 CharacterPoseController._rootPart = nil :: BasePart?
 CharacterPoseController._humanoid = nil :: Humanoid?
-CharacterPoseController._controllerManager = nil :: any
 CharacterPoseController._motors = nil :: PoseMotorSet?
 CharacterPoseController._originalC0 = {} :: { [PoseMotorName]: CFrame }
 CharacterPoseController._tilts = {} :: { [PoseMotorName]: CFrame }
@@ -70,16 +69,6 @@ local function waitForHumanoid(parent: Instance, timeoutSeconds: number): Humano
 	return nil
 end
 
-local function findDescendantOfClass(parent: Instance, className: string): Instance?
-	for _, descendant in parent:GetDescendants() do
-		if descendant.ClassName == className then
-			return descendant
-		end
-	end
-
-	return nil
-end
-
 local function zeroTilts(): { [PoseMotorName]: CFrame }
 	return {
 		rootJoint = CFrame.new(),
@@ -89,22 +78,6 @@ local function zeroTilts(): { [PoseMotorName]: CFrame }
 		rightHip = CFrame.new(),
 		leftHip = CFrame.new(),
 	}
-end
-
-local function readControllerMoveDirection(controllerManager: any): Vector3
-	if not controllerManager then
-		return Vector3.zero
-	end
-
-	local ok, movingDirection = pcall(function()
-		return controllerManager.MovingDirection
-	end)
-
-	if ok and typeof(movingDirection) == "Vector3" then
-		return movingDirection
-	end
-
-	return Vector3.zero
 end
 
 local function getPoseMotors(rootPart: BasePart, torso: BasePart): PoseMotorSet?
@@ -184,16 +157,18 @@ function CharacterPoseController:_restoreC0()
 end
 
 function CharacterPoseController:_getWorldMoveDirection(): Vector3
-	if CharacterPoseConfig.UseControllerManagerMoveFallback then
-		local controllerDirection = readControllerMoveDirection(self._controllerManager)
-		if controllerDirection.Magnitude >= CharacterPoseConfig.MinMoveMagnitude then
-			return controllerDirection
-		end
-	end
-
 	local humanoid = self._humanoid
 	if humanoid and humanoid.MoveDirection.Magnitude >= CharacterPoseConfig.MinMoveMagnitude then
 		return humanoid.MoveDirection
+	end
+
+	local character = self._character
+	local rootPart = self._rootPart
+	if character and rootPart and rootPart.Parent and character:GetAttribute("Movement_Grounded") == true then
+		local horizontalVelocity = Vector3.new(rootPart.AssemblyLinearVelocity.X, 0, rootPart.AssemblyLinearVelocity.Z)
+		if horizontalVelocity.Magnitude >= CharacterPoseConfig.MinMoveMagnitude then
+			return horizontalVelocity.Unit
+		end
 	end
 
 	return Vector3.zero
@@ -310,7 +285,6 @@ function CharacterPoseController:_unbindCharacter()
 	self._character = nil
 	self._rootPart = nil
 	self._humanoid = nil
-	self._controllerManager = nil
 	self._motors = nil
 	self._originalC0 = {}
 	self._tilts = zeroTilts()
@@ -336,7 +310,6 @@ function CharacterPoseController:_bindCharacter(character: Model)
 	self._character = character
 	self._rootPart = rootPart
 	self._humanoid = humanoid
-	self._controllerManager = findDescendantOfClass(character, "ControllerManager")
 	self._motors = motors
 	self._originalC0 = {
 		rootJoint = motors.rootJoint.C0,

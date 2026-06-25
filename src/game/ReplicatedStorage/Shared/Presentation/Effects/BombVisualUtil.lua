@@ -1,5 +1,8 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 
+local AudioCatalog = require(ReplicatedStorage.Shared.Audio.AudioCatalog)
+local AudioSettings = require(ReplicatedStorage.Shared.Audio.AudioSettings)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local InstanceUtil = require(ReplicatedStorage.Shared.Common.InstanceUtil)
@@ -281,12 +284,87 @@ local function getSoundInstances(instance: Instance): { Sound }
 	return sounds
 end
 
+local function getAudioLibrary(): Instance?
+	local library = InstanceUtil.GetByPath(ReplicatedStorage, AudioCatalog.GetSoundFolderPath())
+	return if library and library:IsA("Folder") then library else nil
+end
+
+local function resolveAudioTemplate(soundName: string): Sound?
+	local resolvedName = AudioCatalog.ResolveName(soundName)
+	if resolvedName == "" then
+		return nil
+	end
+
+	local library = getAudioLibrary()
+	local librarySound = library and library:FindFirstChild(resolvedName, true)
+	if librarySound and librarySound:IsA("Sound") then
+		return librarySound
+	end
+
+	local soundServiceSound = SoundService:FindFirstChild(resolvedName, true)
+	if soundServiceSound and soundServiceSound:IsA("Sound") then
+		return soundServiceSound
+	end
+
+	local workspaceSounds = workspace:FindFirstChild("Sounds")
+	local workspaceSound = workspaceSounds and workspaceSounds:FindFirstChild(resolvedName, true)
+	if workspaceSound and workspaceSound:IsA("Sound") then
+		return workspaceSound
+	end
+
+	return nil
+end
+
+local function getExplosionSoundTemplates(skinId: any): { Sound }
+	local sounds = {}
+	for _, soundName in ipairs(AudioCatalog.GetExplosionSoundNames(skinId)) do
+		local sound = resolveAudioTemplate(soundName)
+		if sound then
+			table.insert(sounds, sound)
+		end
+	end
+	return sounds
+end
+
 local function readSoundDuration(sound: Sound): number
 	local timeLength = tonumber(sound.TimeLength) or 0
 	if timeLength == timeLength and timeLength > 0 then
 		return timeLength / math.max(tonumber(sound.PlaybackSpeed) or 1, 0.01)
 	end
 	return 0
+end
+
+local function applySoundGroup(sound: Sound, sourceSound: Sound)
+	local requestedGroupKind = sourceSound:GetAttribute("SoundGroupKind")
+	if requestedGroupKind ~= nil then
+		sound.SoundGroup = AudioSettings.GetGroup(requestedGroupKind)
+	elseif sourceSound.SoundGroup then
+		sound.SoundGroup = sourceSound.SoundGroup
+	else
+		sound.SoundGroup = AudioSettings.GetGroup("SFX")
+	end
+end
+
+local function playSoundTemplates(parent: Instance, sourceSounds: { Sound }): (boolean, number)
+	local playedSound = false
+	local maxDuration = 0
+
+	for _, sourceSound in ipairs(sourceSounds) do
+		if sourceSound.SoundId == "" then
+			continue
+		end
+
+		local sound = sourceSound:Clone()
+		sound.Looped = false
+		sound.TimePosition = 0
+		applySoundGroup(sound, sourceSound)
+		sound.Parent = parent
+		sound:Play()
+		playedSound = true
+		maxDuration = math.max(maxDuration, readSoundDuration(sound))
+	end
+
+	return playedSound, maxDuration
 end
 
 local function setEffectDescendantEnabled(descendant: Instance, enabled: boolean)
@@ -396,8 +474,14 @@ function BombVisualUtil.PlaySoundDescendants(instance: Instance): (boolean, numb
 	return playedSound, maxDuration
 end
 
-local function playExplosionSoundOnly(parent: Instance, position: Vector3, template: Instance, options): (Instance?, boolean)
-	local sounds = getSoundInstances(template)
+local function playExplosionSoundOnly(
+	parent: Instance,
+	position: Vector3,
+	template: Instance,
+	options,
+	overrideSounds: { Sound }
+): (Instance?, boolean)
+	local sounds = if #overrideSounds > 0 then overrideSounds else getSoundInstances(template)
 	if #sounds == 0 then
 		return nil, false
 	end
@@ -413,21 +497,7 @@ local function playExplosionSoundOnly(parent: Instance, position: Vector3, templ
 	anchor.CFrame = CFrame.new(position + EXPLOSION_VISUAL_POSITION_OFFSET)
 	anchor.Parent = parent
 
-	local playedSound = false
-	local maxDuration = 0
-	for _, sourceSound in ipairs(sounds) do
-		if sourceSound.SoundId == "" then
-			continue
-		end
-
-		local sound = sourceSound:Clone()
-		sound.Looped = false
-		sound.TimePosition = 0
-		sound.Parent = anchor
-		sound:Play()
-		playedSound = true
-		maxDuration = math.max(maxDuration, readSoundDuration(sound))
-	end
+	local playedSound, maxDuration = playSoundTemplates(anchor, sounds)
 
 	if not playedSound then
 		anchor:Destroy()
@@ -479,8 +549,9 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 	if not template then
 		return result
 	end
+	local overrideSounds = getExplosionSoundTemplates(resolvedSkinId)
 	if options.soundLightOnly == true then
-		local soundAnchor, playedSound = playExplosionSoundOnly(parent, position, template, options)
+		local soundAnchor, playedSound = playExplosionSoundOnly(parent, position, template, options, overrideSounds)
 		result.instance = soundAnchor
 		result.playedSound = playedSound
 		return result
@@ -495,7 +566,12 @@ function BombVisualUtil.PlayExplosionEffect(options): { [string]: any }
 	clone.Parent = parent
 	result.instance = clone
 
-	local playedSound, soundDuration = BombVisualUtil.PlaySoundDescendants(clone)
+	local playedSound, soundDuration
+	if #overrideSounds > 0 then
+		playedSound, soundDuration = playSoundTemplates(clone, overrideSounds)
+	else
+		playedSound, soundDuration = BombVisualUtil.PlaySoundDescendants(clone)
+	end
 	result.playedSound = playedSound
 
 	local cleanedUp = false

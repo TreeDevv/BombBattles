@@ -15,8 +15,8 @@ EmoteConfig.Actions = table.freeze({
 })
 
 EmoteConfig.PageSize = 8
-EmoteConfig.OpenKeyCode = Enum.KeyCode.B
 EmoteConfig.MaxEmoteIdLength = 64
+EmoteConfig.StarterEmoteCount = 8
 EmoteConfig.DefaultRarity = "Rare"
 EmoteConfig.DefaultWalkSpeed = 10
 EmoteConfig.DefaultAutoRotate = true

@@ -66,6 +66,15 @@ local function grantFatPack(player)
 	end
 end
 
+local function addSpinWheelSpins(player, amount)
+	local services = getServices()
+	local SpinWheelService = require(services:WaitForChild("SpinWheelService"))
+	local ok, result = SpinWheelService:GrantSpins(player, amount, "RobuxPurchase")
+	if not ok then
+		warn("[RobuxPurchases] SpinWheel failed to grant spins: " .. tostring(result))
+	end
+end
+
 local Purchases = {
 	Products = {
 		InfinityBundle = {
@@ -235,6 +244,24 @@ local Purchases = {
 			price = 99,
 			id = 0,
 			crateId = "FinisherPremium",
+		},
+		SpinWheel1 = {
+			displayName = "1 Wheel Spin",
+			price = 29,
+			id = 3604180954,
+			spins = 1,
+			onProcessed = function(player)
+				addSpinWheelSpins(player, 1)
+			end,
+		},
+		SpinWheel3 = {
+			displayName = "3 Wheel Spins",
+			price = 79,
+			id = 3604181024,
+			spins = 3,
+			onProcessed = function(player)
+				addSpinWheelSpins(player, 3)
+			end,
 		},
 	},
 

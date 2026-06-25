@@ -4,7 +4,6 @@ return table.freeze({
 	DirectionalDotThreshold = 0.9,
 	DirectionalTickRate = 1 / 60,
 	DirectionalLerpAlpha = 0.145,
-	UseControllerManagerMoveFallback = true,
 	EnableRootJointLean = false,
 	MinMoveMagnitude = 0.04,
 

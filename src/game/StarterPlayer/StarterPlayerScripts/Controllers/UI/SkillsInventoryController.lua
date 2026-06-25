@@ -41,6 +41,7 @@ local TILE_TWEEN_INFO = TweenInfo.new(0.24, Enum.EasingStyle.Back, Enum.EasingDi
 local CLICK_SOUND_NAME = "UIButtonClickSound"
 local CLICK_SOUND_ID = "rbxassetid://5852470908"
 local CLICK_SOUND_VOLUME = 0.6
+local ROUND_ID_ATTR = "RoundId"
 
 local OWNED_ABILITIES_KEY = Schema.OwnedAbilities and Schema.OwnedAbilities.key or "ownedAbilities"
 local LOADOUT_KEY = Schema.AbilityLoadout and Schema.AbilityLoadout.key or "abilityLoadout"
@@ -1311,7 +1312,9 @@ end
 
 function SkillsInventoryController:_isInventoryLocked(): boolean
 	local state = RoundController:GetState()
-	return typeof(state) == "table" and isLockedRoundState(state.state)
+	return typeof(state) == "table"
+		and isLockedRoundState(state.state)
+		and LocalPlayer:GetAttribute(ROUND_ID_ATTR) ~= nil
 end
 
 function SkillsInventoryController:_syncRoundLock()
@@ -2266,6 +2269,9 @@ function SkillsInventoryController:OnStart()
 		if key == "state" then
 			self:_syncRoundLock()
 		end
+	end))
+	track(self._connections, LocalPlayer:GetAttributeChangedSignal(ROUND_ID_ATTR):Connect(function()
+		self:_syncRoundLock()
 	end))
 	if RoundController.Loaded then
 		self:_syncRoundLock()

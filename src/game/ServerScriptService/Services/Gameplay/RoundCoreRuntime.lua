@@ -235,6 +235,80 @@ function RoundCoreRuntime.TeamHasRespawns(teamCoreInstances, teamName: string?):
 	return false
 end
 
+function RoundCoreRuntime.BindCore(options)
+	local core: Instance = options.core
+	local map: Instance = options.map
+	local connections = options.connections
+	local runtimeProfiler = options.runtimeProfiler
+
+	connections:Reset(core)
+
+	local function onCoreStateChanged()
+		if options.isRoundActive() then
+			options.syncCoreState()
+		end
+	end
+
+	connections:Add(core, core:GetAttributeChangedSignal(CORE_HEALTH_ATTR):Connect(onCoreStateChanged))
+	connections:Add(core, core:GetAttributeChangedSignal(CORE_DESTROYED_ATTR):Connect(onCoreStateChanged))
+	connections:Add(core, core.AncestryChanged:Connect(function()
+		if not core:IsDescendantOf(map) then
+			onCoreStateChanged()
+		end
+	end))
+
+	local humanoid = core:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		connections:Add(core, humanoid.Died:Connect(onCoreStateChanged))
+		connections:Add(core, humanoid.HealthChanged:Connect(onCoreStateChanged))
+	end
+
+	if runtimeProfiler then
+		runtimeProfiler.Count("Server/Round/Map/BoundTeamCore")
+	end
+end
+
+function RoundCoreRuntime.SetupTeamCores(options): boolean
+	local runtimeProfiler = options.runtimeProfiler
+	local token = runtimeProfiler.Begin("Server/Round/Map/SetupTeamCores")
+	options.disconnectCoreConnections()
+	table.clear(options.teamCoreInstances)
+
+	for _, teamName in ipairs(options.teamOrder) do
+		local findToken = runtimeProfiler.Begin("Server/Round/Map/FindTeamCores")
+		local cores = options.getTeamCores(teamName, options.map)
+		runtimeProfiler.End("Server/Round/Map/FindTeamCores", findToken)
+		runtimeProfiler.Count("Server/Round/Map/TeamCoreCandidates", #cores)
+		local repairedCores = {}
+		for _, core in ipairs(cores) do
+			local coreToken = runtimeProfiler.Begin("Server/Round/Map/PrepareTeamCore")
+			local repairedCore = RoundCoreRuntime.RepairEmptyCoreModel(core, teamName)
+			table.insert(repairedCores, RoundCoreRuntime.PrepareCoreForRound(repairedCore, teamName))
+			runtimeProfiler.End("Server/Round/Map/PrepareTeamCore", coreToken)
+		end
+		options.teamCoreInstances[teamName] = repairedCores
+
+		for _, core in ipairs(repairedCores) do
+			local bindToken = runtimeProfiler.Begin("Server/Round/Map/BindTeamCore")
+			RoundCoreRuntime.BindCore({
+				core = core,
+				map = options.map,
+				connections = options.coreConnections,
+				runtimeProfiler = runtimeProfiler,
+				isRoundActive = options.isRoundActive,
+				syncCoreState = options.syncCoreState,
+			})
+			runtimeProfiler.End("Server/Round/Map/BindTeamCore", bindToken)
+		end
+	end
+
+	local syncToken = runtimeProfiler.Begin("Server/Round/Map/SyncCoreState")
+	options.syncCoreState()
+	runtimeProfiler.End("Server/Round/Map/SyncCoreState", syncToken)
+	runtimeProfiler.End("Server/Round/Map/SetupTeamCores", token)
+	return true
+end
+
 function RoundCoreRuntime.FindTrackedCore(instance: Instance, teamCoreInstances): Instance?
 	local current: Instance? = instance
 	while current do

@@ -134,6 +134,11 @@ return {
 		value = {},
 	},
 
+	OwnedEmotes = {
+		key = "ownedEmotes",
+		value = {},
+	},
+
 	FavoriteEmotes = {
 		key = "favoriteEmotes",
 		value = {},
@@ -153,6 +158,15 @@ return {
 			Premium = 0,
 			FinisherBasic = 0,
 			FinisherPremium = 0,
+		},
+	},
+
+	SpinWheel = {
+		key = "spinWheel",
+		value = {
+			spins = 0,
+			nextFreeAt = 0,
+			instantSpinUntil = 0,
 		},
 	},
 

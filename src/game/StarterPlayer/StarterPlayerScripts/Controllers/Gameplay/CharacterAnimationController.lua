@@ -48,7 +48,6 @@ CharacterAnimationController._animateConnection = nil :: RBXScriptConnection?
 CharacterAnimationController._rootPart = nil :: BasePart?
 CharacterAnimationController._humanoid = nil :: Humanoid?
 CharacterAnimationController._animator = nil :: Animator?
-CharacterAnimationController._controllerManager = nil :: any
 CharacterAnimationController._tracks = {} :: TrackMap
 CharacterAnimationController._animations = {} :: { Animation }
 CharacterAnimationController._lastJumpSerial = 0
@@ -78,16 +77,6 @@ local function waitForHumanoid(parent: Instance, timeoutSeconds: number): Humano
 
 		task.wait()
 	until os.clock() >= deadline or not parent.Parent
-
-	return nil
-end
-
-local function findDescendantOfClass(parent: Instance, className: string): Instance?
-	for _, descendant in parent:GetDescendants() do
-		if descendant.ClassName == className then
-			return descendant
-		end
-	end
 
 	return nil
 end
@@ -153,22 +142,6 @@ local function disableIfDefaultAnimate(instance: Instance)
 	if instance.Name == "Animate" and instance:IsA("BaseScript") then
 		instance.Disabled = true
 	end
-end
-
-local function readControllerMoveDirection(controllerManager: any): Vector3
-	if not controllerManager then
-		return Vector3.zero
-	end
-
-	local ok, movingDirection = pcall(function()
-		return controllerManager.MovingDirection
-	end)
-
-	if ok and typeof(movingDirection) == "Vector3" then
-		return movingDirection
-	end
-
-	return Vector3.zero
 end
 
 local function getPlaybackSpeed(effectiveSpeed: number, referenceSpeed: number, speedMultiplier: number?): number
@@ -319,14 +292,18 @@ function CharacterAnimationController:_stopAllTracks()
 end
 
 function CharacterAnimationController:_getWorldMoveDirection(): Vector3
-	local controllerDirection = readControllerMoveDirection(self._controllerManager)
-	if controllerDirection.Magnitude >= AnimationConfig.MinMoveMagnitude then
-		return controllerDirection
-	end
-
 	local humanoid = self._humanoid
 	if humanoid and humanoid.MoveDirection.Magnitude >= AnimationConfig.MinMoveMagnitude then
 		return humanoid.MoveDirection
+	end
+
+	local character = self._character
+	local rootPart = self._rootPart
+	if character and rootPart and rootPart.Parent and character:GetAttribute("Movement_Grounded") == true then
+		local horizontalVelocity = Vector3.new(rootPart.AssemblyLinearVelocity.X, 0, rootPart.AssemblyLinearVelocity.Z)
+		if horizontalVelocity.Magnitude >= AnimationConfig.MinMoveMagnitude then
+			return horizontalVelocity.Unit
+		end
 	end
 
 	return Vector3.zero
@@ -638,7 +615,6 @@ function CharacterAnimationController:_unbindCharacter()
 	self._rootPart = nil
 	self._humanoid = nil
 	self._animator = nil
-	self._controllerManager = nil
 	self._tracks = {} :: TrackMap
 	self._animations = {}
 	self._lastJumpSerial = 0
@@ -694,7 +670,6 @@ function CharacterAnimationController:_bindCharacter(character: Model)
 	self._rootPart = rootPart
 	self._humanoid = humanoid
 	self._animator = animator
-	self._controllerManager = findDescendantOfClass(character, "ControllerManager")
 	self._tracks = self:_loadTracks(animator)
 	self._lastJumpSerial = readNumberAttribute(character, "Movement_JumpSerial")
 	self._wasGrounded = true

@@ -43,7 +43,7 @@ function AudioSettings.Apply(settings: { [string]: any })
 	master.Volume = masterVolume
 	music.Volume = masterVolume * getVolume(settings.musicVolume)
 	sfx.Volume = masterVolume * getVolume(settings.sfxVolume)
-	ui.Volume = masterVolume * getVolume(settings.uiVolume)
+	ui.Volume = masterVolume
 end
 
 function AudioSettings.GetGroup(kind: string?): SoundGroup

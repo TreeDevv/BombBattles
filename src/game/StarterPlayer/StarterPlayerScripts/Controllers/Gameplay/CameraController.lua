@@ -191,15 +191,15 @@ local function isHudFOVActive(camera: Camera, extraFOVAllowance: number?): boole
 end
 
 local function getShakeScale(): number
-	return PlayerSettings:GetNumberScale("cameraShakeScale")
+	return 1
 end
 
 local function getMotionScale(): number
-	return PlayerSettings:GetNumberScale("cameraMotionScale")
+	return 1
 end
 
 local function getDynamicFOVScale(): number
-	return PlayerSettings:GetNumberScale("dynamicFovScale")
+	return 1
 end
 
 local function clampVectorComponents(value: Vector3, limit: Vector3): Vector3

@@ -7,6 +7,7 @@ local TweenService = game:GetService("TweenService")
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local CrateRollConfig = require(ReplicatedStorage.Shared.Config.CrateRollConfig)
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
+local SpinWheelConfig = require(ReplicatedStorage.Shared.Config.SpinWheelConfig)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local LocalPlayer = Players.LocalPlayer
@@ -512,6 +513,36 @@ local function getCrateResultRemote(): RemoteEvent?
 
 	local remote = remotes:FindFirstChild(CrateRollConfig.ResultRemoteName)
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
+end
+
+local function getSpinWheelStateRemote(): RemoteFunction?
+	local remotes = ReplicatedStorage:FindFirstChild(SpinWheelConfig.RemotesFolderName)
+	if not (remotes and remotes:IsA("Folder")) then
+		return nil
+	end
+
+	local remote = remotes:FindFirstChild(SpinWheelConfig.GetStateRemoteName)
+	return if remote and remote:IsA("RemoteFunction") then remote else nil
+end
+
+local function playerHasInstantSpin(): boolean
+	local remote = getSpinWheelStateRemote()
+	if not remote then
+		return false
+	end
+
+	local ok, state = pcall(function()
+		return remote:InvokeServer()
+	end)
+	if not ok or typeof(state) ~= "table" then
+		return false
+	end
+
+	if state.HasInstantSpin == true then
+		return true
+	end
+
+	return (tonumber(state.InstantSpinUntil) or 0) > (tonumber(state.Now) or os.time())
 end
 
 local function getTemplateIconImage(templateWrapper: GuiObject?): string?
@@ -1610,7 +1641,8 @@ function CrateRollController:_playRollResponse(responsePayload): boolean
 		return false
 	end
 
-	return self:PlayRoll(reward)
+	local durationSeconds = if playerHasInstantSpin() then SKIP_DURATION else nil
+	return self:PlayRoll(reward, durationSeconds)
 end
 
 function CrateRollController:_bindBackendRemotes()

@@ -9,6 +9,7 @@ local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 local DataService = require(script.Parent.DataService)
 
 local ORDER_KEY = Schema.EmoteOrder and Schema.EmoteOrder.key or "emoteOrder"
+local OWNED_KEY = Schema.OwnedEmotes and Schema.OwnedEmotes.key or "ownedEmotes"
 local FAVORITES_KEY = Schema.FavoriteEmotes and Schema.FavoriteEmotes.key or "favoriteEmotes"
 local MAX_REQUESTS_PER_SECOND = 12
 
@@ -76,13 +77,51 @@ local function tablesMapMatch(left: { [string]: boolean }, right: any): boolean
 	return true
 end
 
-local function normalizeEmoteOrder(rawOrder: any): ({ string }, boolean)
-	local catalogIds = EmoteConfig.GetCatalogIds()
+local function normalizeOwnedEmotes(rawOwned: any): ({ [string]: boolean }, boolean)
 	local known: { [string]: boolean } = {}
-	for _, emoteId in ipairs(catalogIds) do
+	for _, emoteId in ipairs(EmoteConfig.GetCatalogIds()) do
 		known[emoteId] = true
 	end
 
+	local owned = {}
+	local changed = typeof(rawOwned) ~= "table"
+	if typeof(rawOwned) == "table" then
+		for rawEmoteId, value in pairs(rawOwned) do
+			local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
+			if emoteId ~= "" and known[emoteId] and value == true then
+				owned[emoteId] = true
+				if emoteId ~= rawEmoteId then
+					changed = true
+				end
+			elseif value ~= nil then
+				changed = true
+			end
+		end
+	end
+
+	if not tablesMapMatch(owned, rawOwned) then
+		changed = true
+	end
+
+	return owned, changed
+end
+
+local function addStarterOwnedEmotes(owned: { [string]: boolean }): boolean
+	local changed = false
+	local starterCount = math.max(0, math.floor(tonumber(EmoteConfig.StarterEmoteCount) or 0))
+	for index, emoteId in ipairs(EmoteConfig.GetCatalogIds()) do
+		if index > starterCount then
+			break
+		end
+		if owned[emoteId] ~= true then
+			owned[emoteId] = true
+			changed = true
+		end
+	end
+	return changed
+end
+
+local function normalizeEmoteOrder(rawOrder: any, ownedEmotes: { [string]: boolean }): ({ string }, boolean)
 	local order = {}
 	local seen: { [string]: boolean } = {}
 	local changed = typeof(rawOrder) ~= "table"
@@ -90,7 +129,7 @@ local function normalizeEmoteOrder(rawOrder: any): ({ string }, boolean)
 	if typeof(rawOrder) == "table" then
 		for _, rawEmoteId in ipairs(rawOrder) do
 			local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
-			if emoteId ~= "" and known[emoteId] and not seen[emoteId] then
+			if emoteId ~= "" and ownedEmotes[emoteId] == true and not seen[emoteId] then
 				table.insert(order, emoteId)
 				seen[emoteId] = true
 				if emoteId ~= rawEmoteId then
@@ -102,8 +141,8 @@ local function normalizeEmoteOrder(rawOrder: any): ({ string }, boolean)
 		end
 	end
 
-	for _, emoteId in ipairs(catalogIds) do
-		if not seen[emoteId] then
+	for _, emoteId in ipairs(EmoteConfig.GetCatalogIds()) do
+		if ownedEmotes[emoteId] == true and not seen[emoteId] then
 			table.insert(order, emoteId)
 			seen[emoteId] = true
 			changed = true
@@ -117,14 +156,14 @@ local function normalizeEmoteOrder(rawOrder: any): ({ string }, boolean)
 	return order, changed
 end
 
-local function normalizeFavorites(rawFavorites: any): ({ [string]: boolean }, boolean)
+local function normalizeFavorites(rawFavorites: any, ownedEmotes: { [string]: boolean }): ({ [string]: boolean }, boolean)
 	local favorites = {}
 	local changed = typeof(rawFavorites) ~= "table"
 
 	if typeof(rawFavorites) == "table" then
 		for rawEmoteId, value in pairs(rawFavorites) do
 			local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
-			if emoteId ~= "" and value == true then
+			if emoteId ~= "" and ownedEmotes[emoteId] == true and value == true then
 				favorites[emoteId] = true
 				if emoteId ~= rawEmoteId then
 					changed = true
@@ -142,13 +181,19 @@ local function normalizeFavorites(rawFavorites: any): ({ [string]: boolean }, bo
 	return favorites, changed
 end
 
-local function sanitizePlayerEmoteData(player: Player): ({ string }, { [string]: boolean })
+local function sanitizePlayerEmoteData(player: Player): ({ string }, { [string]: boolean }, { [string]: boolean })
 	local data = DataService:Get(player)
+	local rawOwned = if typeof(data) == "table" then data[OWNED_KEY] else nil
 	local rawOrder = if typeof(data) == "table" then data[ORDER_KEY] else nil
 	local rawFavorites = if typeof(data) == "table" then data[FAVORITES_KEY] else nil
-	local order, orderChanged = normalizeEmoteOrder(rawOrder)
-	local favorites, favoritesChanged = normalizeFavorites(rawFavorites)
+	local owned, ownedChanged = normalizeOwnedEmotes(rawOwned)
+	local starterChanged = addStarterOwnedEmotes(owned)
+	local order, orderChanged = normalizeEmoteOrder(rawOrder, owned)
+	local favorites, favoritesChanged = normalizeFavorites(rawFavorites, owned)
 
+	if ownedChanged or starterChanged then
+		DataService:Set(player, OWNED_KEY, owned)
+	end
 	if orderChanged then
 		DataService:Set(player, ORDER_KEY, order)
 	end
@@ -156,7 +201,7 @@ local function sanitizePlayerEmoteData(player: Player): ({ string }, { [string]:
 		DataService:Set(player, FAVORITES_KEY, favorites)
 	end
 
-	return order, favorites
+	return order, favorites, owned
 end
 
 local function respondInventory(player: Player, request: any, ok: boolean, code: string, message: string?)
@@ -352,6 +397,12 @@ local function startEmote(player: Player, emoteId: string)
 		rejectStart(player, emoteId, "UnknownEmote")
 		return
 	end
+	local normalizedEmoteId = EmoteConfig.NormalizeEmoteId(emoteId)
+	local _, _, owned = sanitizePlayerEmoteData(player)
+	if owned[normalizedEmoteId] ~= true then
+		rejectStart(player, emoteId, "NotOwned")
+		return
+	end
 
 	local startFailureReason = getStartFailureReason(player)
 	if startFailureReason then
@@ -444,7 +495,11 @@ local function swapSlot(player: Player, request: any)
 		return
 	end
 
-	local order = sanitizePlayerEmoteData(player)
+	local order, _, owned = sanitizePlayerEmoteData(player)
+	if owned[emoteId] ~= true then
+		failInventory(player, request, "NotOwned", "Emote is locked.")
+		return
+	end
 	local targetIndex = ((pageIndex - 1) * EmoteConfig.PageSize) + slotIndex
 	if targetIndex < 1 or targetIndex > #order then
 		failInventory(player, request, "InvalidSlot", "Invalid emote slot.")
@@ -478,7 +533,11 @@ local function toggleFavorite(player: Player, request: any)
 		return
 	end
 
-	local _, favorites = sanitizePlayerEmoteData(player)
+	local _, favorites, owned = sanitizePlayerEmoteData(player)
+	if owned[emoteId] ~= true then
+		failInventory(player, request, "NotOwned", "Emote is locked.")
+		return
+	end
 	favorites[emoteId] = if favorites[emoteId] == true then nil else true
 	DataService:Set(player, FAVORITES_KEY, favorites)
 
@@ -545,6 +604,70 @@ end
 function EmoteService:GetActiveEmote(player: Player): string?
 	local state = activeByPlayer[player]
 	return state and state.emoteId or nil
+end
+
+function EmoteService:GetOwnedEmotes(player: Player): { [string]: boolean }
+	local _, _, owned = sanitizePlayerEmoteData(player)
+	return owned
+end
+
+function EmoteService:GrantEmote(player: Player, rawEmoteId: any, source: string?): (boolean, any)
+	if not (player and player.Parent == Players) then
+		return false, "Target player is not in this server"
+	end
+
+	local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
+	local definition = EmoteConfig.GetDefinition(emoteId)
+	if not definition then
+		return false, "Unknown emote: " .. tostring(rawEmoteId)
+	end
+
+	local ownedBefore = self:GetOwnedEmotes(player)
+	local wasOwned = ownedBefore[emoteId] == true
+	DataService:Set(player, OWNED_KEY, function(currentValue)
+		local owned = normalizeOwnedEmotes(currentValue)
+		addStarterOwnedEmotes(owned)
+		owned[emoteId] = true
+		return owned
+	end)
+
+	if not wasOwned then
+		DataService:Set(player, ORDER_KEY, function(currentValue)
+			local owned = table.clone(ownedBefore)
+			owned[emoteId] = true
+			local order = normalizeEmoteOrder(currentValue, owned)
+			for _, orderedId in ipairs(order) do
+				if orderedId == emoteId then
+					return order
+				end
+			end
+			table.insert(order, emoteId)
+			return order
+		end)
+	end
+
+	return true, {
+		emoteId = emoteId,
+		definition = definition,
+		source = source,
+		isNew = not wasOwned,
+	}
+end
+
+function EmoteService:GrantRandomEmote(player: Player, source: string?): (boolean, any)
+	local owned = self:GetOwnedEmotes(player)
+	local candidates = {}
+	for _, emoteId in ipairs(EmoteConfig.GetCatalogIds()) do
+		if owned[emoteId] ~= true then
+			table.insert(candidates, emoteId)
+		end
+	end
+
+	if #candidates <= 0 then
+		return false, "All emotes are already owned"
+	end
+
+	return self:GrantEmote(player, candidates[math.random(1, #candidates)], source)
 end
 
 return EmoteService

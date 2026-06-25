@@ -8,10 +8,15 @@ local SettingsConfig = require(ReplicatedStorage.Shared.Config.SettingsConfig)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
-local HIGHLIGHT_NAME = "BombBattlesEnemyTeamHighlight"
+local ENEMY_HIGHLIGHT_NAME = "BombBattlesEnemyTeamHighlight"
+local FRIENDLY_HIGHLIGHT_NAME = "BombBattlesFriendlyTeamHighlight"
+local MANAGED_HIGHLIGHT_NAMES = table.freeze({
+	[ENEMY_HIGHLIGHT_NAME] = true,
+	[FRIENDLY_HIGHLIGHT_NAME] = true,
+})
 local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
-local FILL_TRANSPARENCY = 0.55
+local FILL_TRANSPARENCY = 1
 local OUTLINE_TRANSPARENCY = 0.05
 
 local EnemyHighlightController = {}
@@ -87,16 +92,16 @@ function EnemyHighlightController:_removeHighlight(player: Player)
 	local character = player.Character
 	if character then
 		for _, child in ipairs(character:GetChildren()) do
-			if child ~= highlight and child:IsA("Highlight") and child.Name == HIGHLIGHT_NAME then
+			if child ~= highlight and child:IsA("Highlight") and MANAGED_HIGHLIGHT_NAMES[child.Name] then
 				child:Destroy()
 			end
 		end
 	end
 end
 
-function EnemyHighlightController:_ensureHighlight(player: Player, character: Model, color: Color3)
+function EnemyHighlightController:_ensureHighlight(player: Player, character: Model, highlightName: string, color: Color3)
 	local highlight = self._highlights[player]
-	if highlight and highlight.Adornee == character and highlight.Parent == character then
+	if highlight and highlight.Adornee == character and highlight.Parent == character and highlight.Name == highlightName then
 		highlight.FillColor = color
 		highlight.OutlineColor = color
 		highlight.FillTransparency = FILL_TRANSPARENCY
@@ -107,13 +112,14 @@ function EnemyHighlightController:_ensureHighlight(player: Player, character: Mo
 
 	self:_removeHighlight(player)
 
-	local staleHighlight = character:FindFirstChild(HIGHLIGHT_NAME)
-	if staleHighlight and staleHighlight:IsA("Highlight") then
-		staleHighlight:Destroy()
+	for _, child in ipairs(character:GetChildren()) do
+		if child:IsA("Highlight") and MANAGED_HIGHLIGHT_NAMES[child.Name] then
+			child:Destroy()
+		end
 	end
 
 	highlight = Instance.new("Highlight")
-	highlight.Name = HIGHLIGHT_NAME
+	highlight.Name = highlightName
 	highlight.Adornee = character
 	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 	highlight.FillColor = color
@@ -125,39 +131,39 @@ function EnemyHighlightController:_ensureHighlight(player: Player, character: Mo
 	self._highlights[player] = highlight
 end
 
-function EnemyHighlightController:_shouldHighlight(player: Player): (boolean, Model?, Color3?)
+function EnemyHighlightController:_shouldHighlight(player: Player): (boolean, Model?, string?, Color3?)
 	if player == LocalPlayer or player.Parent ~= Players then
-		return false, nil, nil
-	end
-	if PlayerSettings:Get("enemyHighlightsEnabled") ~= true then
-		return false, nil, nil
+		return false, nil, nil, nil
 	end
 	if not isRoundActive() or LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
-		return false, nil, nil
+		return false, nil, nil, nil
 	end
 	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
-		return false, nil, nil
+		return false, nil, nil, nil
 	end
 
 	local localTeamName = getTeamName(LocalPlayer)
 	local targetTeamName = getTeamName(player)
-	if not localTeamName or not targetTeamName or localTeamName == targetTeamName then
-		return false, nil, nil
+	if not localTeamName or not targetTeamName then
+		return false, nil, nil, nil
 	end
 
 	local character = getAliveCharacter(player)
 	if not character then
-		return false, nil, nil
+		return false, nil, nil, nil
 	end
 
-	local overrideColor = SettingsConfig.HexToColor3(PlayerSettings:Get("enemyHighlightColorHex"))
-	return true, character, overrideColor or getTeamColor(targetTeamName, player)
+	local isFriendly = localTeamName == targetTeamName
+	local settingId = if isFriendly then "friendlyOutlineColorHex" else "enemyOutlineColorHex"
+	local highlightName = if isFriendly then FRIENDLY_HIGHLIGHT_NAME else ENEMY_HIGHLIGHT_NAME
+	local overrideColor = SettingsConfig.HexToColor3(PlayerSettings:Get(settingId))
+	return true, character, highlightName, overrideColor or getTeamColor(targetTeamName, player)
 end
 
 function EnemyHighlightController:_syncPlayer(player: Player)
-	local shouldHighlight, character, color = self:_shouldHighlight(player)
-	if shouldHighlight and character and color then
-		self:_ensureHighlight(player, character, color)
+	local shouldHighlight, character, highlightName, color = self:_shouldHighlight(player)
+	if shouldHighlight and character and highlightName and color then
+		self:_ensureHighlight(player, character, highlightName, color)
 	else
 		self:_removeHighlight(player)
 	end
@@ -310,7 +316,7 @@ function EnemyHighlightController:OnStart()
 		end
 	end))
 	self:_trackConnection(PlayerSettings.Changed:Connect(function(id)
-		if id == "enemyHighlightsEnabled" or id == "enemyHighlightColorHex" then
+		if id == "enemyOutlineColorHex" or id == "friendlyOutlineColorHex" then
 			self:_syncAll()
 		end
 	end))

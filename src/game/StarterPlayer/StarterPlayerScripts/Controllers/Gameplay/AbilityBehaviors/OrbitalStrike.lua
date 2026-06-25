@@ -8,6 +8,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local OverheadPlacementTargeting = require(ReplicatedStorage.Shared.Common.OverheadPlacementTargeting)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
@@ -97,6 +98,25 @@ local KEY_DIRECTIONS = {
 
 local heldMoveKeys: { [Enum.KeyCode]: boolean } = {}
 local warnedMissingTemplate = false
+local targeting = OverheadPlacementTargeting.new({
+	abilityId = "OrbitalStrike",
+	renderStepName = RENDER_STEP_NAME,
+	actionName = ACTION_NAME,
+	previewFolderName = PREVIEW_FOLDER_NAME,
+	uiName = "OrbitalStrikeTargetingGui",
+	markerPrefix = "OrbitalStrike",
+	radiusKey = "strikeRadius",
+	radiusFallback = 22,
+	cameraTweenSeconds = CAMERA_TWEEN_SECONDS,
+	focusResponsiveness = FOCUS_RESPONSIVENESS,
+	targetRayDistance = TARGET_RAY_DISTANCE,
+	targetRayMode = "CameraDown",
+	renderPriority = RENDER_PRIORITY,
+	actionPriority = ACTION_PRIORITY,
+	getRoundState = function()
+		return RoundController:Get("state")
+	end,
+})
 
 local state: TargetingState = {
 	active = false,
@@ -1210,34 +1230,20 @@ local function createLocalTelegraph(payload: any)
 end
 
 function OrbitalStrike.OnActivateRequested(context: ClientActivateRequestedContext): boolean
-	if context.inputState and context.inputState ~= Enum.UserInputState.Begin then
-		return true
-	end
-	if context.controller:GetCooldownRemaining(context.slot) > 0 then
-		return true
-	end
-	if state.active then
-		cancelTarget()
-		return true
-	end
-
-	context.controller:SendMessage(context.slot, AbilityConfig.MessageTypes.Intent, {
-		action = "BeginTargeting",
-	})
-	return true
+	return targeting:OnActivateRequested(context)
 end
 
 function OrbitalStrike.OnEffect(context: ClientEffectContext)
 	local payload = context.payload
 	if context.effectName == "OrbitalStrikeBeginTargeting" then
-		beginLocalTargeting(context)
+		targeting:Begin(context)
 	elseif typeof(payload) == "table" and context.effectName == "OrbitalStrikeRejected" and payload.abilityId == "OrbitalStrike" then
-		if typeof(payload.sessionId) ~= "number" or payload.sessionId == state.sessionId then
-			endTargeting(false)
+		if typeof(payload.sessionId) ~= "number" or payload.sessionId == targeting:GetSessionId() then
+			targeting:Cancel(false)
 		end
 	elseif typeof(payload) == "table" and context.effectName == "OrbitalStrikeCancelled" and payload.abilityId == "OrbitalStrike" then
-		if typeof(payload.sessionId) ~= "number" or payload.sessionId == state.sessionId then
-			endTargeting(false)
+		if typeof(payload.sessionId) ~= "number" or payload.sessionId == targeting:GetSessionId() then
+			targeting:Cancel(false)
 		end
 	elseif typeof(payload) == "table" and context.effectName == "OrbitalStrikeTelegraph" and payload.abilityId == "OrbitalStrike" then
 		createLocalTelegraph(payload)

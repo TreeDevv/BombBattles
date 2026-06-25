@@ -5,14 +5,19 @@ local TweenService = game:GetService("TweenService")
 
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
+local ROUND_ID_ATTR = "RoundId"
+local ROUND_TEAM_ATTR = "RoundTeam"
 local ROUND_ALIVE_ATTR = "RoundAlive"
 local CAMERA_SPECTATING_ATTR = "Camera_Spectating"
+local SIDE_BUTTONS_NAME = "SideButtons"
+local SPECTATE_BUTTON_NAME = "SpectateButton"
 local DEATH_BODY_FOLLOW_SECONDS = 1
 local DEATH_FADE_IN_SECONDS = 0.25
 local DEATH_FADE_OUT_SECONDS = 0.25
@@ -38,6 +43,7 @@ local LOCAL_CAMERA_RESTORE_RETRY_SECONDS = 0.1
 local LOCAL_CAMERA_RESTORE_MAX_ATTEMPTS = 20
 local EMPTY_HEALTH_OFFSET = -0.5
 local FULL_HEALTH_OFFSET = 0.5
+local MANUAL_TOGGLE_DEBOUNCE_SECONDS = 0.08
 local DEBUG_SPECTATE_REPLAY = false
 
 type HealthBarBinding = {
@@ -68,6 +74,7 @@ SpectateController._hudConnections = {} :: { RBXScriptConnection }
 SpectateController._playerConnections = {} :: { [Player]: { RBXScriptConnection } }
 SpectateController._hud = nil :: ScreenGui?
 SpectateController._spectate = nil :: Frame?
+SpectateController._spectateButton = nil :: GuiButton?
 SpectateController._leftButton = nil :: GuiButton?
 SpectateController._rightButton = nil :: GuiButton?
 SpectateController._playerLabel = nil :: TextLabel?
@@ -79,6 +86,7 @@ SpectateController._localHealthBarShown = true
 SpectateController._localHealthBarTween = nil :: Tween?
 SpectateController._localCharacterBindSerial = 0
 SpectateController._spectating = false
+SpectateController._manualSpectating = false
 SpectateController._waitingForKillReplay = false
 SpectateController._deathSerial = 0
 SpectateController._killReplayRequestSerial = 0
@@ -90,6 +98,7 @@ SpectateController._transitionSerial = 0
 SpectateController._deathBodyFollowConnection = nil :: RBXScriptConnection?
 SpectateController._deathCameraState = nil :: any?
 SpectateController._cameraRestoreSerial = 0
+SpectateController._lastManualToggleAt = 0
 
 local function debugSpectateReplay(message: string, ...)
 	if DEBUG_SPECTATE_REPLAY then
@@ -304,12 +313,37 @@ local function isRoundActive(): boolean
 	return state ~= nil and state.state == RoundStates.Active
 end
 
+local function getCurrentRoundId(): number?
+	local state = RoundController:GetState()
+	local roundId = state and state.roundId
+	return if typeof(roundId) == "number" then math.floor(roundId) else nil
+end
+
 function SpectateController:_isSpectateAllowed(): boolean
 	return isRoundActive() and LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) == false
 end
 
+function SpectateController:_isLocalRoundParticipant(): boolean
+	local currentRoundId = getCurrentRoundId()
+	local localRoundId = LocalPlayer:GetAttribute(ROUND_ID_ATTR)
+	if currentRoundId ~= nil and typeof(localRoundId) == "number" then
+		return math.floor(localRoundId) == currentRoundId
+	end
+
+	return LocalPlayer:GetAttribute(ROUND_TEAM_ATTR) ~= nil or LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) ~= nil
+end
+
+function SpectateController:_isManualSpectateAllowed(): boolean
+	return isRoundActive() and not self:_isLocalRoundParticipant()
+end
+
 function SpectateController:_isValidTarget(player: Player?): boolean
 	if not player or player == LocalPlayer or player.Parent ~= Players then
+		return false
+	end
+	local currentRoundId = getCurrentRoundId()
+	local targetRoundId = player:GetAttribute(ROUND_ID_ATTR)
+	if currentRoundId ~= nil and (typeof(targetRoundId) ~= "number" or math.floor(targetRoundId) ~= currentRoundId) then
 		return false
 	end
 	if player:GetAttribute(ROUND_ALIVE_ATTR) ~= true then
@@ -359,6 +393,25 @@ end
 
 function SpectateController:_trackConnection(connection: RBXScriptConnection)
 	table.insert(self._connections, connection)
+end
+
+function SpectateController:_setSpectateButtonVisible(visible: boolean)
+	local button = self._spectateButton
+	if not button then
+		return
+	end
+
+	button.Visible = visible
+	button.Active = visible
+	button.Selectable = visible
+	button.AutoButtonColor = visible
+end
+
+function SpectateController:_syncSpectateButton()
+	self:_setSpectateButtonVisible(self:_isManualSpectateAllowed())
+	if self._manualSpectating and not self:_isManualSpectateAllowed() then
+		self:_hideSpectate(false)
+	end
 end
 
 function SpectateController:_cancelLocalHealthBarTween()
@@ -594,6 +647,7 @@ function SpectateController:_hideSpectate(instant: boolean?)
 	ScreenEffects.ClearBlack(DEATH_FADE_OUT_SECONDS)
 	self._waitingForKillReplay = false
 	self._spectating = false
+	self._manualSpectating = false
 	self._targetPlayer = nil
 	setHealthBarHumanoid(self._spectateHealthBar, nil)
 
@@ -610,6 +664,7 @@ function SpectateController:_suspendSpectateForKillReplay()
 	self:_stopDeathBodyFollow(false)
 	self._waitingForKillReplay = true
 	self._spectating = false
+	self._manualSpectating = false
 	self._targetPlayer = nil
 	setHealthBarHumanoid(self._spectateHealthBar, nil)
 	self:_cancelCameraTransition()
@@ -632,6 +687,7 @@ function SpectateController:_handleLocalKillReplayEnded()
 	end
 
 	self._spectating = false
+	self._manualSpectating = false
 	self._targetPlayer = nil
 	setHealthBarHumanoid(self._spectateHealthBar, nil)
 	if self._spectate then
@@ -658,6 +714,7 @@ function SpectateController:_showSpectate(smoothCamera: boolean)
 
 	local target = if self:_isValidTarget(self._targetPlayer) then self._targetPlayer else targets[1]
 	self._spectating = true
+	self._manualSpectating = false
 	self._waitingForKillReplay = false
 	LocalPlayer:SetAttribute(CAMERA_SPECTATING_ATTR, true)
 
@@ -666,6 +723,51 @@ function SpectateController:_showSpectate(smoothCamera: boolean)
 	end
 	self:_setLocalHealthBarVisible(false, false)
 	self:_setTarget(target, smoothCamera)
+end
+
+function SpectateController:_showManualSpectate(smoothCamera: boolean)
+	if not self:_isManualSpectateAllowed() then
+		self:_hideSpectate(true)
+		return
+	end
+
+	local targets = self:_getTargets()
+	if #targets == 0 then
+		Notify.Show("No players to spectate.", { color = "Orange" })
+		return
+	end
+
+	self._deathSerial += 1
+	self:_stopDeathBodyFollow(false)
+	self:_cancelCameraTransition()
+	ScreenEffects.FadeFromBlack(DEATH_FADE_OUT_SECONDS)
+
+	local target = if self:_isValidTarget(self._targetPlayer) then self._targetPlayer else targets[1]
+	self._spectating = true
+	self._manualSpectating = true
+	self._waitingForKillReplay = false
+	LocalPlayer:SetAttribute(CAMERA_SPECTATING_ATTR, true)
+
+	if self._spectate then
+		self._spectate.Visible = true
+	end
+	self:_setLocalHealthBarVisible(false, false)
+	self:_setTarget(target, smoothCamera)
+end
+
+function SpectateController:_toggleManualSpectate()
+	local now = os.clock()
+	if now - self._lastManualToggleAt < MANUAL_TOGGLE_DEBOUNCE_SECONDS then
+		return
+	end
+	self._lastManualToggleAt = now
+
+	if self._manualSpectating then
+		self:_hideSpectate(false)
+		return
+	end
+
+	self:_showManualSpectate(true)
 end
 
 function SpectateController:_cycleTarget(direction: number)
@@ -815,6 +917,7 @@ function SpectateController:_startDeathReplayTransition()
 
 	self._waitingForKillReplay = false
 	self._spectating = false
+	self._manualSpectating = false
 	self._targetPlayer = nil
 	setHealthBarHumanoid(self._spectateHealthBar, nil)
 	self:_cancelCameraTransition()
@@ -833,6 +936,7 @@ function SpectateController:_clearDeathReplayTransitionForRespawn()
 	self._deathSerial += 1
 	self._waitingForKillReplay = false
 	self._spectating = false
+	self._manualSpectating = false
 	self._targetPlayer = nil
 	setHealthBarHumanoid(self._spectateHealthBar, nil)
 	self:_stopDeathBodyFollow(false)
@@ -853,6 +957,7 @@ function SpectateController:_clearDeathReplayTransitionForRespawn()
 end
 
 function SpectateController:_handleLocalAliveChanged()
+	self:_syncSpectateButton()
 	debugSpectateReplay(
 		"Local alive changed",
 		"roundAlive",
@@ -862,6 +967,11 @@ function SpectateController:_handleLocalAliveChanged()
 		"spectateAllowed",
 		self:_isSpectateAllowed()
 	)
+	if self._manualSpectating and self:_isManualSpectateAllowed() then
+		self:_syncTargetValidity(true)
+		return
+	end
+
 	if LocalPlayer:GetAttribute(ROUND_ALIVE_ATTR) == true then
 		self:_clearDeathReplayTransitionForRespawn()
 		return
@@ -882,7 +992,11 @@ function SpectateController:_handleLocalAliveChanged()
 end
 
 function SpectateController:_syncTargetValidity(smoothCamera: boolean)
-	if self._spectating and not self:_isSpectateAllowed() then
+	if self._manualSpectating and not self:_isManualSpectateAllowed() then
+		self:_hideSpectate(false)
+		return
+	end
+	if self._spectating and not self._manualSpectating and not self:_isSpectateAllowed() then
 		self:_hideSpectate(false)
 		return
 	end
@@ -949,6 +1063,18 @@ function SpectateController:_trackPlayer(player: Player)
 		player:GetAttributeChangedSignal(ROUND_ALIVE_ATTR):Connect(function()
 			if player == LocalPlayer then
 				self:_handleLocalAliveChanged()
+			end
+			self:_deferTargetSync()
+		end),
+		player:GetAttributeChangedSignal(ROUND_ID_ATTR):Connect(function()
+			if player == LocalPlayer then
+				self:_syncSpectateButton()
+			end
+			self:_deferTargetSync()
+		end),
+		player:GetAttributeChangedSignal(ROUND_TEAM_ATTR):Connect(function()
+			if player == LocalPlayer then
+				self:_syncSpectateButton()
 			end
 			self:_deferTargetSync()
 		end),
@@ -1032,6 +1158,7 @@ function SpectateController:_bindHud(hud: Instance?)
 
 	self._hud = nil
 	self._spectate = nil
+	self._spectateButton = nil
 	self._leftButton = nil
 	self._rightButton = nil
 	self._playerLabel = nil
@@ -1082,9 +1209,19 @@ function SpectateController:_bindHud(hud: Instance?)
 		end
 	end
 
+	local sideButtons = hud:FindFirstChild(SIDE_BUTTONS_NAME)
+	local spectateButton = sideButtons and sideButtons:FindFirstChild(SPECTATE_BUTTON_NAME)
+	if spectateButton and spectateButton:IsA("GuiButton") then
+		self._spectateButton = spectateButton
+		table.insert(self._hudConnections, spectateButton.Activated:Connect(function()
+			self:_toggleManualSpectate()
+		end))
+	end
+
 	self:_bindLocalCharacter(LocalPlayer.Character)
 	self:_setLocalHealthBarVisible(not self._spectating, true)
 	self:_handleLocalAliveChanged()
+	self:_syncSpectateButton()
 end
 
 function SpectateController:_bindCurrentHud()
@@ -1110,6 +1247,7 @@ function SpectateController:_disconnectAll()
 	self:_cancelLocalHealthBarTween()
 	self:_cancelCameraTransition()
 	self:_stopDeathBodyFollow(false)
+	self._manualSpectating = false
 	ScreenEffects.ClearBlack()
 end
 
@@ -1142,6 +1280,7 @@ function SpectateController:OnStart()
 	self:_trackConnection(RoundController.StateUpdated:Connect(function(key)
 		if key == "state" or key == "roundId" then
 			self:_handleLocalAliveChanged()
+			self:_syncSpectateButton()
 			self:_deferTargetSync()
 		end
 	end))

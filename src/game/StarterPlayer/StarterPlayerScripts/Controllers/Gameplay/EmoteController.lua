@@ -6,6 +6,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
+local InputBindings = require(ReplicatedStorage.Shared.Common.InputBindings)
+local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
 local EmoteConfig = require(ReplicatedStorage.Shared.Emotes.EmoteConfig)
 local EmoteVFX = require(ReplicatedStorage.Shared.Emotes.EmoteVFX)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
@@ -30,6 +32,7 @@ local REMOTE_RETRY_SECONDS = 1
 local TOGGLE_DEBOUNCE_SECONDS = 0.08
 
 local ORDER_KEY = Schema.EmoteOrder and Schema.EmoteOrder.key or "emoteOrder"
+local OWNED_KEY = Schema.OwnedEmotes and Schema.OwnedEmotes.key or "ownedEmotes"
 local FAVORITES_KEY = Schema.FavoriteEmotes and Schema.FavoriteEmotes.key or "favoriteEmotes"
 
 local SELECTOR_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
@@ -160,8 +163,25 @@ local function getDefaultOrder(): { string }
 	return order
 end
 
+local function getOwnedEmotes(): { [string]: boolean }
+	local rawOwned = DataController:Get(OWNED_KEY)
+	local owned = {}
+	if typeof(rawOwned) ~= "table" then
+		return owned
+	end
+
+	for rawEmoteId, value in pairs(rawOwned) do
+		local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
+		if emoteId ~= "" and value == true then
+			owned[emoteId] = true
+		end
+	end
+	return owned
+end
+
 local function getEmoteOrder(): { string }
 	local catalogOrder = getDefaultOrder()
+	local owned = getOwnedEmotes()
 	local known: { [string]: boolean } = {}
 	for _, emoteId in ipairs(catalogOrder) do
 		known[emoteId] = true
@@ -174,7 +194,7 @@ local function getEmoteOrder(): { string }
 	if typeof(rawOrder) == "table" then
 		for _, rawEmoteId in ipairs(rawOrder) do
 			local emoteId = EmoteConfig.NormalizeEmoteId(rawEmoteId)
-			if emoteId ~= "" and known[emoteId] and not seen[emoteId] then
+			if emoteId ~= "" and known[emoteId] and owned[emoteId] == true and not seen[emoteId] then
 				table.insert(order, emoteId)
 				seen[emoteId] = true
 			end
@@ -182,7 +202,7 @@ local function getEmoteOrder(): { string }
 	end
 
 	for _, emoteId in ipairs(catalogOrder) do
-		if not seen[emoteId] then
+		if owned[emoteId] == true and not seen[emoteId] then
 			table.insert(order, emoteId)
 			seen[emoteId] = true
 		end
@@ -218,11 +238,15 @@ local function getPageDefinition(order: { string }, pageIndex: number, slotIndex
 end
 
 local function getSortedOwnedDefinitions(): { any }
+	local owned = getOwnedEmotes()
 	local favorites = getFavoriteEmotes()
 	local favoriteDefinitions = {}
 	local otherDefinitions = {}
 
 	for _, definition in ipairs(EmoteConfig.GetCatalog()) do
+		if owned[definition.id] ~= true then
+			continue
+		end
 		if favorites[definition.id] == true then
 			table.insert(favoriteDefinitions, definition)
 		else
@@ -755,6 +779,9 @@ function EmoteController:StartEmote(emoteId: string)
 			warn("[EmoteController] EmoteRequest remote is unavailable; emote start was not sent.")
 			self._warnedMissingRequestRemote = true
 		end
+		return
+	end
+	if getOwnedEmotes()[EmoteConfig.NormalizeEmoteId(emoteId)] ~= true then
 		return
 	end
 
@@ -1380,7 +1407,7 @@ function EmoteController:_startRemoteBindingLoop()
 	end)
 end
 
-function EmoteController:_bindInputs()
+function EmoteController:_bindOpenAction()
 	ContextActionService:UnbindAction(ACTION_NAME)
 	ContextActionService:BindAction(ACTION_NAME, function(_, inputState: Enum.UserInputState)
 		if inputState == Enum.UserInputState.Begin then
@@ -1388,7 +1415,11 @@ function EmoteController:_bindInputs()
 			return Enum.ContextActionResult.Sink
 		end
 		return Enum.ContextActionResult.Sink
-	end, false, EmoteConfig.OpenKeyCode)
+	end, false, table.unpack(InputBindings.GetEmoteInputs()))
+end
+
+function EmoteController:_bindInputs()
+	self:_bindOpenAction()
 
 	track(self._connections, UserInputService.InputBegan:Connect(function(inputObject: InputObject, gameProcessed: boolean)
 		if gameProcessed or self._activeLocalEmoteId == "" or (self._frame and self._frame.Visible) then
@@ -1424,6 +1455,12 @@ function EmoteController:_bindInputs()
 			end
 		end
 	end))
+
+	track(self._connections, PlayerSettings.Changed:Connect(function(id)
+		if id == "emoteKey" then
+			self:_bindOpenAction()
+		end
+	end))
 end
 
 function EmoteController:OnStart()
@@ -1457,7 +1494,7 @@ function EmoteController:OnStart()
 	end))
 
 	track(self._connections, DataController.DataUpdated:Connect(function(key)
-		if key == ORDER_KEY then
+		if key == ORDER_KEY or key == OWNED_KEY then
 			self:_refreshWheel()
 			if self._listOpen then
 				self:_populateEmotesList()

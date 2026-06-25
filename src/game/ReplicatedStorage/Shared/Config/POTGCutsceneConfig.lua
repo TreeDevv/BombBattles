@@ -339,6 +339,37 @@ EmitModule:Emit(workspace.HighlightIntros["Too Fast"].Explosion4)
 			}),
 		}),
 	}),
+
+	HeroLanding = table.freeze({
+		id = "HeroLanding",
+		assetFolderName = "Hero Landing",
+		replicatedAssetName = "HeroLandingHighlightIntro",
+		characterRigName = "TemplateR6",
+		cameraRigName = "CamRigWithLetterBox1",
+		cameraBoneName = "cameraBone",
+		pivotPartName = "Pivot",
+		characterAnimation = table.freeze({
+			type = POTGCutsceneConfig.AnimationSourceTypes.AnimationId,
+			animationId = "rbxassetid://112542700757857",
+		}),
+		cameraAnimation = table.freeze({
+			type = POTGCutsceneConfig.AnimationSourceTypes.AnimationId,
+			animationId = "rbxassetid://124058164405408",
+		}),
+		durationSeconds = 5,
+		cameraFovKeys = table.freeze({
+			table.freeze({ time = 0, value = 70 }),
+			table.freeze({ time = 300 / 60, value = 70 }),
+		}),
+		dof = table.freeze({
+			enabled = false,
+		}),
+		events = table.freeze({
+			table.freeze({ time = 33 / 60, type = "Emit", effectName = "JumpExplosion" }),
+			table.freeze({ time = 54 / 60, type = "Emit", effectName = "Left Leg" }),
+			table.freeze({ time = 109 / 60, type = "Emit", effectName = "LandingExplosion" }),
+		}),
+	}),
 })
 
 function POTGCutsceneConfig.GetCutscene(cutsceneId: any)

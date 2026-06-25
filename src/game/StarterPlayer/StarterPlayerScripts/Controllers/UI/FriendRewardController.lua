@@ -1,10 +1,10 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SocialService = game:GetService("SocialService")
 local TweenService = game:GetService("TweenService")
 
 local FriendRewardConfig = require(ReplicatedStorage.Shared.Config.FriendRewardConfig)
+local GameInvitePrompt = require(ReplicatedStorage.Shared.UI.GameInvitePrompt)
 
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
 
@@ -440,31 +440,22 @@ function FriendRewardController:_promptInvite(friend: FriendPayload)
 	self._invitePendingByUserId[userId] = true
 
 	task.spawn(function()
-		local canInvite = false
-		local okCanInvite, canInviteResult = pcall(function()
-			return SocialService:CanSendGameInviteAsync(LocalPlayer, userId)
-		end)
-		canInvite = okCanInvite and canInviteResult == true
-		if not canInvite then
-			self._invitePendingByUserId[userId] = nil
-			if not okCanInvite then
-				warn("[FriendRewardController] CanSendGameInviteAsync failed: " .. tostring(canInviteResult))
-			end
-			return
-		end
-
-		local options = Instance.new("ExperienceInviteOptions")
-		options.InviteUser = userId
-		options.PromptMessage = FriendRewardConfig.InvitePromptMessage
-
-		local okPrompt, promptErr = pcall(function()
-			SocialService:PromptGameInvite(LocalPlayer, options)
-		end)
-		options:Destroy()
+		local okPrompt, status, detail = GameInvitePrompt.Prompt({
+			player = LocalPlayer,
+			inviteUserId = userId,
+			promptMessage = FriendRewardConfig.InvitePromptMessage,
+			shouldContinue = function()
+				return self._invitePendingByUserId[userId] == true
+			end,
+		})
 		self._invitePendingByUserId[userId] = nil
 
 		if not okPrompt then
-			warn("[FriendRewardController] Invite prompt failed: " .. tostring(promptErr))
+			if status == "CanSendFailed" then
+				warn("[FriendRewardController] CanSendGameInviteAsync failed: " .. tostring(detail))
+			elseif status == "PromptFailed" then
+				warn("[FriendRewardController] Invite prompt failed: " .. tostring(detail))
+			end
 		end
 	end)
 end

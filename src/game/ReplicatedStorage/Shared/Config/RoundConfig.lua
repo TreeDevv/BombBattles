@@ -86,19 +86,9 @@ return {
 			thumbnailImage = "rbxassetid://138201366272213",
 		},
 		{
-			id = "Ships",
-			displayName = "Ships",
-			thumbnailImage = "rbxassetid://132616495811930",
-		},
-		{
 			id = "SkyIslands",
 			displayName = "Sky Islands",
 			thumbnailImage = "rbxassetid://138066547116968",
-		},
-		{
-			id = "SpaceShips",
-			displayName = "Space Ships",
-			thumbnailImage = "rbxassetid://109099081715690",
 		},
 	},
 }

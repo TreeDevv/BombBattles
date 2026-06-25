@@ -37,6 +37,19 @@ function PlayerSettings:GetNumberScale(id: string): number
 	return math.clamp(value / 100, 0, 1)
 end
 
+function PlayerSettings:GetKeyCode(id: string, fallback: Enum.KeyCode): Enum.KeyCode
+	local keyName = self:Get(id)
+	if typeof(keyName) == "string" then
+		local ok, result = pcall(function()
+			return Enum.KeyCode[keyName]
+		end)
+		if ok and typeof(result) == "EnumItem" then
+			return result
+		end
+	end
+	return fallback
+end
+
 function PlayerSettings:ApplySnapshot(settings: any)
 	local normalized = SettingsConfig.NormalizeSettings(settings)
 	local changedIds = {}
@@ -68,17 +81,7 @@ function PlayerSettings:ApplyLocal(id: string, value: any): any
 end
 
 function PlayerSettings:GetShiftLockKeyCode(): Enum.KeyCode
-	local keyName = self:Get("shiftLockKey")
-	local keyCode = nil
-	if typeof(keyName) == "string" then
-		local ok, result = pcall(function()
-			return Enum.KeyCode[keyName]
-		end)
-		if ok and typeof(result) == "EnumItem" then
-			keyCode = result
-		end
-	end
-	return keyCode or Enum.KeyCode.LeftControl
+	return self:GetKeyCode("shiftLockKey", Enum.KeyCode.LeftControl)
 end
 
 return PlayerSettings

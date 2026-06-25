@@ -714,6 +714,10 @@ local function applyExplosionResult(config, result)
 end
 
 local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConfig, sourceId: string?)
+	if RoundService:IsPlayerSpawnProtected(owner) then
+		return
+	end
+
 	local character, humanoid, rootPart = getCharacterParts(owner)
 	if not (humanoid and rootPart and humanoid.Health > 0) then
 		return
@@ -760,6 +764,9 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 			continue
 		end
 		if not RoundService:IsPlayerActive(player) then
+			continue
+		end
+		if RoundService:IsPlayerSpawnProtected(player) then
 			continue
 		end
 
@@ -1542,6 +1549,7 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		frozenBy = nil,
 	}
 	activeProjectiles[projectileId] = state
+	RoundService:CancelSpawnProtection(player)
 	RuntimeProfiler.Count("Server/BombService/LegacyProjectileLaunch")
 
 	local ownerUserId, ownerTeam = getOwnerVisualIdentity(player)

@@ -38,18 +38,28 @@ local AUTHORED_ORDER = table.freeze({
 	"DefaultHighlightIntro",
 	"HollowPurple",
 	"TooFast",
+	"HeroLanding",
 })
 
 local displayNames = table.freeze({
 	DefaultHighlightIntro = "Default",
 	HollowPurple = "Hollow Purple",
 	TooFast = "Too Fast",
+	HeroLanding = "Hero Landing",
 })
 
 local descriptions = table.freeze({
 	DefaultHighlightIntro = "The standard highlight intro.",
 	HollowPurple = "A dramatic violet highlight intro.",
 	TooFast = "A fast-paced highlight intro.",
+	HeroLanding = "A cinematic landing highlight intro.",
+})
+
+local iconImages = table.freeze({
+	DefaultHighlightIntro = "rbxassetid://85015413214919",
+	HollowPurple = "rbxassetid://79256100245067",
+	TooFast = "rbxassetid://95647340988506",
+	HeroLanding = "rbxassetid://74391681751042",
 })
 
 local catalogOrderByIntroId = {}
@@ -136,7 +146,7 @@ function HighlightIntroConfig.GetDefinition(highlightIntroId: any)
 		cutscene = cutscene,
 		cutsceneId = normalizedIntroId,
 		rarity = "Common",
-		iconImage = HighlightIntroConfig.PlaceholderIconImage,
+		iconImage = iconImages[normalizedIntroId] or HighlightIntroConfig.PlaceholderIconImage,
 		catalogOrder = catalogOrderByIntroId[normalizedIntroId] or math.huge,
 	})
 end

@@ -5,7 +5,6 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
-local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
 
 local LocalPlayer = Players.LocalPlayer
 local ROUND_ALIVE_ATTR = "RoundAlive"
@@ -247,8 +246,7 @@ local function captureEmitterRates(root: Instance): { [ParticleEmitter]: number 
 end
 
 local function getScaledIntensity(baseIntensity: number): number
-	local settingsScale = PlayerSettings:GetNumberScale("screenEffectsScale")
-	return math.clamp(baseIntensity, 0, 1) * settingsScale
+	return math.clamp(baseIntensity, 0, 1)
 end
 
 local function updatePartForCamera(part: BasePart, camera: Camera, config: PresetConfig, originalSize: Vector3)
@@ -307,21 +305,6 @@ function ScreenEffectsController:_applyIntensity(active: ActiveEffect, config: P
 		end
 	end
 
-end
-
-function ScreenEffectsController:_applySettingsScale()
-	if PlayerSettings:GetNumberScale("screenEffectsScale") <= 0 then
-		self:StopAll()
-		return
-	end
-
-	for presetName, active in pairs(self._activeEffects) do
-		local config = PRESETS[presetName]
-		if config then
-			active.intensity = getScaledIntensity(active.baseIntensity)
-			self:_applyIntensity(active, config)
-		end
-	end
 end
 
 function ScreenEffectsController:_startHeartbeat()
@@ -465,13 +448,9 @@ function ScreenEffectsController:Apply(presetName: string, duration: number, opt
 		warn(("[ScreenEffectsController] Status effect preset not found: %s"):format(presetName))
 		return false
 	end
-	local screenEffectsScale = PlayerSettings:GetNumberScale("screenEffectsScale")
-	if screenEffectsScale <= 0 then
-		return false
-	end
 	options = if typeof(options) == "table" then options else {}
 	local baseIntensity = math.clamp(tonumber(options.intensity) or 1, 0, 1)
-	local scaledIntensity = math.clamp(baseIntensity * screenEffectsScale, 0, 1)
+	local scaledIntensity = baseIntensity
 
 	local now = os.clock()
 	local active = self._activeEffects[presetName]
@@ -525,11 +504,6 @@ function ScreenEffectsController:SetIntensity(presetName: string, intensity: num
 	local active = self._activeEffects[presetName]
 	local config = PRESETS[presetName]
 	if not (active and config) then
-		return false
-	end
-
-	if PlayerSettings:GetNumberScale("screenEffectsScale") <= 0 then
-		self:Stop(presetName)
 		return false
 	end
 
@@ -633,14 +607,6 @@ end
 
 function ScreenEffectsController:OnStart()
 	self:StopAll()
-	if self._settingsConnection then
-		self._settingsConnection:Disconnect()
-	end
-	self._settingsConnection = PlayerSettings.Changed:Connect(function(id)
-		if id == "screenEffectsScale" then
-			self:_applySettingsScale()
-		end
-	end)
 
 	LocalPlayer.CharacterRemoving:Connect(function()
 		if isPendingRoundRespawn() then

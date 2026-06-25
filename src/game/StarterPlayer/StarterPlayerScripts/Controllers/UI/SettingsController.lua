@@ -24,6 +24,7 @@ local TEMPLATE_NAMES = {
 	CategoryTemplate = true,
 }
 local ROW_TWEEN = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local BUTTON_PRESS_SCALE = 1
 
 type RowRecord = {
 	id: string?,
@@ -164,7 +165,7 @@ local function keepSingleKeyButton(row: Instance): TextButton?
 end
 
 local function playButtonPress(button: GuiObject)
-	local scale = math.clamp(PlayerSettings:GetNumberScale("uiAnimationScale"), 0, 1)
+	local scale = BUTTON_PRESS_SCALE
 	if scale <= 0 then
 		return
 	end
@@ -209,6 +210,21 @@ function SettingsController:_trackRecord(record: RowRecord, connection: RBXScrip
 	table.insert(record.connections, connection)
 end
 
+function SettingsController:_cancelKeyCapture()
+	self._listeningForKey = nil
+	if self._keyCaptureConnection then
+		self._keyCaptureConnection:Disconnect()
+		self._keyCaptureConnection = nil
+	end
+end
+
+function SettingsController:_closeColorPicker()
+	if self._colorPicker then
+		self._colorPicker:Destroy()
+		self._colorPicker = nil
+	end
+end
+
 function SettingsController:_sendSetting(id: string, value: any)
 	local normalized = PlayerSettings:ApplyLocal(id, value)
 	if normalized == nil then
@@ -232,6 +248,8 @@ function SettingsController:_previewSetting(id: string, value: any): any
 end
 
 function SettingsController:_resetSetting(definition)
+	self:_cancelKeyCapture()
+	self:_closeColorPicker()
 	self:_sendSetting(definition.id, definition.default)
 end
 
@@ -256,6 +274,9 @@ function SettingsController:_bindRestore(record: RowRecord)
 	if not (restoreButton and record.definition) then
 		return
 	end
+	restoreButton.Visible = true
+	restoreButton.Active = true
+	restoreButton.Interactable = true
 
 	self:_trackRecord(record, restoreButton.Activated:Connect(function()
 		playButtonPress(restoreButton)
@@ -369,6 +390,10 @@ function SettingsController:_addSlider(definition): RowRecord?
 
 	if textBox then
 		self:_trackRecord(record, textBox.FocusLost:Connect(function()
+			if textBox.Text:match("^%s*$") then
+				self:_syncSlider(record)
+				return
+			end
 			self:_sendSetting(definition.id, textBox.Text)
 		end))
 	end
@@ -440,20 +465,12 @@ function SettingsController:_beginKeyCapture(definition)
 			return
 		end
 		if input.KeyCode == Enum.KeyCode.Escape then
-			self._listeningForKey = nil
-			if self._keyCaptureConnection then
-				self._keyCaptureConnection:Disconnect()
-				self._keyCaptureConnection = nil
-			end
+			self:_cancelKeyCapture()
 			self:_syncRows()
 			return
 		end
 
-		self._listeningForKey = nil
-		if self._keyCaptureConnection then
-			self._keyCaptureConnection:Disconnect()
-			self._keyCaptureConnection = nil
-		end
+		self:_cancelKeyCapture()
 		self:_sendSetting(definition.id, input.KeyCode.Name)
 	end)
 end
@@ -526,9 +543,6 @@ function SettingsController:_syncSlider(record: RowRecord)
 
 	local rawValue = PlayerSettings:Get(definition.id)
 	local displayValue = rawValue
-	if definition.id == "explosionVfxQuality" or definition.id == "debrisVfxQuality" then
-		displayValue = SettingsConfig.QualityToSlider(rawValue)
-	end
 
 	local minValue = tonumber(definition.min) or 0
 	local maxValue = tonumber(definition.max) or 100

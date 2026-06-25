@@ -27,18 +27,40 @@ function RoundVoidFallRuntime.KillPlayerForVoidFall(options): boolean
 	local character = player.Character
 	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-	if not (character and humanoid and rootPart and rootPart:IsA("BasePart") and humanoid.Health > 0) then
+	if not (character and character.Parent and humanoid and rootPart and rootPart:IsA("BasePart")) then
+		options.debugDeathFlow("Void fall death; missing character parts", player.Name)
+		RuntimeProfiler.Count("Server/Round/Death/VoidFallMissingCharacters")
+		if character then
+			character:SetAttribute("DeathReason", "VoidFall")
+		end
+		if options.handleVoidDeath then
+			return options.handleVoidDeath(player) == true
+		end
 		return false
 	end
 	if rootPart.Position.Y >= options.voidKillY then
 		return false
 	end
 
-	options.debugDeathFlow("Void fall death", player.Name, "y", rootPart.Position.Y, "threshold", options.voidKillY)
+	options.debugDeathFlow(
+		"Void fall death",
+		player.Name,
+		"y",
+		rootPart.Position.Y,
+		"threshold",
+		options.voidKillY,
+		"health",
+		humanoid.Health
+	)
 	RuntimeProfiler.Count("Server/Round/Death/VoidFalls")
 	character:SetAttribute("DeathReason", "VoidFall")
 	options.applyDeathRagdoll(character, "VoidFall")
-	humanoid.Health = 0
+	if options.handleVoidDeath then
+		options.handleVoidDeath(player)
+	end
+	if humanoid.Health > 0 then
+		humanoid.Health = 0
+	end
 	return true
 end
 
@@ -55,6 +77,7 @@ function RoundVoidFallRuntime.CheckVoidFalls(options)
 			isEligible = options.isEligible,
 			debugDeathFlow = options.debugDeathFlow,
 			applyDeathRagdoll = options.applyDeathRagdoll,
+			handleVoidDeath = options.handleVoidDeath,
 		})
 	end
 end

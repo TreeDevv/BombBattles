@@ -66,10 +66,14 @@ local function getRoundService()
 	return roundService
 end
 
-local function isInventoryLocked(): boolean
-	local state = getRoundService():GetState()
+local function isInventoryLocked(player: Player): boolean
+	local service = getRoundService()
+	local state = service:GetState()
 	local stateName = typeof(state) == "table" and state.state or nil
-	return stateName == RoundStates.AssigningTeams or stateName == RoundStates.RoundStarting or stateName == RoundStates.Active
+	local lockedRoundState = stateName == RoundStates.AssigningTeams
+		or stateName == RoundStates.RoundStarting
+		or stateName == RoundStates.Active
+	return lockedRoundState and service:IsPlayerInCurrentRound(player)
 end
 
 local function normalizeOwnedSkins(value): ({ [string]: boolean }, boolean)
@@ -397,7 +401,7 @@ local function handleRequest(player: Player, rawRequest)
 		fail(player, rawRequest, "InvalidRequest", "Invalid skin request.")
 		return
 	end
-	if isInventoryLocked() then
+	if isInventoryLocked(player) then
 		fail(player, request, "InventoryLocked", "Inventory is locked during battle.")
 		return
 	end

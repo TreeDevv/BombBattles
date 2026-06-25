@@ -155,6 +155,7 @@ return table.freeze({
 	MaxAirJumps = 1,
 	DoubleJumpUpVelocity = 44,
 	DoubleJumpCooldown = 0.15,
+	DoubleJumpBufferTime = 0.22,
 	LandingSettleTime = 0.08,
 	LandingStopResponsiveness = 80,
 

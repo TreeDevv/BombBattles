@@ -1,48 +1,79 @@
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local HumanoidStateGuards = require(ReplicatedStorage.Shared.Common.HumanoidStateGuards)
 
 local CharacterAbilityService = {}
+CharacterAbilityService._playerStates = {}
 
-local ABILITY_MANAGER_NAME = "AbilityManagerActor"
-local ABILITIES_NAME = "Abilities"
-local FALLING_DOWN_ABILITY_NAME = "FallingDown"
-local SYNCED_STATE_NAME = "SyncedState"
 local LOOKUP_TIMEOUT_SECONDS = 5
 
-local function disableFallingDownAbility(character: Model)
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+function CharacterAbilityService:_disconnectPlayer(player: Player)
+	local state = self._playerStates[player]
+	if not state then
+		return
+	end
+
+	for _, connection in ipairs(state.connections) do
+		connection:Disconnect()
+	end
+	if state.characterConnection then
+		state.characterConnection:Disconnect()
+	end
+	self._playerStates[player] = nil
+end
+
+function CharacterAbilityService:_guardCharacter(player: Player, character: Model)
+	local state = self._playerStates[player]
+	if not state then
+		return
+	end
+
+	if state.characterConnection then
+		state.characterConnection:Disconnect()
+		state.characterConnection = nil
+	end
+
+	local humanoid = HumanoidStateGuards.WaitForHumanoid(character, LOOKUP_TIMEOUT_SECONDS)
+	if self._playerStates[player] ~= state or player.Character ~= character or not character.Parent then
+		return
+	end
 	if humanoid then
-		humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+		HumanoidStateGuards.DisableFallingDown(character, humanoid)
 	end
 
-	local abilityManagerActor = character:WaitForChild(ABILITY_MANAGER_NAME, LOOKUP_TIMEOUT_SECONDS)
-	if not abilityManagerActor then
-		return
-	end
-
-	local abilities = abilityManagerActor:WaitForChild(ABILITIES_NAME, LOOKUP_TIMEOUT_SECONDS)
-	if not abilities then
-		return
-	end
-
-	local fallingDown = abilities:FindFirstChild(FALLING_DOWN_ABILITY_NAME)
-	if not fallingDown then
-		return
-	end
-
-	local syncedState = fallingDown:FindFirstChild(SYNCED_STATE_NAME)
-	if syncedState then
-		syncedState:SetAttribute("Enabled", false)
-	end
+	state.characterConnection = character.DescendantAdded:Connect(function(descendant)
+		if self._playerStates[player] ~= state or player.Character ~= character then
+			return
+		end
+		if descendant:IsA("Humanoid") then
+			HumanoidStateGuards.DisableFallingDown(character, descendant)
+		end
+	end)
 end
 
 function CharacterAbilityService:OnPlayerAdded(player: Player)
-	if player.Character then
-		task.spawn(disableFallingDownAbility, player.Character)
-	end
+	self:_disconnectPlayer(player)
+	self._playerStates[player] = {
+		connections = {},
+		characterConnection = nil,
+	}
+	local state = self._playerStates[player]
 
-	player.CharacterAdded:Connect(function(character)
-		disableFallingDownAbility(character)
-	end)
+	table.insert(state.connections, player.CharacterAdded:Connect(function(character)
+		self:_guardCharacter(player, character)
+	end))
+
+	local currentCharacter = player.Character
+	if currentCharacter then
+		task.spawn(function()
+			self:_guardCharacter(player, currentCharacter)
+		end)
+	end
+end
+
+function CharacterAbilityService:OnPlayerRemoving(player: Player)
+	self:_disconnectPlayer(player)
 end
 
 return CharacterAbilityService

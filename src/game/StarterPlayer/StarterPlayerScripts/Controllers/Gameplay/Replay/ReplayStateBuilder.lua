@@ -124,31 +124,6 @@ local function buildBombVisualEntries(bombMeta, payload, eventPositionsBySourceI
 	return selectedEntries
 end
 
-local function skipInitialDestructionEvents(events, replayTime: number, deps): number
-	local index = 1
-	local skipped = 0
-	if typeof(events) ~= "table" or not deps.isFiniteNumber(replayTime) then
-		return index
-	end
-
-	while index <= #events do
-		local event = events[index]
-		if not (typeof(event) == "table" and deps.isFiniteNumber(event.timestamp)) then
-			index += 1
-			continue
-		end
-		if event.timestamp > replayTime then
-			break
-		end
-		index += 1
-		skipped += 1
-	end
-	if skipped > 0 then
-		RuntimeProfiler.Count("Client/Replay/Death/StateBuilder/InitialDestructionSkipped", skipped)
-	end
-	return index
-end
-
 function ReplayStateBuilder.Build(client, payload, deps)
 	local totalToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/Total")
 	local function finish(result)
@@ -225,14 +200,12 @@ function ReplayStateBuilder.Build(client, payload, deps)
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/NormalizeDestructionEvents", normalizeToken)
 	local initialDestructionToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/ApplyInitialDestruction")
 	local initialDestructionTime = startTime - 0.001
-	local nextDestructionIndex = if payload.type == "POTGReplay"
-		then skipInitialDestructionEvents(destructionEvents, initialDestructionTime, deps)
-		else deps.ReplayMapSimulator.ApplyEventsUpTo(
-			mapContext,
-			destructionEvents,
-			initialDestructionTime,
-			1
-		)
+	local nextDestructionIndex = deps.ReplayMapSimulator.ApplyEventsUpTo(
+		mapContext,
+		destructionEvents,
+		initialDestructionTime,
+		1
+	)
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/ApplyInitialDestruction", initialDestructionToken)
 	local eventPositionsBySourceId = deps.collectExplosionPositions(events)
 	local featuredUserId = if deps.isFiniteNumber(payload.playerUserId) then math.floor(payload.playerUserId) else nil

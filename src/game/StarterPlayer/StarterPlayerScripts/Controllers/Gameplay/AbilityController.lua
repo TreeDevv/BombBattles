@@ -8,10 +8,13 @@ local UserInputService = game:GetService("UserInputService")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
+local InputBindings = require(ReplicatedStorage.Shared.Common.InputBindings)
+local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local ReplicaController = require(ReplicatedStorage.Packages.ReplicaController)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -37,12 +40,12 @@ local FLIPBOOK_LIFETIME = 0.357
 local SLOT_INPUTS = {
 	[AbilityConfig.Slots.Offensive] = {
 		actionName = "BombBattlesOffensiveAbility",
-		keys = { Enum.KeyCode.E, Enum.KeyCode.ButtonL1 },
+		getInputs = InputBindings.GetOffensiveAbilityInputs,
 		buttonName = "OffensiveAbility",
 	},
 	[AbilityConfig.Slots.Defensive] = {
 		actionName = "BombBattlesDefensiveAbility",
-		keys = { Enum.KeyCode.Q, Enum.KeyCode.ButtonR1 },
+		getInputs = InputBindings.GetDefensiveAbilityInputs,
 		buttonName = "DefensiveAbility",
 	},
 }
@@ -96,6 +99,7 @@ AbilityController._requestRemote = nil :: RemoteEvent?
 AbilityController._effectRemote = nil :: RemoteEvent?
 AbilityController._effectConnection = nil :: RBXScriptConnection?
 AbilityController._replicaConnection = nil :: RBXScriptConnection?
+AbilityController._settingsConnection = nil :: RBXScriptConnection?
 AbilityController._hudConnections = {} :: { RBXScriptConnection }
 AbilityController._buttons = {} :: { [string]: ImageButton }
 AbilityController._buttonVisuals = {} :: { [string]: ButtonVisual }
@@ -781,6 +785,7 @@ function AbilityController:_bindEffects()
 		if typeof(abilityId) == "string" and abilityId ~= "" then
 			RuntimeProfiler.Count("Client/AbilityController/Effect/" .. abilityId)
 		end
+		SoundUtil.PlayAbilityEffect(effectName, payload, LocalPlayer)
 		local behavior = if typeof(abilityId) == "string" then self._behaviors[abilityId] else nil
 		if not behavior and typeof(abilityId) == "string" then
 			local definition = AbilityConfig.GetDefinition(abilityId)
@@ -829,7 +834,7 @@ function AbilityController:_bindInputs()
 				return Enum.ContextActionResult.Pass
 			end,
 			false,
-			table.unpack(input.keys)
+			table.unpack(input.getInputs())
 		)
 	end
 end
@@ -966,6 +971,14 @@ function AbilityController:OnStart()
 	self._effectRemote = getRemote(EFFECT_REMOTE_NAME)
 	self:_bindEffects()
 	self:_bindInputs()
+	if self._settingsConnection then
+		self._settingsConnection:Disconnect()
+	end
+	self._settingsConnection = PlayerSettings.Changed:Connect(function(id)
+		if id == "offensiveAbilityKey" or id == "defensiveAbilityKey" then
+			self:_bindInputs()
+		end
+	end)
 
 	table.insert(self._hudConnections, PlayerGui.ChildAdded:Connect(function(child)
 		if child.Name == "HUD" or child.Name == "ScreenGui" then

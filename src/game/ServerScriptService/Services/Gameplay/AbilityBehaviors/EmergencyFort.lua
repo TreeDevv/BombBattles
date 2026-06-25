@@ -15,17 +15,6 @@ local RoundService = require(ServerScriptService.Services.RoundService)
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
 type ServerActivateContext = AbilityTypes.ServerActivateContext
-type FloorPlacement = {
-	position: Vector3,
-	facing: Vector3,
-	normal: Vector3,
-	floor: Instance,
-}
-type GrowthRecord = {
-	part: BasePart,
-	finalSize: Vector3,
-	finalCFrame: CFrame,
-}
 type DoorController = {
 	fort: Instance,
 	door: Model,
@@ -49,12 +38,6 @@ local FORT_FOLDER_NAME = "EmergencyFort"
 local OWNER_ATTR = "EmergencyFortOwnerUserId"
 local FADING_ATTR = "EmergencyFortFading"
 local ACTIVE_FORTS: { [Player]: { Instance } } = {}
-
-local UNSAFE_TAGS = {
-	RoundConfig.Tags.TeamCore,
-	RoundConfig.Tags.TeamSpawn,
-	RoundConfig.Tags.LobbySpawn,
-}
 
 local function getByPath(root: Instance, path: { string }): Instance?
 	local current: Instance? = root
@@ -155,30 +138,10 @@ local function getCharacterRoot(player: Player): BasePart?
 	return nil
 end
 
-local function findFloorBelow(player: Player, rootPart: BasePart, definition: AbilityDefinition): FloorPlacement?
-	return PlacementSurfaceUtil.ResolveFloorPlacement({
-		rootPart = rootPart,
-		definition = definition,
-		targetRoot = PracticeRangeTargeting.GetServerTargetRoot(player, getActiveMap()),
-		unsafeTags = UNSAFE_TAGS,
-		excludeInstances = if player.Character then { player.Character } else {},
-		useRootPosition = true,
-	})
-end
-
-local function overlapsBlockingPlacement(
-	boundsCFrame: CFrame,
-	boundsSize: Vector3,
-	floor: Instance,
-	player: Player
-): boolean
-	return not PlacementSurfaceUtil.IsPlacementClear({
-		boundsCFrame = boundsCFrame,
-		boundsSize = boundsSize,
-		support = floor,
-		unsafeTags = UNSAFE_TAGS,
-		excludeInstances = if player.Character then { player.Character } else {},
-	})
+local function getRootPlacementCFrame(rootPart: BasePart): CFrame
+	local facing = PlacementSurfaceUtil.FlattenDirection(rootPart.CFrame.LookVector)
+	return CFrame.lookAt(rootPart.Position, rootPart.Position + facing, Vector3.yAxis)
+		* CFrame.Angles(0, math.rad(90), 0)
 end
 
 local function tagFort(fort: Instance)
@@ -410,30 +373,6 @@ local function startDoorController(fort: Instance, definition: AbilityDefinition
 	end)
 end
 
-local function bounceFort(records: { GrowthRecord }, definition: AbilityDefinition)
-	local scale = definition.bounceScale or 1.04
-	local outInfo = TweenInfo.new(definition.bounceOutSeconds or 0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	local backInfo = TweenInfo.new(definition.bounceBackSeconds or 0.11, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
-
-	for _, record in ipairs(records) do
-		if record.part.Parent then
-			tweenPart(record.part, outInfo, {
-				Size = record.finalSize * scale,
-			})
-		end
-	end
-
-	task.delay(definition.bounceOutSeconds or 0.08, function()
-		for _, record in ipairs(records) do
-			if record.part.Parent then
-				tweenPart(record.part, backInfo, {
-					Size = record.finalSize,
-				})
-			end
-		end
-	end)
-end
-
 local function fadeAndDestroy(fort: Instance, definition: AbilityDefinition)
 	if not fort.Parent then
 		return
@@ -533,52 +472,6 @@ local function startShellCleanupWatcher(fort: Instance, definition: AbilityDefin
 	end
 end
 
-local function prepareGrowth(fort: Instance, definition: AbilityDefinition): { GrowthRecord }
-	local records = {}
-	local startHeight = math.max(definition.startHeight or 0.12, 0.01)
-
-	for _, part in ipairs(getBaseParts(fort)) do
-		part.Anchored = true
-		part.CanCollide = true
-		part.CanQuery = true
-		part.CanTouch = false
-
-		local finalSize = part.Size
-		local finalCFrame = part.CFrame
-		local initialHeight = math.max(math.min(startHeight, finalSize.Y), 0.01)
-		local rotation = finalCFrame - finalCFrame.Position
-		local bottom = finalCFrame.Position - finalCFrame.UpVector * (finalSize.Y * 0.5)
-		local startPosition = bottom + finalCFrame.UpVector * (initialHeight * 0.5)
-
-		part.Size = Vector3.new(finalSize.X, initialHeight, finalSize.Z)
-		part.CFrame = rotation + startPosition
-
-		table.insert(records, {
-			part = part,
-			finalSize = finalSize,
-			finalCFrame = finalCFrame,
-		})
-	end
-
-	return records
-end
-
-local function growFort(records: { GrowthRecord }, definition: AbilityDefinition)
-	local growthInfo = TweenInfo.new(definition.growthSeconds or 0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
-	for _, record in ipairs(records) do
-		if record.part.Parent then
-			tweenPart(record.part, growthInfo, {
-				Size = record.finalSize,
-				CFrame = record.finalCFrame,
-			})
-		end
-	end
-
-	task.delay(definition.growthSeconds or 0.16, function()
-		bounceFort(records, definition)
-	end)
-end
-
 local function trackFort(player: Player, fort: Instance)
 	local forts = ACTIVE_FORTS[player]
 	if not forts then
@@ -617,40 +510,30 @@ function EmergencyFort.OnActivate(context: ServerActivateContext): AbilityActiva
 		return false
 	end
 
-	local placement = findFloorBelow(context.player, rootPart, definition)
-	if not placement then
-		return false
-	end
-
 	local fort = template:Clone()
 	fort.Name = "EmergencyFort_" .. context.player.UserId
 	fort:SetAttribute(OWNER_ATTR, context.player.UserId)
 	fort:SetAttribute("AbilityId", context.abilityId)
-	local boundsCFrame, boundsSize = PlacementSurfaceUtil.AlignToFloor(fort, placement)
-
-	if overlapsBlockingPlacement(boundsCFrame, boundsSize, placement.floor, context.player) then
-		fort:Destroy()
-		return false
+	local placementCFrame = getRootPlacementCFrame(rootPart)
+	if fort:IsA("Model") then
+		fort:PivotTo(placementCFrame)
+	else
+		(fort :: BasePart):PivotTo(placementCFrame)
 	end
 
 	clearExistingForts(context.player, definition)
 
-	local records = prepareGrowth(fort, definition)
+	for _, part in ipairs(getBaseParts(fort)) do
+		part.Anchored = true
+		part.CanQuery = true
+		part.CanTouch = false
+	end
 	applyFortHealth(fort, definition)
 	tagFort(fort)
 	fort.Parent = getFortFolder(context.player)
 	trackFort(context.player, fort)
 	startShellCleanupWatcher(fort, definition)
-	growFort(records, definition)
-
-	local doorStartDelay = getDefinitionNumber(definition, "growthSeconds", 0.16, 0)
-		+ getDefinitionNumber(definition, "bounceOutSeconds", 0.08, 0)
-		+ 0.03
-	task.delay(doorStartDelay, function()
-		if fort.Parent then
-			startDoorController(fort, definition)
-		end
-	end)
+	startDoorController(fort, definition)
 
 	task.delay(definition.lifetimeSeconds or 12, function()
 		fadeAndDestroy(fort, definition)
@@ -667,7 +550,7 @@ function EmergencyFort.OnActivate(context: ServerActivateContext): AbilityActiva
 		effect = {
 			name = "EmergencyFortCreated",
 			payload = {
-				position = placement.position,
+				position = placementCFrame.Position,
 			},
 		},
 	}

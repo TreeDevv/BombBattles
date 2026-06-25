@@ -1,5 +1,6 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SocialService = game:GetService("SocialService")
 
 local DataController = require(script.Parent:WaitForChild("DataController"))
 local NumberFormatter = require(ReplicatedStorage.Shared.Formatting.NumberFormatter)
@@ -14,11 +15,14 @@ local LABEL_NAME = "Label"
 local CASH_KEY = "cash"
 local CASH_ATTRIBUTE = "Cash"
 local PLUS_TEXT = "+"
+local INVITE_PROMPT_DELAY_SECONDS = 1
 
 local MoneyHudController = {}
 
 MoneyHudController._connections = {} :: { RBXScriptConnection }
 MoneyHudController._amountLabel = nil :: TextLabel?
+MoneyHudController._moneyButtonConnection = nil :: RBXScriptConnection?
+MoneyHudController._invitePromptPending = false
 MoneyHudController._rebindQueued = false
 
 local function disconnectAll(connections: { RBXScriptConnection })
@@ -64,12 +68,54 @@ function MoneyHudController:_refresh()
 	amountLabel.Text = NumberFormatter.Format(getCashValue())
 end
 
+function MoneyHudController:_promptInviteFriends()
+	if self._invitePromptPending then
+		return
+	end
+
+	self._invitePromptPending = true
+	task.spawn(function()
+		local okCanInvite, canInvite = pcall(function()
+			return SocialService:CanSendGameInviteAsync(LocalPlayer)
+		end)
+		if not okCanInvite then
+			self._invitePromptPending = false
+			warn("[MoneyHudController] CanSendGameInviteAsync failed: " .. tostring(canInvite))
+			return
+		end
+		if canInvite ~= true then
+			self._invitePromptPending = false
+			return
+		end
+		task.wait(INVITE_PROMPT_DELAY_SECONDS)
+
+		local okPrompt, promptResult = pcall(function()
+			SocialService:PromptGameInvite(LocalPlayer)
+		end)
+		if not okPrompt then
+			self._invitePromptPending = false
+			warn("[MoneyHudController] PromptGameInvite failed: " .. tostring(promptResult))
+		end
+	end)
+end
+
 function MoneyHudController:_bindHud(hud: Instance?)
+	if self._moneyButtonConnection then
+		self._moneyButtonConnection:Disconnect()
+		self._moneyButtonConnection = nil
+	end
 	self._amountLabel = nil
 
 	local sideButtons = hud and hud:FindFirstChild(SIDE_BUTTONS_NAME)
 	local moneyButton = sideButtons and sideButtons:FindFirstChild(MONEY_BUTTON_NAME)
 	self._amountLabel = findAmountLabel(moneyButton)
+	if moneyButton and moneyButton:IsA("GuiButton") then
+		moneyButton.Active = true
+		moneyButton.Selectable = true
+		self._moneyButtonConnection = moneyButton.Activated:Connect(function()
+			self:_promptInviteFriends()
+		end)
+	end
 
 	self:_refresh()
 end
@@ -87,8 +133,13 @@ function MoneyHudController:_scheduleRebind()
 end
 
 function MoneyHudController:OnStart()
+	if self._moneyButtonConnection then
+		self._moneyButtonConnection:Disconnect()
+		self._moneyButtonConnection = nil
+	end
 	disconnectAll(self._connections)
 	self._amountLabel = nil
+	self._invitePromptPending = false
 	self._rebindQueued = false
 
 	self:_trackConnection(PlayerGui.ChildAdded:Connect(function(child)
@@ -106,6 +157,11 @@ function MoneyHudController:OnStart()
 	end))
 	self:_trackConnection(LocalPlayer:GetAttributeChangedSignal(CASH_ATTRIBUTE):Connect(function()
 		self:_refresh()
+	end))
+	self:_trackConnection(SocialService.GameInvitePromptClosed:Connect(function(player)
+		if player == LocalPlayer then
+			self._invitePromptPending = false
+		end
 	end))
 
 	self:_bindHud(PlayerGui:FindFirstChild(HUD_NAME))

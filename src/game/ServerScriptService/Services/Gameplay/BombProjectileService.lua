@@ -132,6 +132,7 @@ local function now(): number
 end
 
 local replayService = nil
+local roundService = nil
 
 local function getReplayService()
 	if replayService then
@@ -154,6 +155,37 @@ local function getReplayService()
 		warn("[BombProjectileService] ReplayService require failed:", service)
 	end
 	return nil
+end
+
+local function getRoundService()
+	if roundService then
+		return roundService
+	end
+
+	local services = ServerScriptService:FindFirstChild("Services")
+	local roundModule = services and services:FindFirstChild("RoundService")
+	if not (roundModule and roundModule:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, service = pcall(require, roundModule)
+	if ok and typeof(service) == "table" then
+		roundService = service
+		return roundService
+	end
+
+	return nil
+end
+
+local function cancelSpawnProtectionForOwner(owner: any)
+	if typeof(owner) ~= "Instance" or not owner:IsA("Player") then
+		return
+	end
+
+	local service = getRoundService()
+	if service and type(service.CancelSpawnProtection) == "function" then
+		service:CancelSpawnProtection(owner)
+	end
 end
 
 local function recordReplayEvent(eventType: string, payload)
@@ -2178,6 +2210,7 @@ function BombProjectileService:Launch(request): boolean
 		fuseDuration = requestedFuse,
 	})
 	fireSnapshot(state, launchTime, true)
+	cancelSpawnProtectionForOwner(owner)
 	return true
 end
 

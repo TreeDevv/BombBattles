@@ -1,8 +1,8 @@
 local ContentProvider = game:GetService("ContentProvider")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SoundService = game:GetService("SoundService")
 
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local ReplayAssets = {}
 
@@ -237,22 +237,7 @@ function ReplayAssets.PlayOptionalEventSound(soundName: string, parent: Instance
 		return
 	end
 
-	local sound = SoundService:FindFirstChild(soundName, true)
-	if not (sound and sound:IsA("Sound")) then
-		return
-	end
-
-	local clone = sound:Clone()
-	clone.Looped = false
-	clone.TimePosition = 0
-	clone.Parent = parent or SoundService
-	clone:Play()
-	local lifetime = math.max(1, tonumber(clone.TimeLength) or 0, (tonumber(clone.TimeLength) or 0) + 0.25)
-	task.delay(lifetime, function()
-		if clone.Parent then
-			clone:Destroy()
-		end
-	end)
+	SoundUtil.Play(soundName, parent)
 end
 
 return ReplayAssets

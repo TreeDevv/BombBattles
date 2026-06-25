@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
+local GameUiVisibilityController = require(script.Parent:WaitForChild("GameUiVisibilityController"))
 local ReplayClient = require(script.Parent:WaitForChild("Replay"):WaitForChild("ReplayClient"))
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local RoundEndFlowConfig = require(ReplicatedStorage.Shared.Config.RoundEndFlowConfig)
@@ -13,6 +14,10 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local OVERLAY_GUI_NAME = "RoundEndFlowOverlay"
+local HUD_NAME = "HUD"
+local KILL_REPLAY_FRAME_NAME = "KillReplay"
+local POTG_FRAME_NAME = "POTG"
+local POTG_REPLAY_UI_SCOPE_ID = "RoundEndFlowPOTGReplay"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local OVERLAY_DISPLAY_ORDER = 900
 local TITLE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
@@ -30,9 +35,36 @@ RoundEndFlowController._connections = {} :: { RBXScriptConnection }
 RoundEndFlowController._winnerRoundId = nil :: number?
 RoundEndFlowController._winnerSerial = 0
 RoundEndFlowController._pendingLobbyFade = false
+RoundEndFlowController._potgReplayUiHidden = false
 
 local function getRoundId(state): number?
 	return if typeof(state) == "table" and typeof(state.roundId) == "number" then state.roundId else nil
+end
+
+local function getHud(): ScreenGui?
+	local hud = PlayerGui:FindFirstChild(HUD_NAME)
+	return if hud and hud:IsA("ScreenGui") then hud else nil
+end
+
+local function findGuiObject(parent: Instance?, childName: string): GuiObject?
+	local child = if parent then parent:FindFirstChild(childName) else nil
+	return if child and child:IsA("GuiObject") then child else nil
+end
+
+local function setReplayTopbarVisible(topbarName: string, visible: boolean)
+	local topbar = findGuiObject(getHud(), topbarName)
+	if topbar then
+		topbar.Visible = visible
+	end
+end
+
+local function isPOTGReplayActive(): boolean
+	if type(ReplayClient.GetActiveReplayDebugInfo) ~= "function" then
+		return false
+	end
+
+	local debugInfo = ReplayClient:GetActiveReplayDebugInfo()
+	return typeof(debugInfo) == "table" and debugInfo.replayType == "POTGReplay"
 end
 
 local function getOverlay(): (ScreenGui, Frame, TextLabel, TextLabel)
@@ -132,6 +164,33 @@ function RoundEndFlowController:_hideWinnerOverlay()
 	end
 end
 
+function RoundEndFlowController:_hideReplayTopbars()
+	setReplayTopbarVisible(KILL_REPLAY_FRAME_NAME, false)
+	setReplayTopbarVisible(POTG_FRAME_NAME, false)
+end
+
+function RoundEndFlowController:_pushPOTGReplayUiHidden(instant: boolean?)
+	local exclusions = {}
+	local potgTopbar = findGuiObject(getHud(), POTG_FRAME_NAME)
+	if potgTopbar then
+		table.insert(exclusions, potgTopbar)
+	end
+
+	GameUiVisibilityController:PushHiddenScope(POTG_REPLAY_UI_SCOPE_ID, {
+		Exclusions = exclusions,
+		IncludeTopbar = true,
+		HideByVisibility = true,
+		IncludeFrameBackdrop = true,
+	}, instant)
+	self._potgReplayUiHidden = true
+end
+
+function RoundEndFlowController:_clearPOTGReplayUi(instant: boolean?)
+	GameUiVisibilityController:PopHiddenScope(POTG_REPLAY_UI_SCOPE_ID, instant)
+	self._potgReplayUiHidden = false
+	self:_hideReplayTopbars()
+end
+
 function RoundEndFlowController:_showWinnerBeat(state)
 	local roundId = getRoundId(state)
 	if not roundId or self._winnerRoundId == roundId then
@@ -196,13 +255,20 @@ function RoundEndFlowController:_syncState()
 	local stateName = state.state
 	if stateName == RoundStates.PlayOfTheGame then
 		self:_showWinnerBeat(state)
+	elseif stateName == RoundStates.RoundEnding then
+		if not isPOTGReplayActive() then
+			self:_clearPOTGReplayUi(true)
+		end
+		self:_hideWinnerOverlay()
 	elseif stateName == RoundStates.Resetting then
 		self._pendingLobbyFade = true
+		self:_clearPOTGReplayUi(true)
 		self:_hideWinnerOverlay()
 		FrameController:CloseCurrentFrame(true)
 		ScreenEffects.FadeToBlack(0.25)
 	elseif stateName == RoundStates.Intermission or stateName == RoundStates.WaitingForPlayers then
 		self._winnerRoundId = nil
+		self:_clearPOTGReplayUi(true)
 		self:_hideWinnerOverlay()
 		if self._pendingLobbyFade or ScreenEffects.IsBlack(0.05) then
 			self._pendingLobbyFade = false
@@ -216,6 +282,7 @@ function RoundEndFlowController:_bindReplaySignals()
 		self:_trackConnection(ReplayClient.ReplayStarted:Connect(function(payload)
 			if typeof(payload) == "table" and payload.type == "POTGReplay" then
 				self:_hideWinnerOverlay()
+				self:_pushPOTGReplayUiHidden(true)
 			end
 		end))
 	end
@@ -223,6 +290,7 @@ function RoundEndFlowController:_bindReplaySignals()
 	if ReplayClient.ReplayEnded and type(ReplayClient.ReplayEnded.Connect) == "function" then
 		self:_trackConnection(ReplayClient.ReplayEnded:Connect(function(payload)
 			if typeof(payload) == "table" and payload.type == "POTGReplay" then
+				self:_clearPOTGReplayUi(true)
 				if not ScreenEffects.IsBlack(0.05) then
 					ScreenEffects.FadeToBlack(0.35)
 				end
@@ -233,9 +301,12 @@ end
 
 function RoundEndFlowController:OnStart()
 	self:_disconnectAll()
+	GameUiVisibilityController:PopHiddenScope(POTG_REPLAY_UI_SCOPE_ID, true)
 	self._winnerRoundId = nil
 	self._winnerSerial = 0
 	self._pendingLobbyFade = false
+	self._potgReplayUiHidden = false
+	self:_hideReplayTopbars()
 
 	self:_trackConnection(RoundController.StateReceived:Connect(function()
 		self:_syncState()
@@ -244,6 +315,19 @@ function RoundEndFlowController:OnStart()
 		if key == "state" or key == "roundId" or key == "winnerTeam" then
 			self:_syncState()
 		end
+	end))
+	self:_trackConnection(PlayerGui.ChildAdded:Connect(function(child)
+		if child.Name ~= HUD_NAME then
+			return
+		end
+
+		task.defer(function()
+			if self._potgReplayUiHidden then
+				self:_pushPOTGReplayUiHidden(true)
+			else
+				self:_hideReplayTopbars()
+			end
+		end)
 	end))
 	self:_bindReplaySignals()
 

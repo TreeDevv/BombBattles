@@ -2,9 +2,9 @@ local CollectionService = game:GetService("CollectionService")
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local SocialService = game:GetService("SocialService")
 
 local InviteRewardConfig = require(ReplicatedStorage.Shared.Config.InviteRewardConfig)
+local GameInvitePrompt = require(ReplicatedStorage.Shared.UI.GameInvitePrompt)
 
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
 
@@ -420,50 +420,38 @@ function InviteMenuController:_promptInvite(row: RowRecord)
 	setButtonEnabled(row.inviteButton, false)
 
 	task.spawn(function()
-		local okCanInvite, canInvite = pcall(function()
-			return SocialService:CanSendGameInviteAsync(LocalPlayer, row.friend.userId)
-		end)
-		if not row.root.Parent then
-			return
-		end
-
-		row.canInvite = if okCanInvite and canInvite == true then true else nil
-		self:_setRowStatus(row)
-		if row.canInvite ~= true then
-			row.invitePending = false
-			setButtonEnabled(row.inviteButton, true)
-			if not okCanInvite then
-				warn(("[InviteMenuController] CanSendGameInviteAsync failed for %d: %s"):format(
-					row.friend.userId,
-					tostring(canInvite)
-				))
-			end
-			return
-		end
-
-		local options = Instance.new("ExperienceInviteOptions")
-		options.InviteUser = row.friend.userId
-		options.PromptMessage = InviteRewardConfig.InvitePromptMessage
-
-		local launchData = HttpService:JSONEncode({
+		local launchData: string? = HttpService:JSONEncode({
 			source = InviteRewardConfig.LaunchDataSource,
 			inviterId = LocalPlayer.UserId,
 			inviteeId = row.friend.userId,
 		})
-		if #launchData <= InviteRewardConfig.MaxLaunchDataLength then
-			options.LaunchData = launchData
-		end
+		launchData = if #launchData <= InviteRewardConfig.MaxLaunchDataLength then launchData else nil
 
-		local ok, err = pcall(function()
-			SocialService:PromptGameInvite(LocalPlayer, options)
-		end)
-		options:Destroy()
+		local ok, status, detail = GameInvitePrompt.Prompt({
+			player = LocalPlayer,
+			inviteUserId = row.friend.userId,
+			promptMessage = InviteRewardConfig.InvitePromptMessage,
+			launchData = launchData,
+			shouldContinue = function()
+				return row.root.Parent ~= nil
+			end,
+		})
 
 		row.invitePending = false
 		setButtonEnabled(row.inviteButton, true)
 		self:_setRowStatus(row)
 		if not ok then
-			warn(("[InviteMenuController] PromptGameInvite failed for %d: %s"):format(row.friend.userId, tostring(err)))
+			if status == "CanSendFailed" then
+				warn(("[InviteMenuController] CanSendGameInviteAsync failed for %d: %s"):format(
+					row.friend.userId,
+					tostring(detail)
+				))
+			elseif status == "PromptFailed" then
+				warn(("[InviteMenuController] PromptGameInvite failed for %d: %s"):format(
+					row.friend.userId,
+					tostring(detail)
+				))
+			end
 		end
 	end)
 end

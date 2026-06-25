@@ -119,6 +119,9 @@
         "RoundRespawnRuntime": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundRespawnRuntime.lua"
         },
+        "RoundLateJoinRuntime": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/RoundLateJoinRuntime.lua"
+        },
         "RoundSpawnRuntime": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/RoundSpawnRuntime.lua"
         },
@@ -163,6 +166,9 @@
         },
         "CrateRollService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/CrateRollService.lua"
+        },
+        "SpinWheelService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/SpinWheelService.lua"
         },
         "StudioAIBotService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/StudioAIBotService.lua"
@@ -389,6 +395,9 @@
           "CrateRollController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/CrateRollController.lua"
           },
+          "SpinWheelController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/SpinWheelController.lua"
+          },
           "CrateHeaderController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/CrateHeaderController.lua"
           },
@@ -397,6 +406,9 @@
           },
           "KillFeedController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/KillFeedController.lua"
+          },
+          "LocalKillFeedController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/LocalKillFeedController.lua"
           },
           "KillEffectController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/KillEffectController.lua"

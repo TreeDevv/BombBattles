@@ -2,10 +2,10 @@ local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AdminConfig = require(ReplicatedStorage.Shared.Config.AdminConfig)
+local HumanoidStateGuards = require(ReplicatedStorage.Shared.Common.HumanoidStateGuards)
 local MovementConfig = require(ReplicatedStorage.Shared.Config.MovementConfig)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local MovementMath = require(script.Parent:WaitForChild("MovementMath"))
@@ -14,6 +14,8 @@ local LocalPlayer = Players.LocalPlayer
 local RENDER_STEP_NAME = "BombBattlesMovementController"
 local SPRINT_ACTION_NAME = "BombBattlesSprint"
 local CROUCH_ACTION_NAME = "BombBattlesCrouch"
+local JUMP_ACTION_NAME = "BombBattlesJump"
+local JUMP_ACTION_PRIORITY = Enum.ContextActionPriority.High.Value + 100
 local AIR_CONTROL_ATTACHMENT_NAME = "BombBattlesAirControlAttachment"
 local AIR_CONTROL_FORCE_NAME = "BombBattlesAirControlForce"
 local AIR_CONTROL_FORCE_AIRBORNE_UNTIL_ATTR = "AirControl_ForceAirborneUntil"
@@ -25,9 +27,9 @@ local FREEZE_BOMB_SLOW_UNTIL_ATTR = "FreezeBomb_SlowUntil"
 local FREEZE_BOMB_SLOW_MULTIPLIER_ATTR = "FreezeBomb_SlowMultiplier"
 local GRAPPLE_HOOK_STUNNED_UNTIL_ATTR = "GrappleHook_StunnedUntil"
 local RENDER_PRIORITY = Enum.RenderPriority.Camera.Value + 1
-local CONTROLLER_LOOKUP_TIMEOUT = 0.75
-local CONTROLLER_BIND_RETRY_TIMEOUT = 20
-local CONTROLLER_BIND_RETRY_INTERVAL = 0.25
+local CHARACTER_LOOKUP_TIMEOUT = 5
+local CHARACTER_BIND_RETRY_TIMEOUT = 20
+local CHARACTER_BIND_RETRY_INTERVAL = 0.25
 local NEVER = -math.huge
 local ADMIN_WALK_SPEED_ATTR = AdminConfig.WalkSpeedAttribute
 local KNOCKBACK_UNTIL_ATTR = "Bomb_KnockbackUntil"
@@ -50,6 +52,7 @@ local LANDING_MODE_HIGH = "High"
 local LANDING_MODE_RUNOUT = "Runout"
 local ATTRIBUTE_NUMBER_EPSILON = 0.01
 local ATTRIBUTE_VECTOR_EPSILON = 0.01
+local JUMP_INPUT_DEDUP_TIME = 1 / 30
 
 type Controls = {
 	GetMoveVector: (Controls) -> Vector3,
@@ -60,21 +63,10 @@ local MovementController = {}
 MovementController._character = nil :: Model?
 MovementController._characterConnection = nil :: RBXScriptConnection?
 MovementController._fallingDownStateConnection = nil :: RBXScriptConnection?
-MovementController._fallingDownSyncedStateConnection = nil :: RBXScriptConnection?
-MovementController._fallingDownSyncedState = nil :: Instance?
-MovementController._jumpRequestConnection = nil :: RBXScriptConnection?
+MovementController._humanoidDescendantConnection = nil :: RBXScriptConnection?
 MovementController._heartbeatConnection = nil :: RBXScriptConnection?
-MovementController._warnedCharacters = {} :: { [Model]: boolean }
 MovementController._bindSerial = 0
 MovementController._controls = nil :: Controls?
-MovementController._controllerManager = nil :: any
-MovementController._groundController = nil :: any
-MovementController._airController = nil :: any
-MovementController._airControllerBaseMoveMaxForce = nil :: number?
-MovementController._cclAirMoveSuppressed = false
-MovementController._cclAirMoveMaxForce = 0
-MovementController._cclActiveController = ""
-MovementController._groundSensor = nil :: any
 MovementController._humanoid = nil :: Humanoid?
 MovementController._rootPart = nil :: BasePart?
 MovementController._smoothedMoveDirection = Vector3.zero
@@ -123,7 +115,9 @@ MovementController._wasGrounded = false
 MovementController._lastGroundedTime = NEVER
 MovementController._lastLandedTime = NEVER
 MovementController._lastJumpRequestTime = NEVER
+MovementController._lastAirJumpRequestTime = NEVER
 MovementController._lastJumpReplayTime = NEVER
+MovementController._lastJumpInputTime = NEVER
 MovementController._lastAirJumpTime = NEVER
 MovementController._airJumpCount = 0
 MovementController._jumpSerial = 0
@@ -139,6 +133,11 @@ MovementController._airControlFallBrakeForce = Vector3.zero
 MovementController._airControlVerticalSpeed = 0
 MovementController._airControlHorizontalSpeed = 0
 MovementController._airControlMinimumSpeedLatched = false
+MovementController._airControlInputDirection = Vector3.zero
+MovementController._airControlInputMagnitude = 0
+MovementController._airMomentumCarryActive = false
+MovementController._airMomentumCarryDirection = Vector3.zero
+MovementController._airMomentumCarrySpeed = 0
 MovementController._airControlLaunchSource = AIR_LAUNCH_SOURCE_DEFAULT
 MovementController._airControlLaunchSerial = 0
 MovementController._airControlLaunchedAt = NEVER
@@ -164,6 +163,11 @@ MovementController._landingRecoveryUntil = NEVER
 MovementController._landingRecoveryAlpha = 0
 MovementController._landingInputGraceUntil = NEVER
 MovementController._landingRunoutEligible = false
+MovementController._groundAccelerationResponsiveness = MovementConfig.MoveResponsiveness
+MovementController._groundDecelerationResponsiveness = MovementConfig.StopResponsiveness
+MovementController._groundFriction = MovementConfig.GroundFriction
+MovementController._groundFrictionWeight = MovementConfig.GroundFrictionWeight
+MovementController._groundFrictionAppliesWithInput = false
 
 local function getControls(): Controls?
 	local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -264,50 +268,6 @@ local function readCameraShiftLocked(character: Model?): boolean
 	return character ~= nil and character:GetAttribute("Camera_ShiftLocked") == true
 end
 
-local function readNumberProperty(instance: any, propertyName: string): number?
-	if not instance then
-		return nil
-	end
-
-	local ok, value = pcall(function()
-		return instance[propertyName]
-	end)
-	if not ok or typeof(value) ~= "number" then
-		return nil
-	end
-
-	return value
-end
-
-local function writeNumberProperty(instance: any, propertyName: string, value: number): boolean
-	if not instance then
-		return false
-	end
-
-	local ok = pcall(function()
-		instance[propertyName] = value
-	end)
-	return ok
-end
-
-local function readActiveControllerName(controllerManager: any): string
-	if not controllerManager then
-		return ""
-	end
-
-	local ok, activeController = pcall(function()
-		return controllerManager.ActiveController
-	end)
-	if not ok or activeController == nil then
-		return ""
-	end
-	if typeof(activeController) == "Instance" then
-		return activeController.ClassName
-	end
-
-	return tostring(activeController)
-end
-
 local function getBombKnockbackUntil(character: Model?): number
 	if not character then
 		return NEVER
@@ -357,187 +317,43 @@ local smoothstep = MovementMath.Smoothstep
 local smoothVector = MovementMath.SmoothVector
 local smoothYaw = MovementMath.SmoothYaw
 
-local function getDescendantOfClass(parent: Instance, className: string): Instance?
-	for _, descendant in parent:GetDescendants() do
-		if descendant.ClassName == className then
-			return descendant
-		end
-	end
-	return nil
-end
-
-local function waitForDescendantOfClass(parent: Instance, className: string, timeoutSeconds: number): Instance?
-	local deadline = os.clock() + timeoutSeconds
+local function getMovementParts(character: Model)
+	local deadline = os.clock() + CHARACTER_LOOKUP_TIMEOUT
+	local humanoid: Humanoid? = nil
+	local rootPart: BasePart? = nil
 
 	repeat
-		local found = getDescendantOfClass(parent, className)
-		if found then
-			return found
+		humanoid = character:FindFirstChildOfClass("Humanoid")
+		local root = character:FindFirstChild("HumanoidRootPart")
+		rootPart = if root and root:IsA("BasePart") then root else nil
+		if humanoid and rootPart then
+			break
 		end
 
 		task.wait()
-	until os.clock() >= deadline or not parent.Parent
+	until os.clock() >= deadline or not character.Parent
 
-	return nil
-end
-
-local function getGroundSensor(controllerManager: any): any
-	local sensor = controllerManager.GroundSensor
-	if sensor then
-		return sensor
-	end
-
-	local rootPart = controllerManager.RootPart
-	if rootPart then
-		for _, descendant in rootPart:GetDescendants() do
-			if descendant.ClassName == "ControllerPartSensor" and descendant.SensorMode == Enum.SensorMode.Floor then
-				return descendant
-			end
-		end
-	end
-
-	return nil
-end
-
-local function getFallingDownSyncedState(character: Model): Instance?
-	local abilityManagerActor = character:FindFirstChild("AbilityManagerActor")
-	local abilities = abilityManagerActor and abilityManagerActor:FindFirstChild("Abilities")
-	local fallingDown = abilities and abilities:FindFirstChild("FallingDown")
-	return fallingDown and fallingDown:FindFirstChild("SyncedState") or nil
-end
-
-local function disableFallingDownSyncedState(instance: Instance): string
-	if instance:IsA("ValueBase") then
-		local ok = pcall(function()
-			(instance :: any).Value = "Disabled"
-		end)
-		return if ok then "Disabled" else instance.ClassName
-	end
-
-	if instance:IsA("Configuration") then
-		local enabledOk = pcall(function()
-			instance:SetAttribute("Enabled", false)
-		end)
-		pcall(function()
-			instance:SetAttribute("Active", false)
-		end)
-		return if enabledOk then "Disabled" else instance.ClassName
-	end
-
-	return instance.ClassName
-end
-
-local function disableFallingDownRuntimeState(character: Model, humanoid: Humanoid?): (boolean, string, Instance?)
-	local humanoidDisabled = false
-	if humanoid then
-		humanoidDisabled = pcall(function()
-			humanoid:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-		end)
-	end
-
-	local syncedState = getFallingDownSyncedState(character)
-	local syncedValue = "Missing"
-	if syncedState then
-		syncedValue = disableFallingDownSyncedState(syncedState)
-	end
-
-	character:SetAttribute("Movement_FallingDownStateDisabled", humanoidDisabled)
-	character:SetAttribute("Movement_FallingDownSyncedState", syncedValue)
-	return humanoidDisabled, syncedValue, syncedState
-end
-
-local function getMovementParts(character: Model)
-	local controllerManager = waitForDescendantOfClass(
-		character,
-		"ControllerManager",
-		CONTROLLER_LOOKUP_TIMEOUT
-	)
-	local groundController = waitForDescendantOfClass(
-		character,
-		"GroundController",
-		CONTROLLER_LOOKUP_TIMEOUT
-	)
-
-	if not controllerManager or not groundController then
+	if not (humanoid and rootPart) then
 		return nil
 	end
 
-	local airController = getDescendantOfClass(character, "AirController")
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
 	if humanoid and MovementConfig.DisableHumanoidAutoRotate then
 		humanoid.AutoRotate = false
 	end
 	if humanoid then
-		disableFallingDownRuntimeState(character, humanoid)
+		HumanoidStateGuards.DisableFallingDown(character, humanoid)
 	end
-
-	controllerManager.BaseMoveSpeed = MovementConfig.WalkMoveSpeed
-	controllerManager.BaseTurnSpeed = MovementConfig.BaseTurnSpeed
-
-	groundController.AccelerationTime = MovementConfig.GroundAccelerationTime
-	groundController.DecelerationTime = MovementConfig.GroundDecelerationTime
-	groundController.Friction = MovementConfig.GroundFriction
-	groundController.FrictionWeight = MovementConfig.GroundFrictionWeight
-
-	if airController then
-		airController.MoveSpeedFactor = 1
-		local hasMaintainLinearMomentum = pcall(function()
-			return airController.MaintainLinearMomentum
-		end)
-		if hasMaintainLinearMomentum then
-			airController.MaintainLinearMomentum = true
-		end
-	end
+	humanoid.WalkSpeed = MovementConfig.WalkMoveSpeed
 
 	return {
-		controllerManager = controllerManager,
-		groundController = groundController,
-		airController = airController,
-		groundSensor = getGroundSensor(controllerManager),
 		humanoid = humanoid,
-		rootPart = if rootPart and rootPart:IsA("BasePart") then rootPart else nil,
+		rootPart = rootPart,
 	}
 end
 
 function MovementController:_isCurrentlyGrounded(): boolean
-	local groundSensor = self._groundSensor
-	if not groundSensor and self._controllerManager then
-		groundSensor = getGroundSensor(self._controllerManager)
-		self._groundSensor = groundSensor
-	end
-
-	if groundSensor then
-		return groundSensor.SensedPart ~= nil
-	end
-
 	local humanoid = self._humanoid
 	return humanoid ~= nil and humanoid.FloorMaterial ~= Enum.Material.Air
-end
-
-function MovementController:_captureAirControllerDefaults()
-	self._airControllerBaseMoveMaxForce = readNumberProperty(self._airController, "MoveMaxForce")
-	self:_refreshCCLDebug()
-end
-
-function MovementController:_refreshCCLDebug()
-	self._cclActiveController = readActiveControllerName(self._controllerManager)
-	self._cclAirMoveMaxForce = readNumberProperty(self._airController, "MoveMaxForce") or 0
-end
-
-function MovementController:_setCCLAirMoveSuppressed(suppressed: boolean)
-	local airController = self._airController
-	local baseMoveMaxForce = self._airControllerBaseMoveMaxForce
-	if not airController or baseMoveMaxForce == nil then
-		self._cclAirMoveSuppressed = false
-		self:_refreshCCLDebug()
-		return
-	end
-
-	local desiredMoveMaxForce = if suppressed then 0 else baseMoveMaxForce
-	local wroteMoveMaxForce = writeNumberProperty(airController, "MoveMaxForce", desiredMoveMaxForce)
-	self._cclAirMoveSuppressed = suppressed and wroteMoveMaxForce
-	self:_refreshCCLDebug()
 end
 
 function MovementController:_destroyAirControlForce()
@@ -556,7 +372,7 @@ function MovementController:_destroyAirControlForce()
 	self._airControlState = "Grounded"
 	self._airControlGravityScale = 1
 	self._airControlForceVector = Vector3.zero
-	self:_setCCLAirMoveSuppressed(false)
+	self:_clearAirMomentumCarry()
 end
 
 function MovementController:_ensureAirControlForce(): VectorForce?
@@ -622,7 +438,6 @@ function MovementController:_setAirControlEnabled(enabled: boolean)
 	end
 
 	self._airControlActive = enabled
-	self:_setCCLAirMoveSuppressed(enabled)
 	if not enabled then
 		self._airControlState = "Grounded"
 		self._airControlGravityScale = 1
@@ -633,8 +448,65 @@ function MovementController:_setAirControlEnabled(enabled: boolean)
 		self._airControlVerticalSpeed = 0
 		self._airControlHorizontalSpeed = 0
 		self._airControlMinimumSpeedLatched = false
+		self:_clearAirMomentumCarry()
 		self:_resetGravityBootsAirControlState()
 	end
+end
+
+function MovementController:_clearAirMomentumCarry()
+	self._airMomentumCarryActive = false
+	self._airMomentumCarryDirection = Vector3.zero
+	self._airMomentumCarrySpeed = 0
+end
+
+function MovementController:_updateAirMomentumCarry(active: boolean)
+	local rootPart = self._rootPart
+	if not (active and rootPart and rootPart.Parent) then
+		self:_clearAirMomentumCarry()
+		return
+	end
+
+	local velocity = rootPart.AssemblyLinearVelocity
+	local horizontalVelocity = flattenVelocity(velocity)
+	local horizontalSpeed = horizontalVelocity.Magnitude
+	if not self._airMomentumCarryActive then
+		if horizontalSpeed < MovementConfig.MinMoveMagnitude then
+			return
+		end
+
+		self._airMomentumCarryActive = true
+		self._airMomentumCarryDirection = horizontalVelocity.Unit
+		self._airMomentumCarrySpeed = horizontalSpeed
+		return
+	end
+
+	local carryDirection = self._airMomentumCarryDirection
+	if carryDirection.Magnitude < MovementConfig.MinMoveMagnitude then
+		self:_clearAirMomentumCarry()
+		return
+	end
+
+	local brakeActive = self._airControlBrakeForce.Magnitude >= MovementConfig.MinMoveMagnitude
+	local reverseSteerActive = self._airControlSteerForce:Dot(carryDirection) < -MovementConfig.MinMoveMagnitude
+	if brakeActive or reverseSteerActive then
+		if horizontalSpeed >= MovementConfig.MinMoveMagnitude then
+			self._airMomentumCarryDirection = horizontalVelocity.Unit
+			self._airMomentumCarrySpeed = horizontalSpeed
+		else
+			self:_clearAirMomentumCarry()
+		end
+		return
+	end
+
+	local carriedSpeed = math.max(self._airMomentumCarrySpeed, 0)
+	local currentCarriedSpeed = horizontalVelocity:Dot(carryDirection)
+	if currentCarriedSpeed >= carriedSpeed then
+		self._airMomentumCarrySpeed = currentCarriedSpeed
+		return
+	end
+
+	local lateralVelocity = horizontalVelocity - (carryDirection * currentCarriedSpeed)
+	rootPart.AssemblyLinearVelocity = (carryDirection * carriedSpeed) + lateralVelocity + (Vector3.yAxis * velocity.Y)
 end
 
 function MovementController:_getAirControlLaunchProfile(source: string?)
@@ -649,8 +521,7 @@ end
 
 function MovementController:_getIntendedGroundMoveSpeed(): number
 	local speed = MovementConfig.WalkMoveSpeed
-	local humanoid = self._humanoid
-	local hasMoveInput = humanoid ~= nil and humanoid.MoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
+	local hasMoveInput = self._airControlInputMagnitude >= MovementConfig.MinMoveMagnitude
 
 	if self._isCrouching then
 		speed = MovementConfig.CrouchMoveSpeed
@@ -828,20 +699,25 @@ function MovementController:_resolveGrounded(now: number, rawGrounded: boolean):
 	return now - self._groundedCandidateStartTime >= landingConfirmTime
 end
 
-function MovementController:_getAirControlMoveDirection(): (Vector3, number)
-	local humanoid = self._humanoid
-	if not humanoid then
-		return Vector3.zero, 0
-	end
-
-	local moveDirection = humanoid.MoveDirection
+function MovementController:_setAirControlInput(moveDirection: Vector3)
 	local flatDirection = Vector3.new(moveDirection.X, 0, moveDirection.Z)
 	local magnitude = math.min(flatDirection.Magnitude, 1)
 	if magnitude < MovementConfig.MinMoveMagnitude then
+		self._airControlInputDirection = Vector3.zero
+		self._airControlInputMagnitude = 0
+		return
+	end
+
+	self._airControlInputDirection = flatDirection.Unit
+	self._airControlInputMagnitude = magnitude
+end
+
+function MovementController:_getAirControlMoveDirection(): (Vector3, number)
+	if self._airControlInputMagnitude < MovementConfig.MinMoveMagnitude then
 		return Vector3.zero, 0
 	end
 
-	return flatDirection.Unit, magnitude
+	return self._airControlInputDirection, self._airControlInputMagnitude
 end
 
 function MovementController:_calculateAirControlForce(dt: number)
@@ -1013,7 +889,6 @@ function MovementController:_updateAirControl(now: number, isGrounded: boolean, 
 
 	if bombKnockbackActive and MovementConfig.AirControl.ApplyWhileKnockback == false then
 		self:_setAirControlEnabled(false)
-		self:_setCCLAirMoveSuppressed(true)
 		return
 	end
 
@@ -1088,54 +963,91 @@ function MovementController:_getSlideDirection(targetMoveDirection: Vector3): Ve
 	return Vector3.zero
 end
 
-function MovementController:_setGroundControllerTuning(isSliding: boolean, landingRecoveryAlpha: number?)
-	local groundController = self._groundController
-	if not groundController then
-		return
-	end
+function MovementController:_setGroundMovementTuning(isSliding: boolean, landingRecoveryAlpha: number?)
+	local accelerationTime = MovementConfig.GroundAccelerationTime
+	local decelerationTime = MovementConfig.GroundDecelerationTime
+	local friction = MovementConfig.GroundFriction
+	local frictionWeight = MovementConfig.GroundFrictionWeight
+	local decelerationScale = 1
+	local frictionScale = 1
+	local frictionAppliesWithInput = false
 
 	if isSliding then
-		groundController.AccelerationTime = MovementConfig.SlideGroundAccelerationTime
-		groundController.DecelerationTime = MovementConfig.SlideGroundDecelerationTime
-		groundController.Friction = MovementConfig.SlideGroundFriction
-		groundController.FrictionWeight = MovementConfig.SlideGroundFrictionWeight
-	elseif landingRecoveryAlpha ~= nil then
+		accelerationTime = MovementConfig.SlideGroundAccelerationTime
+		decelerationTime = MovementConfig.SlideGroundDecelerationTime
+		friction = MovementConfig.SlideGroundFriction
+		frictionWeight = MovementConfig.SlideGroundFrictionWeight
+	end
+
+	if landingRecoveryAlpha ~= nil then
 		local alpha = smoothstep(landingRecoveryAlpha)
-		local frictionScale = MovementConfig.LandingRecoveryStartFrictionScale
+		frictionScale = MovementConfig.LandingRecoveryStartFrictionScale
 			+ ((MovementConfig.LandingRecoveryEndFrictionScale - MovementConfig.LandingRecoveryStartFrictionScale) * alpha)
-		local decelerationScale = MovementConfig.LandingRecoveryStartDecelerationScale
+		decelerationScale = MovementConfig.LandingRecoveryStartDecelerationScale
 			+ (
 				(MovementConfig.LandingRecoveryEndDecelerationScale - MovementConfig.LandingRecoveryStartDecelerationScale)
 				* alpha
 			)
-		groundController.AccelerationTime = MovementConfig.GroundAccelerationTime
-		groundController.DecelerationTime = MovementConfig.GroundDecelerationTime * decelerationScale
-		groundController.Friction = MovementConfig.GroundFriction * frictionScale
-		groundController.FrictionWeight = MovementConfig.GroundFrictionWeight
-	else
-		groundController.AccelerationTime = MovementConfig.GroundAccelerationTime
-		groundController.DecelerationTime = MovementConfig.GroundDecelerationTime
-		groundController.Friction = MovementConfig.GroundFriction
-		groundController.FrictionWeight = MovementConfig.GroundFrictionWeight
+		frictionAppliesWithInput = true
 	end
+
+	self._groundAccelerationResponsiveness = 1 / math.max(accelerationTime, 0.001)
+	self._groundDecelerationResponsiveness = 1 / math.max(decelerationTime * decelerationScale, 0.001)
+	self._groundFriction = friction * frictionScale
+	self._groundFrictionWeight = frictionWeight
+	self._groundFrictionAppliesWithInput = frictionAppliesWithInput
+end
+
+function MovementController:_applyGroundMovementTuning(
+	dt: number,
+	isGrounded: boolean,
+	hasMoveInput: boolean,
+	isSliding: boolean,
+	isGroundRunout: boolean
+)
+	if not isGrounded or dt <= 0 then
+		return
+	end
+
+	local rootPart = self._rootPart
+	if not (rootPart and rootPart.Parent) then
+		return
+	end
+
+	if hasMoveInput and not (isSliding or isGroundRunout or self._groundFrictionAppliesWithInput) then
+		return
+	end
+
+	local friction = math.max(self._groundFriction, 0) * math.clamp(self._groundFrictionWeight, 0, 1)
+	if friction <= 0 then
+		return
+	end
+
+	local velocity = rootPart.AssemblyLinearVelocity
+	local horizontalVelocity = flattenVelocity(velocity)
+	if horizontalVelocity.Magnitude < MovementConfig.MinMoveMagnitude then
+		return
+	end
+
+	local dampingAlpha = exponentialAlpha(friction, dt)
+	local dampedHorizontalVelocity = horizontalVelocity:Lerp(Vector3.zero, dampingAlpha)
+	rootPart.AssemblyLinearVelocity = dampedHorizontalVelocity + Vector3.yAxis * velocity.Y
 end
 
 function MovementController:_getGroundNormal(): Vector3?
-	local groundSensor = self._groundSensor
-	if not groundSensor and self._controllerManager then
-		groundSensor = getGroundSensor(self._controllerManager)
-		self._groundSensor = groundSensor
-	end
-
-	if not groundSensor then
+	local character = self._character
+	local rootPart = self._rootPart
+	if not (character and rootPart and rootPart.Parent) then
 		return nil
 	end
 
-	local ok, hitNormal = pcall(function()
-		return groundSensor.HitNormal
-	end)
-	if ok and typeof(hitNormal) == "Vector3" and hitNormal.Magnitude >= MovementConfig.MinMoveMagnitude then
-		return hitNormal.Unit
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+	raycastParams.FilterDescendantsInstances = { character }
+
+	local result = workspace:Raycast(rootPart.Position, Vector3.new(0, -6, 0), raycastParams)
+	if result and result.Normal.Magnitude >= MovementConfig.MinMoveMagnitude then
+		return result.Normal.Unit
 	end
 
 	return nil
@@ -1229,7 +1141,7 @@ function MovementController:_startGroundSlide(now: number, targetMoveDirection: 
 	self._lastSlideDirection = slideDirection
 	self._lastSlideSpeed = self._slideSpeed
 	self._crouchPressConsumedBySlide = true
-	self:_setGroundControllerTuning(true)
+	self:_setGroundMovementTuning(true)
 	self:_startSlideEntryBurst(now, slideDirection, entrySpeed)
 end
 
@@ -1256,7 +1168,7 @@ function MovementController:_clearSlidePhase()
 	self._groundRunoutStartTime = NEVER
 	self._groundRunoutLandingSpeed = 0
 	self._groundRunoutInputDotThreshold = 0
-	self:_setGroundControllerTuning(false)
+	self:_setGroundMovementTuning(false)
 	self:_clearSlideEntryBurst()
 	self:_clearSlideJumpBurst()
 	if self._landingMode == LANDING_MODE_RUNOUT then
@@ -1287,7 +1199,7 @@ function MovementController:_startAirCarry(now: number, direction: Vector3, spee
 	self._airCarryStartSpeed = math.clamp(speed, MovementConfig.AirMoveSpeed, MovementConfig.SlideJumpMaxSpeed)
 	self._airCarryStartTime = now
 	self._airCarryEndTime = now + MovementConfig.AirCarryDuration
-	self:_setGroundControllerTuning(false)
+	self:_setGroundMovementTuning(false)
 	self:_clearSlideEntryBurst()
 end
 
@@ -1611,7 +1523,7 @@ function MovementController:_startGroundRunout(now: number, direction: Vector3, 
 	self._groundRunoutStartTime = now
 	self._groundRunoutLandingSpeed = self._groundRunoutSpeed
 	self._groundRunoutInputDotThreshold = inputDotThreshold or MovementConfig.GroundRunoutForwardDotThreshold
-	self:_setGroundControllerTuning(false)
+	self:_setGroundMovementTuning(false)
 end
 
 function MovementController:_stopGroundRunout()
@@ -1819,6 +1731,7 @@ function MovementController:_requestGroundJump(now: number): boolean
 
 	self._lastJumpReplayTime = now
 	self:_consumeJumpRequest()
+	self:_consumeAirJumpRequest()
 	self:_publishJump("Jump")
 	return true
 end
@@ -1829,6 +1742,10 @@ function MovementController:_tryAirJump(now: number): boolean
 	end
 
 	if self._airJumpCount >= MovementConfig.MaxAirJumps then
+		return false
+	end
+
+	if now - self._lastJumpReplayTime < MovementConfig.DoubleJumpCooldown then
 		return false
 	end
 
@@ -1847,36 +1764,83 @@ function MovementController:_tryAirJump(now: number): boolean
 	if upwardDelta > 0 then
 		rootPart:ApplyImpulse(Vector3.yAxis * upwardDelta * rootPart.AssemblyMass)
 	end
-	humanoid.Jump = true
-	humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+	humanoid.Jump = false
+	humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
 	self:_recordAirControlLaunch(now, AIR_LAUNCH_SOURCE_DOUBLE_JUMP)
 
 	self._airJumpCount += 1
 	self._lastAirJumpTime = now
 	self._lastJumpReplayTime = now
 	self:_consumeJumpRequest()
+	self:_consumeAirJumpRequest()
 	self:_publishJump("DoubleJump")
+	return true
+end
+
+function MovementController:_canBufferAirJump(): boolean
+	if not MovementConfig.DoubleJumpEnabled then
+		return false
+	end
+
+	if self._airJumpCount >= MovementConfig.MaxAirJumps then
+		return false
+	end
+
+	local rootPart = self._rootPart
+	local humanoid = self._humanoid
+	return rootPart ~= nil and rootPart.Parent ~= nil and humanoid ~= nil
+end
+
+function MovementController:_bufferAirJump(now: number)
+	if self:_canBufferAirJump() then
+		self._lastAirJumpRequestTime = now
+		self:_consumeJumpRequest()
+	end
+end
+
+function MovementController:_requestAirJumpOrBuffer(now: number): boolean
+	if self:_tryAirJump(now) then
+		return true
+	end
+
+	if not self:_canBufferAirJump() then
+		return false
+	end
+
+	self:_bufferAirJump(now)
 	return true
 end
 
 function MovementController:_recordJumpRequest()
 	local now = os.clock()
+	if now - self._lastJumpInputTime <= JUMP_INPUT_DEDUP_TIME then
+		return
+	end
+	self._lastJumpInputTime = now
+
 	if isGrappleHookStunned(self._character) then
 		self:_consumeJumpRequest()
+		self:_consumeAirJumpRequest()
 		return
 	end
 
-	if self:_resolveGrounded(now, self:_isCurrentlyGrounded()) then
+	local isGrounded = self:_resolveGrounded(now, self:_isCurrentlyGrounded())
+	if isGrounded then
 		self:_requestGroundJump(now)
 		return
 	end
 
-	if now - self._lastGroundedTime <= MovementConfig.CoyoteTime then
+	local inCoyoteTime = now - self._lastGroundedTime <= MovementConfig.CoyoteTime
+	local hasRecentPerformedJump = now - self._lastJumpReplayTime <= math.max(
+		MovementConfig.CoyoteTime,
+		MovementConfig.DoubleJumpBufferTime
+	)
+	if inCoyoteTime and not hasRecentPerformedJump then
 		self._lastJumpRequestTime = now
 		return
 	end
 
-	if self:_tryAirJump(now) then
+	if self:_requestAirJumpOrBuffer(now) then
 		return
 	end
 
@@ -1887,13 +1851,26 @@ function MovementController:_consumeJumpRequest()
 	self._lastJumpRequestTime = NEVER
 end
 
+function MovementController:_consumeAirJumpRequest()
+	self._lastAirJumpRequestTime = NEVER
+end
+
 function MovementController:_tryReplayJump(now: number, isGrounded: boolean, inCoyoteTime: boolean)
-	if now - self._lastJumpReplayTime <= math.max(MovementConfig.CoyoteTime, MovementConfig.JumpBufferTime) then
-		return
+	local airJumpBuffered = now - self._lastAirJumpRequestTime <= MovementConfig.DoubleJumpBufferTime
+	if airJumpBuffered and not isGrounded and not inCoyoteTime then
+		if self:_tryAirJump(now) then
+			return
+		end
+	elseif self._lastAirJumpRequestTime ~= NEVER and not airJumpBuffered then
+		self:_consumeAirJumpRequest()
 	end
 
 	local jumpBuffered = now - self._lastJumpRequestTime <= MovementConfig.JumpBufferTime
 	if not jumpBuffered then
+		return
+	end
+
+	if now - self._lastJumpReplayTime <= math.max(MovementConfig.CoyoteTime, MovementConfig.JumpBufferTime) then
 		return
 	end
 
@@ -2171,81 +2148,61 @@ function MovementController:_setDebugAttributes(data)
 	setAttributeIfChanged(character, "Movement_LandingRecoveryAlpha", data.landingRecoveryAlpha)
 	setAttributeIfChanged(character, "Movement_LandingInputGraceActive", data.landingInputGraceActive)
 	setAttributeIfChanged(character, "Movement_LandingRunoutEligible", data.landingRunoutEligible)
-	self:_refreshCCLDebug()
-	setAttributeIfChanged(character, "Movement_CCLActiveController", self._cclActiveController)
-	setAttributeIfChanged(character, "Movement_CCLAirMoveMaxForce", self._cclAirMoveMaxForce)
-	setAttributeIfChanged(character, "Movement_CCLAirMoveSuppressed", self._cclAirMoveSuppressed)
 end
 
-function MovementController:_bindFallingDownStateWatcher(character: Model)
+function MovementController:_disconnectHumanoidStateGuards()
 	if self._fallingDownStateConnection then
 		self._fallingDownStateConnection:Disconnect()
 		self._fallingDownStateConnection = nil
 	end
-	if self._fallingDownSyncedStateConnection then
-		self._fallingDownSyncedStateConnection:Disconnect()
-		self._fallingDownSyncedStateConnection = nil
+	if self._humanoidDescendantConnection then
+		self._humanoidDescendantConnection:Disconnect()
+		self._humanoidDescendantConnection = nil
 	end
-	self._fallingDownSyncedState = nil
+end
 
-	local function refresh()
-		local _humanoidDisabled, _syncedValue, syncedState = disableFallingDownRuntimeState(character, self._humanoid)
-		if syncedState ~= self._fallingDownSyncedState then
-			if self._fallingDownSyncedStateConnection then
-				self._fallingDownSyncedStateConnection:Disconnect()
-				self._fallingDownSyncedStateConnection = nil
-			end
-			self._fallingDownSyncedState = syncedState
-			if syncedState and syncedState:IsA("Configuration") then
-				self._fallingDownSyncedStateConnection = syncedState:GetAttributeChangedSignal("Enabled"):Connect(function()
-					if self._character == character and character.Parent and syncedState:GetAttribute("Enabled") ~= false then
-						disableFallingDownRuntimeState(character, self._humanoid)
-					end
-				end)
-			end
-		end
+function MovementController:_bindFallingDownStateGuard(character: Model, humanoid: Humanoid)
+	if self._fallingDownStateConnection then
+		self._fallingDownStateConnection:Disconnect()
+		self._fallingDownStateConnection = nil
 	end
 
-	refresh()
-	self._fallingDownStateConnection = character.DescendantAdded:Connect(function(descendant)
-		if
-			descendant.Name == "AbilityManagerActor"
-			or descendant.Name == "Abilities"
-			or descendant.Name == "FallingDown"
-			or descendant.Name == "SyncedState"
-		then
-			task.defer(function()
-				if self._character == character and character.Parent then
-					refresh()
-				end
-			end)
+	HumanoidStateGuards.DisableFallingDown(character, humanoid)
+	self._fallingDownStateConnection = humanoid.StateChanged:Connect(function(_, newState)
+		if self._character ~= character or self._humanoid ~= humanoid then
+			return
 		end
+		if newState == Enum.HumanoidStateType.FallingDown then
+			HumanoidStateGuards.RecoverFromFallingDown(humanoid)
+		end
+	end)
+end
+
+function MovementController:_bindHumanoidReplacementGuard(character: Model)
+	if self._humanoidDescendantConnection then
+		self._humanoidDescendantConnection:Disconnect()
+		self._humanoidDescendantConnection = nil
+	end
+
+	self._humanoidDescendantConnection = character.DescendantAdded:Connect(function(descendant)
+		if self._character ~= character or not descendant:IsA("Humanoid") or descendant == self._humanoid then
+			return
+		end
+
+		task.defer(function()
+			if self._character == character and descendant.Parent then
+				self:_bindCharacter(character)
+			end
+		end)
 	end)
 end
 
 function MovementController:_unbindCharacter()
 	RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
-	if self._fallingDownStateConnection then
-		self._fallingDownStateConnection:Disconnect()
-		self._fallingDownStateConnection = nil
-	end
-	if self._fallingDownSyncedStateConnection then
-		self._fallingDownSyncedStateConnection:Disconnect()
-		self._fallingDownSyncedStateConnection = nil
-	end
-	self._fallingDownSyncedState = nil
-	self:_setCCLAirMoveSuppressed(false)
-	self:_setGroundControllerTuning(false)
+	self:_disconnectHumanoidStateGuards()
+	self:_setGroundMovementTuning(false)
 	self:_destroyAirControlForce()
 	self._character = nil
-	self._controllerManager = nil
-	self._groundController = nil
-	self._airController = nil
-	self._airControllerBaseMoveMaxForce = nil
-	self._cclAirMoveSuppressed = false
-	self._cclAirMoveMaxForce = 0
-	self._cclActiveController = ""
-	self._groundSensor = nil
 	self._humanoid = nil
 	self._rootPart = nil
 	self._smoothedMoveDirection = Vector3.zero
@@ -2281,12 +2238,17 @@ function MovementController:_unbindCharacter()
 	self._lastGroundedTime = NEVER
 	self._lastLandedTime = NEVER
 	self._lastJumpRequestTime = NEVER
+	self._lastAirJumpRequestTime = NEVER
 	self._lastJumpReplayTime = NEVER
+	self._lastJumpInputTime = NEVER
 	self._lastAirJumpTime = NEVER
 	self._airJumpCount = 0
 	self._jumpSerial = 0
 	self._lastAirControlLaunchTime = NEVER
 	self._airControlMinimumSpeedLatched = false
+	self._airControlInputDirection = Vector3.zero
+	self._airControlInputMagnitude = 0
+	self:_clearAirMomentumCarry()
 	self._groundedCandidateStartTime = NEVER
 	self._observedAirControlLaunchSerial = 0
 	self._lastObservedKnockbackUntil = NEVER
@@ -2311,11 +2273,17 @@ function MovementController:_unbindCharacter()
 	self._landingRecoveryAlpha = 0
 	self._landingInputGraceUntil = NEVER
 	self._landingRunoutEligible = false
+	self._groundAccelerationResponsiveness = MovementConfig.MoveResponsiveness
+	self._groundDecelerationResponsiveness = MovementConfig.StopResponsiveness
+	self._groundFriction = MovementConfig.GroundFriction
+	self._groundFrictionWeight = MovementConfig.GroundFrictionWeight
+	self._groundFrictionAppliesWithInput = false
 end
 
 function MovementController:_step(dt: number)
-	local controllerManager = self._controllerManager
-	if not controllerManager or not controllerManager.Parent then
+	local humanoid = self._humanoid
+	local rootPart = self._rootPart
+	if not (humanoid and humanoid.Parent and rootPart and rootPart.Parent and humanoid.Health > 0) then
 		return
 	end
 
@@ -2353,6 +2321,7 @@ function MovementController:_step(dt: number)
 		if not self._wasGrounded then
 			self._lastLandedTime = now
 			self._airJumpCount = 0
+			self:_consumeAirJumpRequest()
 		end
 	end
 
@@ -2362,6 +2331,7 @@ function MovementController:_step(dt: number)
 	local grappleStunned = isGrappleHookStunned(self._character)
 	if grappleStunned then
 		self:_consumeJumpRequest()
+		self:_consumeAirJumpRequest()
 		self:_clearSlidePhase()
 		self._slideRequestPending = false
 		jumpBuffered = false
@@ -2375,6 +2345,7 @@ function MovementController:_step(dt: number)
 	if grappleStunned then
 		inputMoveDirection = Vector3.zero
 	end
+	self:_setAirControlInput(inputMoveDirection)
 	local hasInputMove = inputMoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
 	local sprintIntent = isGrounded and not grappleStunned and self._sprintHeld and hasInputMove
 
@@ -2410,7 +2381,7 @@ function MovementController:_step(dt: number)
 			self._landingRecoveryAlpha = 0
 		end
 	end
-	self:_setGroundControllerTuning(isSliding, landingRecoveryAlpha)
+	self:_setGroundMovementTuning(isSliding, landingRecoveryAlpha)
 	local isCrouching = isGrounded
 		and self._crouchHeld
 		and not self._crouchPressConsumedBySlide
@@ -2452,6 +2423,11 @@ function MovementController:_step(dt: number)
 
 	local hasMoveInput = targetMoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
 	local isSprinting = sprintIntent and not isSliding and not isCrouching
+	local suppressHumanoidAirMove = not isGrounded
+		and (
+			self:_shouldUseCustomAirControl()
+			or (bombKnockbackActive and MovementConfig.AirControl.ApplyWhileKnockback == false)
+		)
 
 	local responsiveness
 	if isSliding then
@@ -2462,11 +2438,11 @@ function MovementController:_step(dt: number)
 		responsiveness = MovementConfig.GroundRunoutSteerResponsiveness
 	elseif isGrounded then
 		if landingSettling and not hasMoveInput then
-			responsiveness = MovementConfig.LandingStopResponsiveness
+			responsiveness = math.max(MovementConfig.LandingStopResponsiveness, self._groundDecelerationResponsiveness)
 		else
 			responsiveness = if targetMoveDirection.Magnitude > self._smoothedMoveDirection.Magnitude
-				then MovementConfig.MoveResponsiveness
-				else MovementConfig.StopResponsiveness
+				then self._groundAccelerationResponsiveness
+				else self._groundDecelerationResponsiveness
 		end
 	else
 		responsiveness = if hasMoveInput
@@ -2474,8 +2450,7 @@ function MovementController:_step(dt: number)
 			else MovementConfig.AirStopResponsiveness
 	end
 
-	controllerManager.BaseMoveSpeed = targetSpeed
-	controllerManager.BaseTurnSpeed = MovementConfig.BaseTurnSpeed
+	humanoid.WalkSpeed = targetSpeed
 
 	if isSliding or isAirCarry or isGroundRunout then
 		self._smoothedMoveDirection = targetMoveDirection
@@ -2489,8 +2464,12 @@ function MovementController:_step(dt: number)
 		self._smoothedMoveDirection = Vector3.zero
 	end
 
-	local cclMoveDirection = if isGrounded then self._smoothedMoveDirection else Vector3.zero
-	controllerManager.MovingDirection = cclMoveDirection
+	if isGrounded then
+		humanoid:Move(self._smoothedMoveDirection, false)
+	elseif hasMoveInput and not suppressHumanoidAirMove then
+		humanoid:Move(targetMoveDirection, false)
+	end
+	self:_applyGroundMovementTuning(dt, isGrounded, hasMoveInput, isSliding, isGroundRunout)
 
 	local shiftLocked = readCameraShiftLocked(self._character)
 	if MovementConfig.FaceCameraDirection and shiftLocked then
@@ -2499,7 +2478,6 @@ function MovementController:_step(dt: number)
 		if cameraFacingYaw then
 			self._smoothedFacingYaw = cameraFacingYaw
 			self._smoothedFacingDirection = cameraFacingDirection
-			controllerManager.FacingDirection = cameraFacingDirection
 			if not bombKnockbackActive or MovementConfig.AirFacingApplyWhileKnockback ~= false then
 				self:_snapRootYawToFacingDirection(cameraFacingDirection, true)
 			end
@@ -2510,7 +2488,7 @@ function MovementController:_step(dt: number)
 		if targetFacingYaw then
 			local smoothedFacingYaw = self._smoothedFacingYaw
 			if smoothedFacingYaw == nil then
-				local currentFacingDirection = flattenDirection(controllerManager.FacingDirection)
+				local currentFacingDirection = rootPart and flattenDirection(rootPart.CFrame.LookVector) or Vector3.zero
 				if currentFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and self._rootPart then
 					currentFacingDirection = flattenDirection(self._rootPart.CFrame.LookVector)
 				end
@@ -2521,12 +2499,15 @@ function MovementController:_step(dt: number)
 			local smoothedFacingDirection = yawToDirection(smoothedFacingYaw)
 			self._smoothedFacingYaw = smoothedFacingYaw
 			self._smoothedFacingDirection = smoothedFacingDirection
-			controllerManager.FacingDirection = smoothedFacingDirection
+			if isGrounded and (not bombKnockbackActive or MovementConfig.AirFacingApplyWhileKnockback ~= false) then
+				self:_snapRootYawToFacingDirection(smoothedFacingDirection)
+			end
 		end
 	end
 
 	self:_applyAirFacingYaw(isGrounded, bombKnockbackActive)
 	self:_updateAirControl(now, isGrounded, dt, bombKnockbackActive)
+	self:_updateAirMomentumCarry(self._airControlActive)
 	local airUprightTiltDegrees, airUprightAngularVelocity, airUprightStabilized =
 		self:_applyAirUprightStabilization(isGrounded, bombKnockbackActive)
 
@@ -2607,20 +2588,35 @@ function MovementController:_handleCrouchAction(_actionName: string, inputState:
 	return Enum.ContextActionResult.Pass
 end
 
+function MovementController:_handleJumpAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
+	if inputState == Enum.UserInputState.Begin then
+		self:_recordJumpRequest()
+	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+		local humanoid = self._humanoid
+		if humanoid then
+			humanoid.Jump = false
+		end
+	end
+
+	return Enum.ContextActionResult.Sink
+end
+
 function MovementController:_bindCharacterWithParts(character: Model, parts)
 	self._character = character
-	self._controllerManager = parts.controllerManager
-	self._groundController = parts.groundController
-	self._airController = parts.airController
-	self._groundSensor = parts.groundSensor
 	self._humanoid = parts.humanoid
 	self._rootPart = parts.rootPart
-	self:_captureAirControllerDefaults()
+	self:_bindFallingDownStateGuard(character, self._humanoid)
+	self:_bindHumanoidReplacementGuard(character)
 	self._isGrounded = self:_isCurrentlyGrounded()
 	self._wasGrounded = self._isGrounded
 	self._lastGroundedTime = if self._isGrounded then os.clock() else NEVER
-	self._smoothedMoveDirection = parts.controllerManager.MovingDirection
-	self._smoothedFacingDirection = flattenDirection(parts.controllerManager.FacingDirection)
+	self._lastJumpRequestTime = NEVER
+	self._lastAirJumpRequestTime = NEVER
+	self._lastJumpReplayTime = NEVER
+	self._lastJumpInputTime = NEVER
+	self._lastAirJumpTime = NEVER
+	self._smoothedMoveDirection = Vector3.zero
+	self._smoothedFacingDirection = Vector3.zero
 	if self._smoothedFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and parts.rootPart then
 		self._smoothedFacingDirection = flattenDirection(parts.rootPart.CFrame.LookVector)
 	end
@@ -2628,7 +2624,6 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	self._airJumpCount = 0
 	self._jumpSerial = 0
 	self._airControlMinimumSpeedLatched = false
-	self:_bindFallingDownStateWatcher(character)
 
 	character:SetAttribute("Movement_JumpSerial", self._jumpSerial)
 	character:SetAttribute("Movement_LastJumpKind", "")
@@ -2669,9 +2664,8 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	character:SetAttribute("Movement_LandingRecoveryAlpha", 0)
 	character:SetAttribute("Movement_LandingInputGraceActive", false)
 	character:SetAttribute("Movement_LandingRunoutEligible", false)
-	character:SetAttribute("Movement_CCLActiveController", self._cclActiveController)
-	character:SetAttribute("Movement_CCLAirMoveMaxForce", self._cclAirMoveMaxForce)
-	character:SetAttribute("Movement_CCLAirMoveSuppressed", false)
+	character:SetAttribute("Movement_LegacyHumanoidReady", true)
+	character:SetAttribute("Movement_LegacyHumanoidStatus", "Ready")
 	character:SetAttribute(AIR_CONTROL_FORCE_AIRBORNE_UNTIL_ATTR, 0)
 	character:SetAttribute(AIR_CONTROL_LAUNCH_SOURCE_ATTR, AIR_LAUNCH_SOURCE_DEFAULT)
 	character:SetAttribute(AIR_CONTROL_LAUNCH_SERIAL_ATTR, self._airControlLaunchSerial)
@@ -2689,12 +2683,12 @@ function MovementController:_bindCharacter(character: Model)
 	local bindSerial = self._bindSerial
 	self:_unbindCharacter()
 
-	character:SetAttribute("Movement_CCLReady", false)
-	character:SetAttribute("Movement_CCLMissing", false)
-	character:SetAttribute("Movement_CCLStatus", "Waiting")
+	character:SetAttribute("Movement_LegacyHumanoidReady", false)
+	character:SetAttribute("Movement_LegacyHumanoidMissing", false)
+	character:SetAttribute("Movement_LegacyHumanoidStatus", "Waiting")
 
 	task.spawn(function()
-		local deadline = os.clock() + CONTROLLER_BIND_RETRY_TIMEOUT
+		local deadline = os.clock() + CHARACTER_BIND_RETRY_TIMEOUT
 		local parts = nil
 
 		repeat
@@ -2707,7 +2701,7 @@ function MovementController:_bindCharacter(character: Model)
 				break
 			end
 
-			task.wait(CONTROLLER_BIND_RETRY_INTERVAL)
+			task.wait(CHARACTER_BIND_RETRY_INTERVAL)
 		until os.clock() >= deadline
 
 		if bindSerial ~= self._bindSerial or not character.Parent then
@@ -2715,20 +2709,16 @@ function MovementController:_bindCharacter(character: Model)
 		end
 
 		if not parts then
-			character:SetAttribute("Movement_CCLReady", false)
-			character:SetAttribute("Movement_CCLMissing", true)
-			character:SetAttribute("Movement_CCLStatus", "Missing")
-
-			if not MovementController._warnedCharacters[character] then
-				MovementController._warnedCharacters[character] = true
-				warn("[MovementController] Missing engine-created CCL ControllerManager or GroundController for character:", character:GetFullName())
-			end
+			character:SetAttribute("Movement_LegacyHumanoidReady", false)
+			character:SetAttribute("Movement_LegacyHumanoidMissing", true)
+			character:SetAttribute("Movement_LegacyHumanoidStatus", "Missing")
+			warn("[MovementController] Missing Humanoid or HumanoidRootPart for character:", character:GetFullName())
 			return
 		end
 
-		character:SetAttribute("Movement_CCLReady", true)
-		character:SetAttribute("Movement_CCLMissing", false)
-		character:SetAttribute("Movement_CCLStatus", "Ready")
+		character:SetAttribute("Movement_LegacyHumanoidReady", true)
+		character:SetAttribute("Movement_LegacyHumanoidMissing", false)
+		character:SetAttribute("Movement_LegacyHumanoidStatus", "Ready")
 		self:_bindCharacterWithParts(character, parts)
 	end)
 end
@@ -2757,12 +2747,18 @@ function MovementController:OnStart()
 		Enum.KeyCode.C
 	)
 
-	if self._jumpRequestConnection then
-		self._jumpRequestConnection:Disconnect()
-	end
-	self._jumpRequestConnection = UserInputService.JumpRequest:Connect(function()
-		self:_recordJumpRequest()
-	end)
+	ContextActionService:UnbindAction(JUMP_ACTION_NAME)
+	ContextActionService:BindActionAtPriority(
+		JUMP_ACTION_NAME,
+		function(...)
+			return self:_handleJumpAction(...)
+		end,
+		false,
+		JUMP_ACTION_PRIORITY,
+		Enum.PlayerActions.CharacterJump,
+		Enum.KeyCode.Space,
+		Enum.KeyCode.ButtonA
+	)
 
 	if self._heartbeatConnection then
 		self._heartbeatConnection:Disconnect()

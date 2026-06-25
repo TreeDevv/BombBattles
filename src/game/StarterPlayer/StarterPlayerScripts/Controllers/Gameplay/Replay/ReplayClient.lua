@@ -2376,19 +2376,13 @@ function ReplayClient:_stepReplay(state, deltaTime: number?)
 	local impactEventToken = RuntimeProfiler.Begin("Client/Replay/FireEvents/Impact")
 	local impactEventsFired = fireDueReplayEvents(state, replayTime, EVENT_PHASE_IMPACT)
 	RuntimeProfiler.End("Client/Replay/FireEvents/Impact", impactEventToken)
-	local shouldApplyDestruction = state.replayType ~= "KillReplay"
-	if shouldApplyDestruction then
-		local destructionToken = RuntimeProfiler.Begin("Client/Replay/ApplyDestructionEvents")
-		state.nextDestructionIndex =
-			ReplayMapSimulator.ApplyEventsUpTo(state.mapContext, state.destructionEvents, replayTime, state.nextDestructionIndex, {
-				spawnDebris = true,
-				maxEvents = ReplayMapSimulator.GetMaxDestructionEventsPerStep(),
-			})
-		RuntimeProfiler.End("Client/Replay/ApplyDestructionEvents", destructionToken)
-	elseif typeof(state.destructionEvents) == "table" and state.nextDestructionIndex <= #state.destructionEvents then
-		RuntimeProfiler.Count("Client/Replay/Death/DestructionSuppressed", #state.destructionEvents - state.nextDestructionIndex + 1)
-		state.nextDestructionIndex = #state.destructionEvents + 1
-	end
+	local destructionToken = RuntimeProfiler.Begin("Client/Replay/ApplyDestructionEvents")
+	state.nextDestructionIndex =
+		ReplayMapSimulator.ApplyEventsUpTo(state.mapContext, state.destructionEvents, replayTime, state.nextDestructionIndex, {
+			spawnDebris = true,
+			maxEvents = ReplayMapSimulator.GetMaxDestructionEventsPerStep(),
+		})
+	RuntimeProfiler.End("Client/Replay/ApplyDestructionEvents", destructionToken)
 	local postEventToken = RuntimeProfiler.Begin("Client/Replay/FireEvents/PostImpact")
 	fireDueReplayEvents(state, replayTime, EVENT_PHASE_POST_IMPACT)
 	RuntimeProfiler.End("Client/Replay/FireEvents/PostImpact", postEventToken)
@@ -2403,11 +2397,6 @@ function ReplayClient:_stepReplay(state, deltaTime: number?)
 
 	local destructionPending = typeof(state.destructionEvents) == "table"
 		and state.nextDestructionIndex <= #state.destructionEvents
-	if state.replayType == "KillReplay" and state.playhead >= state.endTime and destructionPending then
-		RuntimeProfiler.Count("Client/Replay/Death/SkippedEndDestructionEvents", #state.destructionEvents - state.nextDestructionIndex + 1)
-		state.nextDestructionIndex = #state.destructionEvents + 1
-		destructionPending = false
-	end
 	if
 		state.replayType == "POTGReplay"
 		and state.potgEndFadeStarted ~= true

@@ -229,7 +229,7 @@ local function setCooldownAndState(context: ServerClientMessageContext, position
 	})
 end
 
-local function spawnWarningPart(position: Vector3, radius: number, lifetime: number): BasePart
+local function spawnWarningPart(player: Player, position: Vector3, radius: number, lifetime: number): BasePart
 	local warning = Instance.new("Part")
 	warning.Name = "OrbitalStrikeWarning"
 	warning.Anchored = true
@@ -639,7 +639,7 @@ local function confirmTarget(context: ServerClientMessageContext)
 		getDefinitionNumber(context.definition, "warningLifetimeSeconds", 1.6),
 		getDefinitionNumber(context.definition, "strikeDelay", 1.35)
 	)
-	spawnWarningPart(position, radius, warningLifetime)
+	spawnWarningPart(context.player, position, radius, warningLifetime)
 	fireAll(TELEGRAPH_EFFECT, {
 		player = context.player,
 		slot = context.slot,

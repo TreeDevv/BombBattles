@@ -2,6 +2,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityVisualOverlay = require(ReplicatedStorage.Shared.Effects.AbilityVisualOverlay)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombFuseAudioRuntime = require(script.Parent:WaitForChild("BombFuseAudioRuntime"))
 local BombFusePulse = require(ReplicatedStorage.Shared.Effects.BombFusePulse)
 local BombHeldVisualFactory = require(ReplicatedStorage.Shared.Effects.BombHeldVisualFactory)
 local BombProjectileVisualMotion = require(ReplicatedStorage.Shared.Effects.BombProjectileVisualMotion)
@@ -45,6 +46,7 @@ end
 function BombHeldVisualRuntime.Destroy(controller, player: Player)
 	local held = controller._heldBombs[player]
 	if held then
+		BombFuseAudioRuntime.Stop(held)
 		BombFusePulse.Stop(held)
 		AbilityVisualOverlay.Destroy(held)
 	end
@@ -131,6 +133,11 @@ function BombHeldVisualRuntime.SetEffects(controller, player: Player, fuseSpark:
 		fuseSpark = fuseSpark,
 		trail = trail,
 	})
+	if fuseSpark then
+		BombFuseAudioRuntime.Start(held, held.instance)
+	else
+		BombFuseAudioRuntime.Stop(held)
+	end
 	syncHeldBaseVisual(controller, held)
 end
 
@@ -172,6 +179,7 @@ function BombHeldVisualRuntime.StartPulse(controller, context, player: Player, s
 	local held = controller._heldBombs[player]
 	if held and held.instance.Parent then
 		BombFusePulse.Start(held, held.instance, fuseStartedAt, fuseEndsAt, getPulseStyle)
+		BombFuseAudioRuntime.Start(held, held.instance)
 		BombHeldVisualRuntime.SetEffects(controller, player, true, false)
 		syncHeldBaseVisual(controller, held)
 	end

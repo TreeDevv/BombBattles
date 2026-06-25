@@ -63,6 +63,13 @@ local function syncBaseVisual(options, visual)
 	end
 end
 
+local function syncAudio(options, visual)
+	local callback = options and options.syncAudio
+	if typeof(callback) == "function" then
+		callback(visual)
+	end
+end
+
 local function getPulseStyle(options, visual)
 	local callback = options and options.getPulseStyle
 	if typeof(callback) == "function" then
@@ -102,6 +109,7 @@ local function finalizeHandoff(visual, projectile: Instance, rootPart: BasePart,
 	visual.targetPosition = visual.position
 	visual.targetVelocity = visual.velocity
 	RuntimeProfiler.Count("Client/BombController/ProjectilePhysicalHandoffCompleted")
+	syncAudio(options, visual)
 	syncBaseVisual(options, visual)
 end
 
@@ -130,6 +138,7 @@ function BombProjectileVisualHandoff.Attach(visual, projectile: Instance, rootPa
 			trail = true,
 		})
 		startPulse(options, visual, projectile)
+		syncAudio(options, visual)
 		syncBaseVisual(options, visual)
 		return true
 	end

@@ -1809,6 +1809,9 @@ function SkillsInventoryController:_populateSlot(slot: string, container: GuiObj
 	local records = getTileButtonRecords(scroller)
 	local textStyleTemplates = buildTextStyleTemplates(records)
 	local abilityIds = AbilityConfig.GetCatalogIds(slot)
+	if #abilityIds > #records then
+		warn(("[SkillsInventoryController] Missing %d authored tile(s) for %s catalog."):format(#abilityIds - #records, slot))
+	end
 
 	for index, record in ipairs(records) do
 		local button = record.button

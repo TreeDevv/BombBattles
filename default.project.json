@@ -278,6 +278,9 @@
           "BombExplosionRuntime": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombExplosionRuntime.lua"
           },
+          "BombFuseAudioRuntime": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombFuseAudioRuntime.lua"
+          },
           "BombHeldVisualRuntime": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombHeldVisualRuntime.lua"
           },

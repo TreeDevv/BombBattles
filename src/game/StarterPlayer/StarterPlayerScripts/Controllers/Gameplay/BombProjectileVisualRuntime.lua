@@ -4,6 +4,7 @@ local Players = game:GetService("Players")
 
 local AbilityVisualOverlay = require(ReplicatedStorage.Shared.Effects.AbilityVisualOverlay)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombFuseAudioRuntime = require(script.Parent:WaitForChild("BombFuseAudioRuntime"))
 local BombFusePulse = require(ReplicatedStorage.Shared.Effects.BombFusePulse)
 local BombImpactEffects = require(ReplicatedStorage.Shared.Effects.BombImpactEffects)
 local BombProjectileVisualFactory = require(ReplicatedStorage.Shared.Effects.BombProjectileVisualFactory)
@@ -149,6 +150,9 @@ function BombProjectileVisualRuntime.TransferToPhysical(controller, context, pro
 		getServerTime = context.getServerTime,
 		getPulseStyle = getPulseStyle,
 		syncAbilityVisual = syncAbilityVisual,
+		syncAudio = function(updatedVisual)
+			BombFuseAudioRuntime.Refresh(updatedVisual, updatedVisual.instance)
+		end,
 		syncBaseVisual = syncBaseVisual,
 	})
 end
@@ -193,6 +197,7 @@ function BombProjectileVisualRuntime.Destroy(controller, projectileId: string)
 			trail = true,
 		})
 	end
+	BombFuseAudioRuntime.Stop(visual)
 	BombFusePulse.Stop(visual)
 	AbilityVisualOverlay.Destroy(visual)
 	if visual.ownsInstance and visual.instance.Parent then
@@ -249,6 +254,7 @@ function BombProjectileVisualRuntime.PlayThrowEffect(controller, context, payloa
 	local fuseStartedAt = if typeof(payload.fuseStartedAt) == "number" then payload.fuseStartedAt else startedAt
 	local fuseEndsAt = startedAt + lifetime
 	BombFusePulse.Start(visual, visual.instance, fuseStartedAt, fuseEndsAt, getPulseStyle)
+	BombFuseAudioRuntime.Start(visual, visual.instance)
 	syncBaseVisual(visual)
 	if visual.connection then
 		return

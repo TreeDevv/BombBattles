@@ -418,9 +418,10 @@ function RoundFlow.cleanupPreparedPOTGIntroClones()
 end
 
 function RoundFlow.preparePOTGIntroTemplate(payload): Instance?
+	local preparedLifetimeSeconds = math.max(RoundFlow.getPOTGIntroClientTimeoutDuration(), RoundFlow.getPOTGIntroLeadInDuration()) + 5
 	return RoundPOTGIntroRuntime.Prepare(payload, {
 		clones = RoundFlow.PreparedPOTGIntroClones,
-		lifetimeSeconds = RoundFlow.getPOTGIntroMaxDuration() + 5,
+		lifetimeSeconds = preparedLifetimeSeconds,
 		roundId = roundId,
 		serial = #RoundFlow.PreparedPOTGIntroClones + 1,
 	})
@@ -434,8 +435,12 @@ function RoundFlow.getPlayOfTheGameDuration(): number
 	return RoundFlow.getConfiguredDuration(RoundConfig.PlayOfTheGameSeconds, 10)
 end
 
-function RoundFlow.getPOTGIntroMaxDuration(): number
-	return RoundFlow.getConfiguredDuration(RoundFlow.getEndFlowConfig().POTGIntroMaxSeconds, 20)
+function RoundFlow.getPOTGIntroLeadInDuration(): number
+	return RoundFlow.getConfiguredDuration(RoundFlow.getEndFlowConfig().POTGIntroLeadInSeconds, 2)
+end
+
+function RoundFlow.getPOTGIntroClientTimeoutDuration(): number
+	return RoundFlow.getConfiguredDuration(RoundFlow.getEndFlowConfig().POTGIntroClientTimeoutSeconds, 4)
 end
 
 function RoundFlow.getRoundResultsDuration(): number
@@ -481,6 +486,7 @@ function RoundFlow.firePOTGIntro(recipients: { Player }, winnerTeam: string)
 		mode = endFlowConfig.CutsceneModes.FullAnimation,
 		cutsceneId = endFlowConfig.DefaultPOTGIntroCutsceneId,
 		cameraCFrame = RoundFlow.getPOTGAttachmentCFrame(),
+		introTimeoutSeconds = RoundFlow.getPOTGIntroClientTimeoutDuration(),
 	}
 	if potgCandidate then
 		for key, value in pairs(potgCandidate) do
@@ -499,33 +505,6 @@ function RoundFlow.firePOTGIntro(recipients: { Player }, winnerTeam: string)
 			remote:FireClient(player, payload)
 		end
 	end
-end
-
-function RoundFlow.waitForPOTGIntroCompletion(recipients: { Player }, maxWaitSeconds: number): boolean
-	local deadline = os.clock() + math.max(maxWaitSeconds, 0)
-	while os.clock() < deadline do
-		if pendingAdminReset or pendingAdminForceStartMapId or pendingAdminWinnerTeam then
-			RoundFlow.cleanupPreparedPOTGIntroClones()
-			return false
-		end
-
-		local pendingCount = 0
-		for _, player in ipairs(recipients) do
-			if player.Parent == Players and roundPlayers[player] == true and RoundFlow.POTGIntroCompletions[player] ~= true then
-				pendingCount += 1
-			end
-		end
-
-		if pendingCount <= 0 then
-			RoundFlow.cleanupPreparedPOTGIntroClones()
-			return true
-		end
-
-		task.wait(0.1)
-	end
-
-	RoundFlow.cleanupPreparedPOTGIntroClones()
-	return false
 end
 
 local function getPlayerKey(playerOrUserId: Player | number | string): string
@@ -1010,14 +989,12 @@ function RespawnFlow.respawnPlayerToLobby(
 		return false
 	end
 
-	local hasCharacter = player.Character ~= nil
-	local needsCharacterLoad = shouldLoadCharacter == true or not hasCharacter
+	local hasUsableCharacter = RoundCharacterRuntime.HasUsableCharacter(player)
+	local needsCharacterLoad = shouldLoadCharacter == true or not hasUsableCharacter
 	if needsCharacterLoad then
 		if not RespawnFlow.safeLoadCharacter(player, context) then
 			return false
 		end
-		RespawnFlow.waitForUsableCharacter(player, ROUND_CHARACTER_READY_TIMEOUT_SECONDS)
-	elseif not RoundCharacterRuntime.HasUsableCharacter(player) then
 		RespawnFlow.waitForUsableCharacter(player, ROUND_CHARACTER_READY_TIMEOUT_SECONDS)
 	end
 
@@ -1763,9 +1740,10 @@ function RoundService.TeleportTeamsToMap(map: Model): boolean
 	return true
 end
 
-function RoundService.ResetPlayersToLobby()
+function RoundService.ResetPlayersToLobby(shouldLoadCharacter: boolean?)
+	local loadCharacter = shouldLoadCharacter ~= false
 	for _, player in ipairs(Players:GetPlayers()) do
-		RespawnFlow.respawnPlayerToLobby(player, "RoundResetLobby", false, nil, true)
+		RespawnFlow.respawnPlayerToLobby(player, "RoundResetLobby", loadCharacter, nil, true)
 	end
 end
 
@@ -1813,8 +1791,9 @@ function RoundFlow.endRound(winnerTeam: string)
 	setWinner(winnerTeam)
 	local winnerBeatDuration = RoundFlow.getWinnerBeatDuration()
 	local potgDuration = RoundFlow.getPlayOfTheGameDuration()
-	local potgIntroMaxDuration = RoundFlow.getPOTGIntroMaxDuration()
-	local potgStateDuration = winnerBeatDuration + potgIntroMaxDuration + potgDuration
+	local potgRecipients = RoundReplayRuntime.GetRecipients(roundPlayers)
+	local potgIntroLeadInDuration = if #potgRecipients > 0 then RoundFlow.getPOTGIntroLeadInDuration() else 0
+	local potgStateDuration = winnerBeatDuration + potgIntroLeadInDuration + potgDuration
 
 	if potgStateDuration > 0 then
 		setState(RoundStates.PlayOfTheGame, "Play of the Game", potgStateDuration)
@@ -1822,10 +1801,12 @@ function RoundFlow.endRound(winnerTeam: string)
 			task.wait(winnerBeatDuration)
 		end
 
-		local potgRecipients = RoundReplayRuntime.GetRecipients(roundPlayers)
-		if potgIntroMaxDuration > 0 and #potgRecipients > 0 then
+		if #potgRecipients > 0 then
 			RoundFlow.firePOTGIntro(potgRecipients, winnerTeam)
-			RoundFlow.waitForPOTGIntroCompletion(potgRecipients, potgIntroMaxDuration)
+			if potgIntroLeadInDuration > 0 and not RoundFlow.waitForSecondsOrInvalid(potgIntroLeadInDuration, false) then
+				RoundFlow.cleanupPreparedPOTGIntroClones()
+				return
+			end
 		end
 
 		local sentPOTG = if potgDuration > 0 then RoundFlow.playRoundEndPOTG(potgDuration) else false
@@ -1868,11 +1849,11 @@ function RoundFlow.runActiveRound()
 	RoundFlow.endRound(RoundFlow.getTimeoutWinner())
 end
 
-function RoundFlow.resetRound()
+function RoundFlow.resetRound(shouldLoadLobbyCharacters: boolean?)
 	setState(RoundStates.Resetting, "Resetting", 0)
 	pendingAdminReset = false
 	pendingAdminWinnerTeam = nil
-	RoundService.ResetPlayersToLobby()
+	RoundService.ResetPlayersToLobby(shouldLoadLobbyCharacters)
 	DestructionService:BeginBulkUpdate("RoundReset")
 	DestructionService:Cleanup()
 	clearActiveMap()
@@ -1893,9 +1874,9 @@ function RoundFlow.resetRound()
 	syncCoreState()
 end
 
-function RoundFlow.cancelToWaiting(reason: string)
+function RoundFlow.cancelToWaiting(reason: string, shouldLoadLobbyCharacters: boolean?)
 	warn("[RoundService] " .. reason)
-	RoundFlow.resetRound()
+	RoundFlow.resetRound(shouldLoadLobbyCharacters)
 	setState(RoundStates.WaitingForPlayers, "Waiting for players", 0)
 end
 
@@ -1958,11 +1939,11 @@ function RoundService:_runRoundLoop()
 			pendingAdminReset = false
 			setState(RoundStates.Intermission, "Admin start", 0)
 		else
-			setState(RoundStates.Intermission, "Intermission", RoundConfig.IntermissionSeconds)
+			setState(RoundStates.MapVoting, "Map voting", RoundConfig.MapVoteSeconds)
 		end
 
-		if not forcedMapId and not RoundFlow.waitForSecondsOrInvalid(RoundConfig.IntermissionSeconds, true) then
-			RoundFlow.cancelToWaiting("Round cancelled because not enough players remain")
+		if not forcedMapId and not RoundFlow.waitForSecondsOrInvalid(RoundConfig.MapVoteSeconds, true) then
+			RoundFlow.cancelToWaiting("Round cancelled because not enough players remain", false)
 			continue
 		end
 
@@ -1974,12 +1955,20 @@ function RoundService:_runRoundLoop()
 		end
 
 		setReplicaValue({ "selectedMapId" }, selectedMapId)
+		if not forcedMapId then
+			setState(RoundStates.Intermission, "Intermission", RoundConfig.IntermissionSeconds)
+			if not RoundFlow.waitForSecondsOrInvalid(RoundConfig.IntermissionSeconds, true) then
+				RoundFlow.cancelToWaiting("Round cancelled because not enough players remain", false)
+				continue
+			end
+		end
+
 		setState(RoundStates.AssigningTeams, "Assigning teams", 0)
 
 		local roster = RoundService.GetEligiblePlayers()
 		local minimumRosterCount = if forcedMapId then 1 else getRequiredPlayerCount()
 		if #roster < minimumRosterCount then
-			RoundFlow.cancelToWaiting("Round cancelled because roster is below minimum")
+			RoundFlow.cancelToWaiting("Round cancelled because roster is below minimum", false)
 			continue
 		end
 
@@ -2131,7 +2120,7 @@ function RoundService:OnStart()
 	RoundFlow.createGameReplica()
 	submitMapVoteRemote = ensureVoteRemote()
 	submitMapVoteRemote.OnServerEvent:Connect(function(player: Player, choiceId: any)
-		if currentState ~= RoundStates.Intermission then
+		if currentState ~= RoundStates.MapVoting then
 			return
 		end
 		if not votingOpen then

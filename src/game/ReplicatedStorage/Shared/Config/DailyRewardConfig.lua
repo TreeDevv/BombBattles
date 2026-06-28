@@ -22,12 +22,14 @@ DailyRewardConfig.RewardTypes = table.freeze({
 	Cash = "Cash",
 	CrateToken = "CrateToken",
 	Skin = "Skin",
+	RandomEmote = "RandomEmote",
 })
 
 DailyRewardConfig.Icons = table.freeze({
 	Cash = "rbxassetid://133902414661833",
 	BasicCrate = "rbxassetid://133902414661833",
 	PremiumCrate = "rbxassetid://133902414661833",
+	Emote = "rbxassetid://106265723563512",
 })
 
 DailyRewardConfig.Days = table.freeze({
@@ -61,9 +63,9 @@ DailyRewardConfig.Days = table.freeze({
 	}),
 	table.freeze({
 		day = 5,
-		displayText = "750",
+		displayText = "Random Emote",
 		rewards = table.freeze({
-			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 750 }),
+			table.freeze({ type = DailyRewardConfig.RewardTypes.RandomEmote }),
 		}),
 	}),
 	table.freeze({
@@ -92,9 +94,9 @@ DailyRewardConfig.Days = table.freeze({
 	}),
 	table.freeze({
 		day = 9,
-		displayText = "900",
+		displayText = "Random Emote",
 		rewards = table.freeze({
-			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 900 }),
+			table.freeze({ type = DailyRewardConfig.RewardTypes.RandomEmote }),
 		}),
 	}),
 	table.freeze({
@@ -121,9 +123,9 @@ DailyRewardConfig.Days = table.freeze({
 	}),
 	table.freeze({
 		day = 13,
-		displayText = "1,750",
+		displayText = "Random Emote",
 		rewards = table.freeze({
-			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 1750 }),
+			table.freeze({ type = DailyRewardConfig.RewardTypes.RandomEmote }),
 		}),
 	}),
 	table.freeze({
@@ -131,7 +133,11 @@ DailyRewardConfig.Days = table.freeze({
 		displayText = "1,500 + UFO Bomb",
 		rewards = table.freeze({
 			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 1500 }),
-			table.freeze({ type = DailyRewardConfig.RewardTypes.Skin, skinId = "UFO" }),
+			table.freeze({
+				type = DailyRewardConfig.RewardTypes.Skin,
+				skinId = "UFO",
+				duplicateFallbackCash = 2500,
+			}),
 		}),
 		milestone = true,
 	}),
@@ -145,9 +151,9 @@ DailyRewardConfig.Days = table.freeze({
 	}),
 	table.freeze({
 		day = 16,
-		displayText = "2,000",
+		displayText = "Random Emote",
 		rewards = table.freeze({
-			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 2000 }),
+			table.freeze({ type = DailyRewardConfig.RewardTypes.RandomEmote }),
 		}),
 	}),
 	table.freeze({
@@ -182,10 +188,14 @@ DailyRewardConfig.Days = table.freeze({
 	}),
 	table.freeze({
 		day = 21,
-		displayText = "2,500 + Nuke Bomb + 2 Premium Crates",
+		displayText = "2,500 + Cartoon Nuke Bomb + 2 Premium Crates",
 		rewards = table.freeze({
 			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 2500 }),
-			table.freeze({ type = DailyRewardConfig.RewardTypes.Skin, skinId = "Nuke" }),
+			table.freeze({
+				type = DailyRewardConfig.RewardTypes.Skin,
+				skinId = "Nuke",
+				duplicateFallbackCash = 5000,
+			}),
 			table.freeze({ type = DailyRewardConfig.RewardTypes.CrateToken, crateId = "Premium", amount = 2 }),
 		}),
 		milestone = true,
@@ -222,6 +232,12 @@ function DailyRewardConfig.GetPrimaryIcon(dayDefinition): string?
 	for _, reward in ipairs(dayDefinition.rewards or {}) do
 		if reward.type == DailyRewardConfig.RewardTypes.CrateToken then
 			return DailyRewardConfig.Icons.BasicCrate
+		end
+	end
+
+	for _, reward in ipairs(dayDefinition.rewards or {}) do
+		if reward.type == DailyRewardConfig.RewardTypes.RandomEmote then
+			return DailyRewardConfig.Icons.Emote
 		end
 	end
 

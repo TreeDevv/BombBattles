@@ -9,6 +9,8 @@ This file defines the required workflow for agents working in `C:\dev\BombBattle
 - Do not mix those ownership boundaries unless this file explicitly allows it.
 - Use the converted EmitModule in `src/game/ReplicatedStorage/Packages/EmitModule` for all VFX-related emit behavior. Do not hand-roll alternate emit helpers or direct particle/beam/trail emission flows unless the current task explicitly requires replacing this module.
 - For ability creation or ability changes, follow `docs/AbilityAuthoring.md`. Bias ability work toward client-side input, previews, VFX, SFX, UI, and feel; keep the server focused on state, validation, and authoritative gameplay outcomes.
+- Player-owned movement must stay client-owned. For knockback, launches, pulls, and air impulses that affect a real player character, the server should validate and send a compact motion intent to the affected player's client; that client applies the physical velocity/impulse. Keep server-side physical movement for NPCs, bots, durable world objects, and validated gameplay outcomes.
+- Throwable/projectile visuals should start immediately on the throwing client and reconcile to server validation. The server remains authoritative for cooldowns, damage, hit eligibility, scoring, round state, replay records, and durable world changes.
 
 ## Local Filesystem / VS Code Only
 

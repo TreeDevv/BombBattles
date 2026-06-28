@@ -11,6 +11,8 @@ local RECENT_EVENT_LIMIT = 128
 local LONG_RANGE_BOMB_KILL_STUDS = 80
 local ABILITY_COMBO_WINDOW_SECONDS = 4
 local BASE_DAMAGE_BURST_WINDOW_SECONDS = 3
+local PLAYER_DAMAGE_BURST_WINDOW_SECONDS = 3
+local MIN_PLAYER_DAMAGE_BURST_FOR_CANDIDATE = 35
 local MIN_BASE_DAMAGE_BURST_FOR_CANDIDATE = 40
 local HUGE_BASE_DAMAGE_BURST = 50
 local LAST_SECOND_WINDOW_SECONDS = 12
@@ -18,30 +20,37 @@ local CLOSE_SCORE_TIE_MARGIN = 35
 local LOW_HEALTH_RATIO = 0.25
 local LOW_HEALTH_ABSOLUTE = 25
 
-local SCORE_KILL = 80
-local SCORE_CLEANUP_KILL = 45
-local SCORE_ASSIST = 35
-local SCORE_DIRECT_HIT = 70
-local SCORE_BASE_DAMAGE_PER_100 = 12
-local SCORE_BASE_DAMAGE_BURST_PER_100 = 55
-local SCORE_HUGE_BASE_DAMAGE_BURST = 120
-local SCORE_BASE_BREAK = 320
-local SCORE_LAST_SECOND_BASE_BREAK = 220
-local SCORE_REFLECTED_BOMB_KILL = 220
-local SCORE_ABSORB_SHIELD_COUNTER_KILL = 240
-local SCORE_ENVIRONMENTAL_KILL = 150
-local SCORE_LONG_RANGE_BOMB_KILL = 140
-local SCORE_DEFENSIVE_SAVE = 170
-local SCORE_INTERCEPTOR_COUNTER_KILL = 180
-local SCORE_DEFENSIVE_ABILITY_SAVE = 130
-local SCORE_ABILITY_COMBO_KILL = 90
-local SCORE_LOW_HEALTH_CLUTCH = 70
-local SCORE_OBJECTIVE_KILL = 90
-local SCORE_MEGA_BOMB_KILL = 90
-local SCORE_CHAIN_REACTION = 180
-local SCORE_MULTI_KILL_2 = 160
-local SCORE_MULTI_KILL_3 = 360
-local SCORE_MULTI_KILL_4_PLUS = 600
+local SCORE_KILL = 260
+local SCORE_CLEANUP_KILL = 210
+local SCORE_ASSIST = 60
+local SCORE_PLAYER_DAMAGE_PER_100 = 90
+local SCORE_PLAYER_DAMAGE_BURST_PER_100 = 220
+local SCORE_DIRECT_HIT = 90
+local SCORE_BASE_DAMAGE_PER_100 = 6
+local SCORE_BASE_DAMAGE_BURST_PER_100 = 18
+local SCORE_HUGE_BASE_DAMAGE_BURST = 50
+local SCORE_BASE_BREAK = 120
+local SCORE_LAST_SECOND_BASE_BREAK = 80
+local SCORE_REFLECTED_BOMB_KILL = 90
+local SCORE_ABSORB_SHIELD_COUNTER_KILL = 100
+local SCORE_ENVIRONMENTAL_KILL = 75
+local SCORE_LONG_RANGE_BOMB_KILL = 70
+local SCORE_DEFENSIVE_SAVE = 55
+local SCORE_INTERCEPTOR_COUNTER_KILL = 80
+local SCORE_DEFENSIVE_ABILITY_SAVE = 45
+local SCORE_ABILITY_COMBO_KILL = 45
+local SCORE_LOW_HEALTH_CLUTCH = 40
+local SCORE_OBJECTIVE_KILL = 35
+local SCORE_MEGA_BOMB_KILL = 45
+local SCORE_CHAIN_REACTION = 110
+local SCORE_MULTI_KILL_2 = 300
+local SCORE_MULTI_KILL_3 = 700
+local SCORE_MULTI_KILL_4_PLUS = 1200
+
+local COMBAT_RANK_NONE = 0
+local COMBAT_RANK_ASSIST = 1
+local COMBAT_RANK_DAMAGE = 2
+local COMBAT_RANK_KILL = 3
 
 local RARITY = {
 	BaseDamage = 1,
@@ -73,6 +82,7 @@ local candidates = {}
 local recentEvents = {}
 local recentKillsByPlayer = {}
 local recentBaseDamageByPlayer = {}
+local recentPlayerDamageByPlayer = {}
 local recentAbilitiesByPlayer = {}
 local bombLaunches = {}
 local bombTravelDistances = {}
@@ -250,6 +260,7 @@ local function pruneHistories(currentTime: number)
 
 	pruneDictionaryLists(recentKillsByPlayer, currentTime - ReplayConstants.POTG_PRE_SECONDS, "timestamp")
 	pruneDictionaryLists(recentBaseDamageByPlayer, currentTime - ReplayConstants.POTG_PRE_SECONDS, "timestamp")
+	pruneDictionaryLists(recentPlayerDamageByPlayer, currentTime - ReplayConstants.POTG_PRE_SECONDS, "timestamp")
 	pruneDictionaryLists(recentAbilitiesByPlayer, currentTime - ABILITY_COMBO_WINDOW_SECONDS, "timestamp")
 
 	for sourceId, launch in pairs(bombLaunches) do
@@ -304,8 +315,8 @@ local function registerBaseDamage(playerUserId: number, timestamp: number, amoun
 	})
 end
 
-local function sumRecentBaseDamage(playerUserId: number, timestamp: number, windowSeconds: number?): number
-	local history = recentBaseDamageByPlayer[tostring(playerUserId)]
+local function sumRecentDamage(dictionary, playerUserId: number, timestamp: number, windowSeconds: number?): number
+	local history = dictionary[tostring(playerUserId)]
 	if not history then
 		return 0
 	end
@@ -319,6 +330,21 @@ local function sumRecentBaseDamage(playerUserId: number, timestamp: number, wind
 		end
 	end
 	return total
+end
+
+local function sumRecentBaseDamage(playerUserId: number, timestamp: number, windowSeconds: number?): number
+	return sumRecentDamage(recentBaseDamageByPlayer, playerUserId, timestamp, windowSeconds)
+end
+
+local function registerPlayerDamage(playerUserId: number, timestamp: number, amount: number)
+	table.insert(getPlayerHistory(recentPlayerDamageByPlayer, playerUserId), {
+		timestamp = timestamp,
+		amount = amount,
+	})
+end
+
+local function sumRecentPlayerDamage(playerUserId: number, timestamp: number, windowSeconds: number?): number
+	return sumRecentDamage(recentPlayerDamageByPlayer, playerUserId, timestamp, windowSeconds)
 end
 
 local function registerAbility(event, timestamp: number)
@@ -429,6 +455,8 @@ local function newScoreContext(playerUserId: number, timestamp: number, eventTyp
 		},
 		kills = 0,
 		baseDamage = 0,
+		playerDamage = 0,
+		combatRank = COMBAT_RANK_NONE,
 		rareRank = 0,
 		sourceConfidence = 0,
 	}
@@ -487,6 +515,8 @@ local function buildCandidate(context)
 		primaryEventTime = timestamp,
 		kills = context.kills or 0,
 		baseDamage = math.floor((context.baseDamage or 0) + 0.5),
+		playerDamage = math.floor((context.playerDamage or 0) + 0.5),
+		combatRank = context.combatRank or COMBAT_RANK_NONE,
 		rareRank = context.rareRank or 0,
 		sourceConfidence = context.sourceConfidence or 0,
 	}
@@ -523,12 +553,19 @@ local function copyCandidate(candidate)
 		primaryEventTime = candidate.primaryEventTime,
 		kills = candidate.kills,
 		baseDamage = candidate.baseDamage,
+		playerDamage = candidate.playerDamage,
+		combatRank = candidate.combatRank,
 		rareRank = candidate.rareRank,
 		sourceConfidence = candidate.sourceConfidence,
 	}
 end
 
 local function candidateComesBefore(left, right): boolean
+	local leftCombatRank = if isFiniteNumber(left.combatRank) then left.combatRank else COMBAT_RANK_NONE
+	local rightCombatRank = if isFiniteNumber(right.combatRank) then right.combatRank else COMBAT_RANK_NONE
+	if leftCombatRank ~= rightCombatRank then
+		return leftCombatRank > rightCombatRank
+	end
 	if left.score ~= right.score then
 		if math.abs(left.score - right.score) > CLOSE_SCORE_TIE_MARGIN then
 			return left.score > right.score
@@ -536,6 +573,9 @@ local function candidateComesBefore(left, right): boolean
 	end
 	if left.kills ~= right.kills then
 		return left.kills > right.kills
+	end
+	if left.playerDamage ~= right.playerDamage then
+		return left.playerDamage > right.playerDamage
 	end
 	if left.baseDamage ~= right.baseDamage then
 		return left.baseDamage > right.baseDamage
@@ -824,6 +864,7 @@ local function addAssistCandidates(event, timestamp: number)
 	for _, assistUserId in ipairs(getAssistUserIds(event)) do
 		local context = newScoreContext(assistUserId, timestamp, event.eventType)
 		applySourceContext(context, event)
+		context.combatRank = COMBAT_RANK_ASSIST
 		addScore(context, SCORE_ASSIST, "Assist", RARITY.Assist)
 		addCandidate(buildCandidate(context))
 	end
@@ -887,6 +928,7 @@ local function processKillEvent(event, timestamp: number)
 	local lowHealthClutch = isLowHealthClutch(event)
 	local megaBomb = isMegaBombEvent(event, playerUserId, timestamp)
 	local objectiveDamage = sumRecentBaseDamage(playerUserId, timestamp, BASE_DAMAGE_BURST_WINDOW_SECONDS)
+	local recentPlayerDamage = sumRecentPlayerDamage(playerUserId, timestamp, PLAYER_DAMAGE_BURST_WINDOW_SECONDS)
 	local objectivePlay = isNearObjectiveEvent(event) or (killCount >= 2 and objectiveDamage > 0)
 	local cleanupKill = killCount == 1
 		and #assistUserIds > 0
@@ -906,12 +948,22 @@ local function processKillEvent(event, timestamp: number)
 	local context = newScoreContext(playerUserId, timestamp, event.eventType)
 	context.kills = killCount
 	context.baseDamage = objectiveDamage
+	context.playerDamage = recentPlayerDamage
+	context.combatRank = COMBAT_RANK_KILL
 	applySourceContext(context, event)
 	applyPlayerMetadata(context, event, "killer")
 
 	local killScore = if cleanupKill then SCORE_CLEANUP_KILL else SCORE_KILL
 	addScore(context, killScore * killCount, if killCount > 1 then tostring(killCount) .. " Kills" else "Kill", RARITY.Kill)
 	addMultiKillScore(context, killCount)
+	if recentPlayerDamage > 0 then
+		addScore(
+			context,
+			(recentPlayerDamage / 100) * SCORE_PLAYER_DAMAGE_BURST_PER_100,
+			"Player Damage",
+			RARITY.DirectHit
+		)
+	end
 
 	if isChainReactionEvent(event, killCount) and killCount >= 2 and killCount < 4 then
 		addScore(context, SCORE_CHAIN_REACTION, "Chain Reaction", RARITY.ChainReaction)
@@ -1004,19 +1056,37 @@ local function processBaseDamageEvent(event, timestamp: number)
 end
 
 local function processDamageEvent(event, timestamp: number)
-	if not isDirectHit(event) then
-		return
-	end
-
 	local playerUserId = getUserId(event.attackerUserId) or getUserId(event.ownerUserId) or getUserId(event.playerUserId)
 	if not playerUserId then
 		return
 	end
 
+	local amount = if isFiniteNumber(event.amount) and event.amount > 0 then event.amount else 0
+	if amount <= 0 then
+		return
+	end
+
+	registerPlayerDamage(playerUserId, timestamp, amount)
+	local playerDamage = sumRecentPlayerDamage(playerUserId, timestamp)
+	local playerDamageBurst = sumRecentPlayerDamage(playerUserId, timestamp, PLAYER_DAMAGE_BURST_WINDOW_SECONDS)
+	local directHit = isDirectHit(event)
+	if playerDamageBurst < MIN_PLAYER_DAMAGE_BURST_FOR_CANDIDATE and not directHit then
+		return
+	end
+
 	local context = newScoreContext(playerUserId, timestamp, event.eventType)
+	context.playerDamage = playerDamageBurst
+	context.combatRank = COMBAT_RANK_DAMAGE
 	applySourceContext(context, event)
 	applyPlayerMetadata(context, event, "attacker")
-	addScore(context, SCORE_DIRECT_HIT, "Direct Hit", RARITY.DirectHit)
+
+	local sustainedDamage = math.max(playerDamage - playerDamageBurst, 0)
+	local burstScore = (playerDamageBurst / 100) * SCORE_PLAYER_DAMAGE_BURST_PER_100
+	local sustainedScore = (sustainedDamage / 100) * SCORE_PLAYER_DAMAGE_PER_100
+	addScore(context, burstScore + sustainedScore, "Player Damage", RARITY.DirectHit)
+	if directHit then
+		addScore(context, SCORE_DIRECT_HIT, "Direct Hit", RARITY.DirectHit)
+	end
 	addCandidate(buildCandidate(context))
 end
 
@@ -1037,6 +1107,7 @@ local function processBombExplodedEvent(event, timestamp: number)
 
 	local context = newScoreContext(playerUserId, timestamp, event.eventType)
 	context.kills = killedCount
+	context.combatRank = if killedCount > 0 then COMBAT_RANK_KILL else COMBAT_RANK_DAMAGE
 	applySourceContext(context, event)
 	applyPlayerMetadata(context, event, "owner")
 
@@ -1089,6 +1160,7 @@ function POTGService.ResetRound(first, second)
 	table.clear(recentEvents)
 	table.clear(recentKillsByPlayer)
 	table.clear(recentBaseDamageByPlayer)
+	table.clear(recentPlayerDamageByPlayer)
 	table.clear(recentAbilitiesByPlayer)
 	table.clear(bombLaunches)
 	table.clear(bombTravelDistances)
@@ -1151,6 +1223,10 @@ function POTGService.AddCandidate(first, second)
 
 	copiedCandidate.kills = if isFiniteNumber(copiedCandidate.kills) then copiedCandidate.kills else 0
 	copiedCandidate.baseDamage = if isFiniteNumber(copiedCandidate.baseDamage) then copiedCandidate.baseDamage else 0
+	copiedCandidate.playerDamage = if isFiniteNumber(copiedCandidate.playerDamage) then copiedCandidate.playerDamage else 0
+	copiedCandidate.combatRank = if isFiniteNumber(copiedCandidate.combatRank)
+		then copiedCandidate.combatRank
+		else COMBAT_RANK_NONE
 	copiedCandidate.rareRank = if isFiniteNumber(copiedCandidate.rareRank) then copiedCandidate.rareRank else 0
 	copiedCandidate.sourceConfidence = if isFiniteNumber(copiedCandidate.sourceConfidence) then copiedCandidate.sourceConfidence else 0
 	return addCandidate(copiedCandidate)

@@ -3,6 +3,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local SocialService = game:GetService("SocialService")
 
 local DataController = require(script.Parent:WaitForChild("DataController"))
+local DebugEconomyConfig = require(ReplicatedStorage.Shared.Config.DebugEconomyConfig)
 local NumberFormatter = require(ReplicatedStorage.Shared.Formatting.NumberFormatter)
 
 local LocalPlayer = Players.LocalPlayer
@@ -65,7 +66,9 @@ function MoneyHudController:_refresh()
 		return
 	end
 
-	amountLabel.Text = NumberFormatter.Format(getCashValue())
+	amountLabel.Text = if DebugEconomyConfig.HasInfiniteCash(LocalPlayer)
+		then DebugEconomyConfig.DisplayCashText
+		else NumberFormatter.Format(getCashValue())
 end
 
 function MoneyHudController:_promptInviteFriends()

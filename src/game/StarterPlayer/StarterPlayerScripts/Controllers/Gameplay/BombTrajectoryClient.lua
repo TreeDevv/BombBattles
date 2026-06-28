@@ -3,6 +3,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local CollisionGroupConfig = require(ReplicatedStorage.Shared.Config.CollisionGroupConfig)
+local BombLaunchClearance = require(ReplicatedStorage.Shared.Bombs.BombLaunchClearance)
 local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 
@@ -10,6 +11,17 @@ local BombTrajectoryClient = {}
 local BOMB_PROJECTILE_COLLISION_GROUP = CollisionGroupConfig.Groups.BombProjectile
 
 local MIN_AIM_HORIZONTAL = 0.08
+
+local function isTouchAimPreferred(): boolean
+	local ok, preferredInput = pcall(function()
+		return UserInputService.PreferredInput
+	end)
+	if ok and typeof(preferredInput) == "EnumItem" then
+		return preferredInput.Name == "Touch"
+	end
+
+	return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+end
 
 function BombTrajectoryClient.GetHorizontalDirection(direction: Vector3?): Vector3?
 	if typeof(direction) ~= "Vector3" then
@@ -51,6 +63,10 @@ function BombTrajectoryClient.GetAimDirection(rootPart: BasePart?): Vector3
 end
 
 function BombTrajectoryClient.GetMouseAimDirection(rootPart: BasePart?): Vector3
+	if isTouchAimPreferred() then
+		return BombTrajectoryClient.GetAimDirection(rootPart)
+	end
+
 	local camera = workspace.CurrentCamera
 	if not camera then
 		return BombTrajectoryClient.GetAimDirection(rootPart)
@@ -62,7 +78,13 @@ function BombTrajectoryClient.GetMouseAimDirection(rootPart: BasePart?): Vector3
 end
 
 function BombTrajectoryClient.GetThrowOrigin(rootPart: BasePart): Vector3
-	return BombThrowOrigin.GetOrigin(rootPart)
+	return BombLaunchClearance.ResolveOrigin(rootPart, BombThrowOrigin.GetOrigin(rootPart), {
+		character = rootPart:FindFirstAncestorOfClass("Model"),
+		radius = BombConfig.SweepRadius,
+		collisionGroup = BOMB_PROJECTILE_COLLISION_GROUP,
+		respectCanCollide = true,
+		ignoreWater = true,
+	})
 end
 
 function BombTrajectoryClient.CalculateTrajectoryWithConfig(

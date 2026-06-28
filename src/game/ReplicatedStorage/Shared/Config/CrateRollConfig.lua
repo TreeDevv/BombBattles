@@ -14,6 +14,7 @@ CrateRollConfig.PromptFreeRollSource = "PromptFree"
 CrateRollConfig.Actions = table.freeze({
 	GetState = "GetState",
 	RollCash = "RollCash",
+	ClearPromptPurchase = "ClearPromptPurchase",
 })
 
 CrateRollConfig.RewardTypes = table.freeze({

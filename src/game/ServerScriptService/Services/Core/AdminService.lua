@@ -17,6 +17,7 @@ local FinisherService = require(ServerScriptService.Services.FinisherService)
 local HighlightIntroService = require(ServerScriptService.Services.HighlightIntroService)
 local ReplayService = require(ServerScriptService.Services.ReplayService)
 local RoundService = require(ServerScriptService.Services.RoundService)
+local StudioAIBotService = require(ServerScriptService.Services.StudioAIBotService)
 
 local REMOTES_FOLDER_NAME = "Remotes"
 local EXPLOSION_DEMO_FORWARD_DISTANCE = 45
@@ -24,6 +25,22 @@ local EXPLOSION_DEMO_HEIGHT = 45
 local EXPLOSION_DEMO_SPACING = 8
 local EXPLOSION_DEMO_STAGGER_SECONDS = 0.18
 local EXPLOSION_DEMO_FUSE_SECONDS = 1.35
+local STRESS_GRID_COLUMNS = 10
+local STRESS_GRID_ROWS = 5
+local STRESS_GRID_FORWARD_DISTANCE = 42
+local STRESS_GRID_HEIGHT = 45
+local STRESS_GRID_SPACING = 6
+local STRESS_GRID_FUSE_SECONDS = 1.25
+local CARPET_BOMB_MAP_ID = "Castles"
+local CARPET_BOMB_MARKER_NAME = "CarpetBomb"
+local CARPET_BOMB_COUNT = 90
+local CARPET_BOMB_DURATION_SECONDS = 5
+local CARPET_BOMB_FUSE_SECONDS = 2.35
+local CARPET_BOMB_DROP_SPEED = 24
+local CARPET_BOMB_DRIFT_SCALE = 0.28
+local CARPET_BOMB_EDGE_INSET = 3
+local ADMIN_FORCE_START_BOT_TARGET_TEAM_SIZE = 6
+local ADMIN_FORCE_START_BOT_MAX_TOTAL = 12
 
 type AdminResult = {
 	ok: boolean,
@@ -37,6 +54,9 @@ local requestRemote: RemoteFunction? = nil
 local potgCutsceneRemote: RemoteEvent? = nil
 local lastRequestAtByUserId: { [number]: number } = {}
 local explosionDemoSerial = 0
+local stressGridSerial = 0
+local carpetBombSerial = 0
+local carpetBombRunningUntil = 0
 
 local function ensureRemotesFolder(): Folder
 	return RemoteUtil.EnsureFolder(ReplicatedStorage, REMOTES_FOLDER_NAME)
@@ -252,6 +272,63 @@ local function getHorizontalUnit(direction: Vector3, fallback: Vector3): Vector3
 	return fallback
 end
 
+local function getActiveMap(): Model?
+	local activeMap = workspace:FindFirstChild(RoundConfig.ActiveMapName)
+	return if activeMap and activeMap:IsA("Model") then activeMap else nil
+end
+
+local function getCarpetBombMarker(): BasePart?
+	local activeMap = getActiveMap()
+	if not activeMap then
+		return nil
+	end
+
+	local marker = activeMap:FindFirstChild(CARPET_BOMB_MARKER_NAME, true)
+	return if marker and marker:IsA("BasePart") then marker else nil
+end
+
+local function getPartPlaneAxes(part: BasePart): (Vector3, Vector3, number, number, boolean)
+	local size = part.Size
+	local xAxis = getHorizontalUnit(part.CFrame.RightVector, Vector3.xAxis)
+	local zAxis = getHorizontalUnit(part.CFrame.LookVector, Vector3.zAxis)
+
+	if size.X >= size.Z then
+		return xAxis, zAxis, math.max(size.X, 1), math.max(size.Z, 1), true
+	end
+
+	return zAxis, xAxis, math.max(size.Z, 1), math.max(size.X, 1), false
+end
+
+local function clampExtent(size: number): number
+	return math.max((size * 0.5) - CARPET_BOMB_EDGE_INSET, size * 0.35, 1)
+end
+
+local function getCarpetBombOrigin(marker: BasePart, alpha: number, random: Random): Vector3
+	local longAxis, shortAxis, longSize, shortSize, xIsLong = getPartPlaneAxes(marker)
+	local longOffset = -clampExtent(longSize) + (clampExtent(longSize) * 2 * alpha)
+	local shortOffset = random:NextNumber(-clampExtent(shortSize), clampExtent(shortSize))
+
+	local xOffset = if xIsLong then longOffset else shortOffset
+	local zOffset = if xIsLong then shortOffset else longOffset
+	local localOrigin = Vector3.new(xOffset, 0, zOffset)
+	local worldOrigin = marker.CFrame:PointToWorldSpace(localOrigin)
+
+	local drift = longAxis * random:NextNumber(-CARPET_BOMB_DRIFT_SCALE, CARPET_BOMB_DRIFT_SCALE)
+		+ shortAxis * random:NextNumber(-CARPET_BOMB_DRIFT_SCALE, CARPET_BOMB_DRIFT_SCALE)
+	return worldOrigin + drift
+end
+
+local function getCarpetBombAim(marker: BasePart, random: Random): Vector3
+	local longAxis, shortAxis = getPartPlaneAxes(marker)
+	local drift = longAxis * random:NextNumber(-CARPET_BOMB_DRIFT_SCALE, CARPET_BOMB_DRIFT_SCALE)
+		+ shortAxis * random:NextNumber(-CARPET_BOMB_DRIFT_SCALE, CARPET_BOMB_DRIFT_SCALE)
+	local aim = Vector3.new(drift.X, -1, drift.Z)
+	if aim.Magnitude <= 0.05 then
+		return Vector3.new(0, -1, 0)
+	end
+	return aim.Unit
+end
+
 local function runExplosionDemo(adminPlayer: Player): (boolean, string?)
 	if not BombProjectileService:IsEnabled() then
 		return false, "Bomb projectile service is disabled"
@@ -306,10 +383,133 @@ local function runExplosionDemo(adminPlayer: Player): (boolean, string?)
 	return true, ("Started explosion demo for %d bomb skins"):format(#skinIds)
 end
 
+local function runExplosionStressGrid(adminPlayer: Player): (boolean, string?)
+	if not BombProjectileService:IsEnabled() then
+		return false, "Bomb projectile service is disabled"
+	end
+
+	local rootPart = getCharacterRoot(adminPlayer)
+	if not rootPart then
+		return false, "Admin character root is not available"
+	end
+
+	local rootCFrame = rootPart.CFrame
+	local forward = getHorizontalUnit(rootCFrame.LookVector, Vector3.zAxis)
+	local right = getHorizontalUnit(rootCFrame.RightVector, Vector3.xAxis)
+	local center = rootPart.Position
+		+ forward * STRESS_GRID_FORWARD_DISTANCE
+		+ Vector3.yAxis * STRESS_GRID_HEIGHT
+	local firstColumnOffset = -((STRESS_GRID_COLUMNS - 1) * STRESS_GRID_SPACING * 0.5)
+	local firstRowOffset = -((STRESS_GRID_ROWS - 1) * STRESS_GRID_SPACING * 0.5)
+	local skinId = BombSkinService:GetEquippedSkinId(adminPlayer)
+
+	stressGridSerial += 1
+	local serial = stressGridSerial
+	local launched = 0
+	for row = 1, STRESS_GRID_ROWS do
+		local rowOffset = firstRowOffset + ((row - 1) * STRESS_GRID_SPACING)
+		for column = 1, STRESS_GRID_COLUMNS do
+			local columnOffset = firstColumnOffset + ((column - 1) * STRESS_GRID_SPACING)
+			local index = (row - 1) * STRESS_GRID_COLUMNS + column
+			local origin = center + right * columnOffset + Vector3.yAxis * rowOffset
+			local accepted = BombProjectileService:Launch({
+				owner = adminPlayer,
+				projectileId = ("AdminStressGrid_%d_%d_%02d"):format(adminPlayer.UserId, serial, index),
+				bombType = BombProjectileConfig.BombType.Normal,
+				skinId = skinId,
+				origin = origin,
+				aimDirection = Vector3.new(0, -1, 0),
+				remainingFuse = STRESS_GRID_FUSE_SECONDS,
+				modifier = {
+					physics = {
+						launchSpeed = 0,
+						upwardVelocity = 0,
+					},
+				},
+			})
+			if accepted then
+				launched += 1
+			end
+		end
+	end
+
+	if launched <= 0 then
+		return false, "No stress bombs launched"
+	end
+
+	return true, ("Spawned %d stress bombs"):format(launched)
+end
+
+local function runCastlesCarpetBomb(adminPlayer: Player): (boolean, string?)
+	if not BombProjectileService:IsEnabled() then
+		return false, "Bomb projectile service is disabled"
+	end
+	if os.clock() < carpetBombRunningUntil then
+		return false, "Castles carpet bomb is already running"
+	end
+
+	local roundState = RoundService:GetState()
+	if typeof(roundState) ~= "table" or roundState.selectedMapId ~= CARPET_BOMB_MAP_ID then
+		return false, "Carpet bomb only works during a Castles round"
+	end
+
+	local marker = getCarpetBombMarker()
+	if not marker then
+		return false, "Missing active Castles CarpetBomb part"
+	end
+
+	local skinId = BombSkinService:GetEquippedSkinId(adminPlayer)
+	carpetBombSerial += 1
+	carpetBombRunningUntil = os.clock() + CARPET_BOMB_DURATION_SECONDS + CARPET_BOMB_FUSE_SECONDS
+	local serial = carpetBombSerial
+	local random = Random.new((adminPlayer.UserId * 9973) + serial)
+
+	for index = 1, CARPET_BOMB_COUNT do
+		local alpha = if CARPET_BOMB_COUNT <= 1 then 0.5 else (index - 1) / (CARPET_BOMB_COUNT - 1)
+		local origin = getCarpetBombOrigin(marker, alpha, random)
+		local aimDirection = getCarpetBombAim(marker, random)
+		local delaySeconds = CARPET_BOMB_DURATION_SECONDS * alpha
+
+		task.delay(delaySeconds, function()
+			if not adminPlayer.Parent then
+				return
+			end
+
+			BombProjectileService:Launch({
+				owner = adminPlayer,
+				projectileId = ("%d:AdminCarpetBomb_%d_%03d"):format(adminPlayer.UserId, serial, index),
+				sourceType = "Admin",
+				bombType = BombProjectileConfig.BombType.Bouncy,
+				skinId = skinId,
+				origin = origin,
+				aimDirection = aimDirection,
+				remainingFuse = CARPET_BOMB_FUSE_SECONDS,
+				modifier = {
+					physics = {
+						launchSpeed = CARPET_BOMB_DROP_SPEED,
+						upwardVelocity = 0,
+					},
+				},
+			})
+		end)
+	end
+
+	return true, ("Started Castles carpet bomb: %d bombs over %.1fs"):format(CARPET_BOMB_COUNT, CARPET_BOMB_DURATION_SECONDS)
+end
+
 local function dispatchCommand(adminPlayer: Player, command: string, payload): AdminResult
 	if command == "round.forceStart" then
 		local mapId = if typeof(payload) == "table" then payload.mapId else nil
 		local ok, message = RoundService:AdminForceStart(mapId)
+		if ok and not RunService:IsStudio() and RoundService.GetEligiblePlayerCount() < RoundConfig.MinPlayers then
+			local fillOk = StudioAIBotService:RequestAdminFillNextRound({
+				targetTeamSize = ADMIN_FORCE_START_BOT_TARGET_TEAM_SIZE,
+				maxBotsTotal = ADMIN_FORCE_START_BOT_MAX_TOTAL,
+			})
+			if fillOk then
+				message = ("%s NPC fill queued."):format(if message and message ~= "" then message .. " " else "")
+			end
+		end
 		return result(ok, message or "", getStatePayload())
 	elseif command == "round.reset" then
 		local ok, message = RoundService:AdminResetRound()
@@ -359,6 +559,12 @@ local function dispatchCommand(adminPlayer: Player, command: string, payload): A
 		return result(true, "Playing POTG cutscene", getStatePayload())
 	elseif command == "bomb.demoAllExplosions" then
 		local ok, message = runExplosionDemo(adminPlayer)
+		return result(ok, message or "", getStatePayload())
+	elseif command == "bomb.stressExplosionGrid" then
+		local ok, message = runExplosionStressGrid(adminPlayer)
+		return result(ok, message or "", getStatePayload())
+	elseif command == "bomb.carpetBombCastles" then
+		local ok, message = runCastlesCarpetBomb(adminPlayer)
 		return result(ok, message or "", getStatePayload())
 	end
 

@@ -73,7 +73,11 @@ MovementController._smoothedMoveDirection = Vector3.zero
 MovementController._smoothedFacingDirection = Vector3.zero
 MovementController._smoothedFacingYaw = nil :: number?
 MovementController._sprintHeld = false
+MovementController._sprintKeyboardHeld = false
+MovementController._sprintMobileToggled = false
 MovementController._crouchHeld = false
+MovementController._crouchKeyboardHeld = false
+MovementController._crouchMobileToggled = false
 MovementController._crouchPressConsumedBySlide = false
 MovementController._isCrouching = false
 MovementController._slidePhase = SLIDE_PHASE_NONE
@@ -2208,7 +2212,9 @@ function MovementController:_unbindCharacter()
 	self._smoothedMoveDirection = Vector3.zero
 	self._smoothedFacingDirection = Vector3.zero
 	self._smoothedFacingYaw = nil
+	self._sprintKeyboardHeld = false
 	self._sprintHeld = false
+	self._crouchKeyboardHeld = false
 	self._crouchHeld = false
 	self._crouchPressConsumedBySlide = false
 	self._isCrouching = false
@@ -2366,6 +2372,7 @@ function MovementController:_step(dt: number)
 	self:_updateGroundSlide(now, dt, inputMoveDirection, isGrounded)
 	self:_updateAirCarry(now, dt, inputMoveDirection, isGrounded)
 	self:_updateGroundRunout(now, dt, inputMoveDirection, isGrounded)
+	self:_syncMobileCrouchToggleAfterSlide()
 
 	local isSliding = self:_isGroundSlide() and isGrounded
 	local isAirCarry = self:_isAirCarry()
@@ -2558,18 +2565,29 @@ function MovementController:_step(dt: number)
 	})
 end
 
-function MovementController:_handleSprintAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
-	if inputState == Enum.UserInputState.Begin then
-		self._sprintHeld = true
-	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
-		self._sprintHeld = false
-	end
-
-	return Enum.ContextActionResult.Pass
+function MovementController:_syncSprintHeld()
+	self._sprintHeld = self._sprintKeyboardHeld or self._sprintMobileToggled
 end
 
-function MovementController:_handleCrouchAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
-	if inputState == Enum.UserInputState.Begin then
+function MovementController:_syncMobileCrouchToggleAfterSlide()
+	if not (self._crouchMobileToggled and self._crouchHeld and self._crouchPressConsumedBySlide) then
+		return
+	end
+
+	if self._slideRequestPending or self:_isGroundSlide() or self:_isAirCarry() or self:_isGroundRunout() then
+		return
+	end
+
+	self._crouchPressConsumedBySlide = false
+end
+
+function MovementController:_setCrouchHeldInternal(held: boolean)
+	local nextHeld = held == true
+	if self._crouchHeld == nextHeld then
+		return
+	end
+
+	if nextHeld then
 		if not self._crouchHeld then
 			local slideIntent = self._sprintHeld
 			self._slideRequestPending = slideIntent
@@ -2579,10 +2597,46 @@ function MovementController:_handleCrouchAction(_actionName: string, inputState:
 			self._crouchPressConsumedBySlide = slideIntent
 		end
 		self._crouchHeld = true
-	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+	else
 		self._crouchHeld = false
 		self._crouchPressConsumedBySlide = false
 		self._slideRequestPending = false
+	end
+end
+
+function MovementController:_syncCrouchHeld()
+	self:_setCrouchHeldInternal(self._crouchKeyboardHeld or self._crouchMobileToggled)
+end
+
+function MovementController:SetSprintHeld(held: boolean)
+	self._sprintMobileToggled = held == true
+	self:_syncSprintHeld()
+end
+
+function MovementController:SetCrouchHeld(held: boolean)
+	self._crouchMobileToggled = held == true
+	self:_syncCrouchHeld()
+end
+
+function MovementController:_handleSprintAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
+	if inputState == Enum.UserInputState.Begin then
+		self._sprintKeyboardHeld = true
+		self:_syncSprintHeld()
+	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+		self._sprintKeyboardHeld = false
+		self:_syncSprintHeld()
+	end
+
+	return Enum.ContextActionResult.Pass
+end
+
+function MovementController:_handleCrouchAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
+	if inputState == Enum.UserInputState.Begin then
+		self._crouchKeyboardHeld = true
+		self:_syncCrouchHeld()
+	elseif inputState == Enum.UserInputState.End or inputState == Enum.UserInputState.Cancel then
+		self._crouchKeyboardHeld = false
+		self:_syncCrouchHeld()
 	end
 
 	return Enum.ContextActionResult.Pass
@@ -2670,6 +2724,8 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	character:SetAttribute(AIR_CONTROL_LAUNCH_SOURCE_ATTR, AIR_LAUNCH_SOURCE_DEFAULT)
 	character:SetAttribute(AIR_CONTROL_LAUNCH_SERIAL_ATTR, self._airControlLaunchSerial)
 	character:SetAttribute(AIR_CONTROL_LAUNCHED_AT_ATTR, 0)
+	self:_syncSprintHeld()
+	self:_syncCrouchHeld()
 
 	RunService:BindToRenderStep(RENDER_STEP_NAME, RENDER_PRIORITY, function(dt)
 		local token = RuntimeProfiler.Begin("Client/MovementController/Render")

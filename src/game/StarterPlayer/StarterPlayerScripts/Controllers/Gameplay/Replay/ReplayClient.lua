@@ -24,6 +24,8 @@ local ReplayAvatarFactory = require(script.Parent:WaitForChild("ReplayAvatarFact
 local ReplayCharacterVisualPool = require(script.Parent:WaitForChild("ReplayCharacterVisualPool"))
 local ReplayLocalRecorder = require(script.Parent:WaitForChild("ReplayLocalRecorder"))
 local ReplayPayloadPrep = require(script.Parent:WaitForChild("ReplayPayloadPrep"))
+local ReplayHeldBombVisual = require(script.Parent:WaitForChild("ReplayHeldBombVisual"))
+local ReplaySyntheticBombs = require(script.Parent:WaitForChild("ReplaySyntheticBombs"))
 local KillEffectController = nil
 local ReplayAnimationDriver = nil
 
@@ -94,7 +96,7 @@ local EXPLOSION_VFX_CLEANUP_SECONDS = 4
 local BURST_MARKER_LIFETIME = 0.45
 local CAMERA_SMOOTH_RESPONSIVENESS = 8
 local CAMERA_DEFAULT_FOV = 72
-local ANIMATION_STATE_SEND_RATE = 15
+local ANIMATION_STATE_SEND_RATE = 30
 local ANIMATION_STATE_SEND_INTERVAL = 1 / ANIMATION_STATE_SEND_RATE
 local MAX_AVATAR_TEMPLATE_CACHE = 32
 local MAX_REPLAY_POSE_JOINTS = 32
@@ -102,6 +104,7 @@ local MIN_REPLAY_CAMERA_FOV = 20
 local MAX_REPLAY_CAMERA_FOV = 120
 local POTG_REPLAY_END_FADE_SECONDS = 0.25
 local DEBUG_REPLAY_ANIMATION = false
+local ENABLE_REPLAY_POSE_JOINTS = true
 local DEBUG_REPLAY_POSE_JOINTS = false
 local DEBUG_REPLAY_TIMING = false
 local DEBUG_REPLAY_CLIENT = RunService:IsStudio()
@@ -720,6 +723,7 @@ local function makeAvatarCharacterVisual(
 		poseJoints = poseJoints,
 		animationDriver = animationDriver,
 		hipBomb = hipBomb,
+		bombSkinId = bombSkinId,
 		lastCFrame = nil,
 		replayPoolKey = ReplayCharacterVisualPool.BuildKey("avatar", userId, teamName, bombSkinId, displayName),
 	}
@@ -918,7 +922,22 @@ local function applyPoseSnapshots(visual, leftSnapshot, rightSnapshot, alpha: nu
 	return applied > 0
 end
 
-local function updateReplayHipBomb(visual, cframe: CFrame, alive: boolean?, snapshot)
+local replayHeldBombDeps = {
+	prepareReplayClone = prepareReplayClone,
+	pivotReplayInstance = pivotReplayInstance,
+	attachReplayBombPulse = attachReplayBombPulse,
+	updateReplayBombPulse = updateReplayBombPulse,
+}
+
+local function destroyReplayHeldBomb(visual)
+	ReplayHeldBombVisual.Destroy(visual)
+end
+
+local function updateReplayHeldBomb(visual, alive: boolean?, snapshot, replayTime: number): boolean
+	return ReplayHeldBombVisual.Update(visual, alive, snapshot, replayTime, replayHeldBombDeps)
+end
+
+local function updateReplayHipBomb(visual, cframe: CFrame, alive: boolean?, snapshot, heldBombVisible: boolean?)
 	local hipBomb = visual and visual.hipBomb
 	if not hipBomb then
 		return
@@ -927,7 +946,7 @@ local function updateReplayHipBomb(visual, cframe: CFrame, alive: boolean?, snap
 	local animationState = if typeof(snapshot) == "table" and typeof(snapshot.animationState) == "table"
 		then snapshot.animationState
 		else {}
-	local visible = alive ~= false and animationState.bombCooking ~= true
+	local visible = alive ~= false and heldBombVisible ~= true and animationState.bombCooking ~= true
 	hipBomb:SetVisible(visible)
 	if not visible then
 		return
@@ -947,11 +966,14 @@ local function updateReplayHipBomb(visual, cframe: CFrame, alive: boolean?, snap
 	end
 end
 
-local function setCharacterCFrame(visual, cframe: CFrame, alive: boolean?, snapshot, leftSnapshot, rightSnapshot, alpha: number?)
+local function setCharacterCFrame(visual, cframe: CFrame, alive: boolean?, snapshot, leftSnapshot, rightSnapshot, alpha: number?, replayTime: number?)
 	local poseApplied = false
 	local resolvedCFrame = cframe
-	if DEBUG_REPLAY_POSE_JOINTS and visual.avatar then
+	if visual.avatar and (ENABLE_REPLAY_POSE_JOINTS or DEBUG_REPLAY_POSE_JOINTS) then
 		poseApplied = applyPoseSnapshots(visual, leftSnapshot or snapshot, rightSnapshot or snapshot, alpha or 0)
+		if poseApplied then
+			RuntimeProfiler.Count("Client/Replay/PoseApplied")
+		end
 	end
 
 	visual.lastCFrame = resolvedCFrame
@@ -987,10 +1009,11 @@ local function setCharacterCFrame(visual, cframe: CFrame, alive: boolean?, snaps
 		if visual.highlight then
 			visual.highlight.Enabled = true
 		end
-		if visual.animationDriver and not (DEBUG_REPLAY_POSE_JOINTS and poseApplied) then
+		if visual.animationDriver and not poseApplied then
 			visual.animationDriver:Step(snapshot, resolvedCFrame)
 		end
-		updateReplayHipBomb(visual, resolvedCFrame, alive, snapshot)
+		local heldBombVisible = updateReplayHeldBomb(visual, alive, snapshot, replayTime or 0)
+		updateReplayHipBomb(visual, resolvedCFrame, alive, snapshot, heldBombVisible)
 		return
 	end
 
@@ -1009,13 +1032,15 @@ local function setCharacterCFrame(visual, cframe: CFrame, alive: boolean?, snaps
 	if visual.highlight then
 		visual.highlight.Enabled = true
 	end
-	updateReplayHipBomb(visual, resolvedCFrame, alive, snapshot)
+	local heldBombVisible = updateReplayHeldBomb(visual, alive, snapshot, replayTime or 0)
+	updateReplayHipBomb(visual, resolvedCFrame, alive, snapshot, heldBombVisible)
 end
 
 local function hideCharacter(visual)
 	for _, entry in ipairs(visual.parts) do
 		setPartVisible(entry.part, false)
 	end
+	destroyReplayHeldBomb(visual)
 	if visual.hipBomb then
 		visual.hipBomb:SetVisible(false)
 	end
@@ -1304,6 +1329,7 @@ local collectReplayMeta = ReplayPayloadPrep.CollectReplayMeta
 local collectPlayerMeta = ReplayPayloadPrep.CollectPlayerMeta
 local preloadAvatarTemplates = ReplayPayloadPrep.PrewarmAvatarTemplates
 local collectBombMeta = ReplayPayloadPrep.CollectBombMeta
+local collectThrownBombMeta = ReplayPayloadPrep.CollectThrownBombMeta
 local findFramePair = ReplayPayloadPrep.FindFramePair
 local interpolateSnapshot = ReplayPayloadPrep.InterpolateSnapshot
 
@@ -2012,7 +2038,7 @@ local function updateVisuals(state, left, right, alpha: number, replayTime: numb
 	for key, visual in pairs(state.playerVisuals) do
 		local cframe, snapshot = interpolateSnapshot(left.players[key], right.players[key], alpha)
 		if cframe then
-			setCharacterCFrame(visual, cframe, snapshot and snapshot.alive, snapshot, left.players[key], right.players[key], alpha)
+			setCharacterCFrame(visual, cframe, snapshot and snapshot.alive, snapshot, left.players[key], right.players[key], alpha, replayTime)
 		else
 			hideCharacter(visual)
 		end
@@ -2024,6 +2050,14 @@ local function updateVisuals(state, left, right, alpha: number, replayTime: numb
 			hideBomb(visual)
 		elseif cframe then
 			setBombCFrame(visual, cframe, snapshot, replayTime)
+		elseif state.synthesizedBombs and state.synthesizedBombs[key] then
+			local syntheticCFrame, syntheticSnapshot = ReplaySyntheticBombs.GetCFrame(state.synthesizedBombs[key], replayTime)
+			if syntheticCFrame then
+				setBombCFrame(visual, syntheticCFrame, syntheticSnapshot, replayTime)
+				RuntimeProfiler.Count("Client/Replay/SynthesizedBombFrames")
+			else
+				hideBomb(visual)
+			end
 		else
 			hideBomb(visual)
 		end
@@ -2181,6 +2215,7 @@ function ReplayClient:CancelReplay(reason: string?)
 	end)
 
 	for _, visual in pairs(state.playerVisuals or {}) do
+		destroyReplayHeldBomb(visual)
 		if ReplayCharacterVisualPool.Release(visual) then
 			continue
 		end
@@ -2205,9 +2240,11 @@ function ReplayClient:CancelReplay(reason: string?)
 		end)
 	end
 	if state.mapContext then
+		local mapDebug = ReplayMapSimulator.GetDebugInfo(state.mapContext)
 		pcall(function()
 			ReplayMapSimulator.Destroy(state.mapContext)
 		end)
+		state._endedMapDebugInfo = mapDebug
 	end
 	if state.scene then
 		pcall(function()
@@ -2223,7 +2260,27 @@ function ReplayClient:CancelReplay(reason: string?)
 		"playhead",
 		state.playhead,
 		"end",
-		state.endTime
+		state.endTime,
+		"destructionEvents",
+		if typeof(state.destructionEvents) == "table" then #state.destructionEvents else 0,
+		"normalizedDestructionEvents",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.normalizedDestructionEvents else nil,
+		"baselineDestructionEvents",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.baselineDestructionEvents else nil,
+		"appliedDestructionEvents",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.appliedDestructionEvents else nil,
+		"applyFailures",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.applyFailures else nil,
+		"targetFailures",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.targetFailures else nil,
+		"targetsSkippedByCap",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.replayTargetsSkippedByCap else nil,
+		"targetsSkippedByPrefilter",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.replayTargetsSkippedByPrefilter else nil,
+		"debrisParts",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.debrisPartCount else nil,
+		"debrisPayloadBlocks",
+		if typeof(state._endedMapDebugInfo) == "table" then state._endedMapDebugInfo.debrisPayloadBlocks else nil
 	)
 	self.ReplayEnded:Fire(ReplayClient.BuildReplaySignalPayloadFromState(state, reason or "Canceled"))
 end
@@ -2259,6 +2316,7 @@ function ReplayClient:_getStateBuilderDeps()
 		collectPlayerMeta = collectPlayerMeta,
 		preloadAvatarTemplates = preloadAvatarTemplates,
 		collectBombMeta = collectBombMeta,
+		collectThrownBombMeta = collectThrownBombMeta,
 		reserveReplayObjects = reserveReplayObjects,
 		makeCharacterVisual = makeCharacterVisual,
 		makeBombVisual = makeBombVisual,
@@ -2495,6 +2553,7 @@ function ReplayClient:PlayReplay(payload): boolean
 		started = true
 		state.previousCameraSpectating = if state.cameraState then state.cameraState.wasSpectating else LocalPlayer:GetAttribute(CAMERA_SPECTATING_ATTR)
 		LocalPlayer:SetAttribute(CAMERA_SPECTATING_ATTR, true)
+		local mapDebug = ReplayMapSimulator.GetDebugInfo(state.mapContext)
 		ReplayClient.DebugReplayClient(
 			"Replay started",
 			state.replayType,
@@ -2513,7 +2572,23 @@ function ReplayClient:PlayReplay(payload): boolean
 			"hasRecordedCamera",
 			state.hasRecordedCamera,
 			"overlay",
-			state.overlay ~= nil
+			state.overlay ~= nil,
+			"destructionEvents",
+			if typeof(state.destructionEvents) == "table" then #state.destructionEvents else 0,
+			"normalizedDestructionEvents",
+			mapDebug.normalizedDestructionEvents,
+			"baselineDestructionEvents",
+			mapDebug.baselineDestructionEvents,
+			"skippedDestructionBeforeWindow",
+			mapDebug.skippedDestructionEventsBeforeWindow,
+			"skippedDestructionAfterWindow",
+			mapDebug.skippedDestructionEventsAfterWindow,
+			"targetsSkippedByCap",
+			mapDebug.replayTargetsSkippedByCap,
+			"targetsSkippedByPrefilter",
+			mapDebug.replayTargetsSkippedByPrefilter,
+			"debrisPayloadBlocks",
+			mapDebug.debrisPayloadBlocks
 		)
 		self.ReplayStarted:Fire(ReplayClient.BuildReplaySignalPayloadFromState(state, "Started"))
 		RunService:UnbindFromRenderStep(REPLAY_RENDER_STEP_NAME)

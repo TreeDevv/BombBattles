@@ -1,72 +1,55 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Icon = require(ReplicatedStorage.Packages.topbarplus)
-local BundlesController = require(script.Parent:WaitForChild("BundlesController"))
 local DailyRewardController = require(script.Parent:WaitForChild("DailyRewardController"))
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
-local GameUiVisibilityController = require(script.Parent:WaitForChild("GameUiVisibilityController"))
+local PlaytimeRewardController = require(script.Parent:WaitForChild("PlaytimeRewardController"))
 
 local ICON_STATES = { "Deselected", "Selected", "Viewing" }
-local HIDE_UI_ICON_NAME = "TopbarHideUI"
-local HIDE_UI_LABEL = "Hide UI"
-local SHOW_UI_LABEL = "Show UI"
+local PLAYTIME_REWARDS_ICON_NAME = "TopbarPlaytimeRewards"
+local PLAYTIME_NOTICE_ID_PREFIX = "PlaytimeRewardClaimable"
 
 local TOPBAR_ITEMS = {
 	{
 		name = "TopbarLoginRewards",
-		label = "Login Rewards",
+		label = "📅",
+		caption = "Login Rewards",
 		order = 10,
-		width = 132,
+		width = 48,
 		open = function()
 			DailyRewardController:OpenMenu()
 		end,
 	},
 	{
-		name = "TopbarExtra",
-		label = "EXTRA",
+		name = "TopbarCodes",
+		label = "🎟️",
+		caption = "Codes",
 		order = 20,
-		width = 78,
-		dropdown = {
-			{
-				name = "TopbarCodes",
-				label = "Codes",
-				frameName = "Codes",
-			},
-			{
-				name = "TopbarPlaytimeRewards",
-				label = "Playtime Rewards",
-				frameName = "PlaytimeRewards",
-			},
-		},
+		width = 48,
+		frameName = "Codes",
+	},
+	{
+		name = PLAYTIME_REWARDS_ICON_NAME,
+		label = "🎁",
+		caption = "Playtime Rewards",
+		order = 30,
+		width = 48,
+		frameName = "PlaytimeRewards",
 	},
 	{
 		name = "TopbarStats",
-		label = "Stats",
-		order = 30,
-		width = 72,
+		label = "📊",
+		caption = "Stats",
+		order = 40,
+		width = 48,
 		frameName = "Stats",
 	},
 	{
-		name = "TopbarBundles",
-		label = "Bundles",
-		order = 35,
-		width = 96,
-		open = function()
-			BundlesController:Open()
-		end,
-	},
-	{
-		name = HIDE_UI_ICON_NAME,
-		label = HIDE_UI_LABEL,
-		order = 40,
-		width = 92,
-		hideUiToggle = true,
-	},
-	{
 		name = "TopbarSettings",
-		label = "Settings",
+		label = "⚙️",
+		caption = "Settings",
 		order = 50,
-		width = 96,
+		width = 48,
 		frameName = "Settings",
 	},
 }
@@ -76,6 +59,8 @@ local TopbarButtonsController = {}
 TopbarButtonsController._icons = {} :: { any }
 TopbarButtonsController._iconsByName = {} :: { [string]: any }
 TopbarButtonsController._rebuildSerial = 0
+TopbarButtonsController._playtimeClaimableCount = 0
+TopbarButtonsController._playtimeNoticeClear = Instance.new("BindableEvent")
 
 local function destroyExistingIcon(name: string)
 	local existingIcon = Icon.getIcon(name)
@@ -104,6 +89,10 @@ local function createTextIcon(config): any
 		icon:setLabel(config.label, stateName)
 	end
 
+	if config.caption then
+		icon:setCaption(config.caption)
+	end
+
 	applyDesiredWidth(icon, config.width)
 
 	if config.order then
@@ -113,9 +102,20 @@ local function createTextIcon(config): any
 	return icon
 end
 
-local function setIconLabel(icon: any, label: string)
-	for _, stateName in ipairs(ICON_STATES) do
-		icon:setLabel(label, stateName)
+function TopbarButtonsController:_setPlaytimeClaimableCount(count: number)
+	local normalizedCount = math.max(0, math.floor(tonumber(count) or 0))
+	self._playtimeClaimableCount = normalizedCount
+
+	local icon = self._iconsByName[PLAYTIME_REWARDS_ICON_NAME]
+	if not icon then
+		return
+	end
+
+	self._playtimeNoticeClear:Fire()
+	icon:clearNotices()
+
+	for index = 1, normalizedCount do
+		icon:notify(self._playtimeNoticeClear.Event, PLAYTIME_NOTICE_ID_PREFIX .. tostring(index))
 	end
 end
 
@@ -129,13 +129,6 @@ local function bindIconAction(icon: any, config)
 	end
 end
 
-local function createDropdownItem(config): any
-	local icon = createTextIcon(config)
-	bindIconAction(icon, config)
-	icon:oneClick(true)
-	return icon
-end
-
 function TopbarButtonsController:_destroyIcons()
 	for _, icon in ipairs(self._icons) do
 		icon:destroy()
@@ -145,9 +138,6 @@ function TopbarButtonsController:_destroyIcons()
 
 	for _, config in ipairs(TOPBAR_ITEMS) do
 		destroyExistingIcon(config.name)
-		for _, dropdownConfig in ipairs(config.dropdown or {}) do
-			destroyExistingIcon(dropdownConfig.name)
-		end
 	end
 end
 
@@ -156,48 +146,11 @@ function TopbarButtonsController:_trackIcon(icon: any, name: string)
 	self._iconsByName[name] = icon
 end
 
-function TopbarButtonsController:_syncHiddenState()
-	local hidden = GameUiVisibilityController:IsHidden()
-	local hideIcon = self._iconsByName[HIDE_UI_ICON_NAME]
-
-	for name, icon in pairs(self._iconsByName) do
-		if name ~= HIDE_UI_ICON_NAME then
-			icon:setEnabled(not hidden)
-		end
-	end
-
-	if hideIcon then
-		hideIcon:setEnabled(true)
-		setIconLabel(hideIcon, if hidden then SHOW_UI_LABEL else HIDE_UI_LABEL)
-	end
-end
-
-function TopbarButtonsController:_toggleUiHidden()
-	GameUiVisibilityController:ToggleHidden()
-	self:_syncHiddenState()
-end
-
 function TopbarButtonsController:_createIcon(config): any
 	local icon = createTextIcon(config):setRight()
 
-	if config.dropdown then
-		local dropdownIcons = {}
-		for _, dropdownConfig in ipairs(config.dropdown) do
-			local dropdownIcon = createDropdownItem(dropdownConfig)
-			self._iconsByName[dropdownConfig.name] = dropdownIcon
-			table.insert(dropdownIcons, dropdownIcon)
-		end
-		icon:setDropdown(dropdownIcons)
-	else
-		if config.hideUiToggle then
-			icon:bindEvent("selected", function()
-				self:_toggleUiHidden()
-			end)
-		else
-			bindIconAction(icon, config)
-		end
-		icon:oneClick(true)
-	end
+	bindIconAction(icon, config)
+	icon:oneClick(true)
 
 	self:_trackIcon(icon, config.name)
 	return icon
@@ -209,13 +162,18 @@ function TopbarButtonsController:_rebuildIcons()
 	for _, config in ipairs(TOPBAR_ITEMS) do
 		self:_createIcon(config)
 	end
-	self:_syncHiddenState()
+	self:_setPlaytimeClaimableCount(self._playtimeClaimableCount)
 end
 
 function TopbarButtonsController:OnStart()
 	self._rebuildSerial += 1
 	local serial = self._rebuildSerial
 	self:_rebuildIcons()
+	self:_setPlaytimeClaimableCount(PlaytimeRewardController:GetClaimableCount())
+
+	PlaytimeRewardController.ClaimableCountChanged:Connect(function(count)
+		self:_setPlaytimeClaimableCount(count)
+	end)
 
 	for _, delaySeconds in ipairs({ 0.5, 2, 5, 8, 15, 25 }) do
 		task.delay(delaySeconds, function()

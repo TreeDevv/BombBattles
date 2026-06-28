@@ -4,6 +4,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local CrateRollConfig = require(ReplicatedStorage.Shared.Config.CrateRollConfig)
+local DebugEconomyConfig = require(ReplicatedStorage.Shared.Config.DebugEconomyConfig)
 local RobuxPurchases = require(ReplicatedStorage.Shared.Config.Lists.RobuxPurchases)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 local Notify = require(ReplicatedStorage.Shared.UI.Notify)
@@ -24,10 +25,17 @@ local PROMPT_FREE_ROLL_SOURCE = CrateRollConfig.PromptFreeRollSource
 local CASH_KEY = Schema.Cash and Schema.Cash.key or "cash"
 local HISTORY_KEY = Schema.CrateRollHistory and Schema.CrateRollHistory.key or "crateRollHistory"
 local CRATE_TOKENS_KEY = Schema.CrateTokens and Schema.CrateTokens.key or "crateTokens"
+local PENDING_PROMPT_PURCHASE_TTL_SECONDS = 120
 
 type RequestWindow = {
 	startedAt: number,
 	count: number,
+}
+
+type PendingPromptPurchase = {
+	productKey: string,
+	crateId: string,
+	requestedAt: number,
 }
 
 local CrateRollService = {}
@@ -37,6 +45,7 @@ local resultRemote: RemoteEvent? = nil
 local requestWindows: { [Player]: RequestWindow } = {}
 local rollLocks: { [Player]: boolean } = {}
 local promptConnections: { [ProximityPrompt]: RBXScriptConnection } = {}
+local pendingPromptPurchases: { [Player]: PendingPromptPurchase } = {}
 local rng = Random.new()
 local rollSerial = 0
 
@@ -67,7 +76,7 @@ local function response(ok: boolean, code: string, message: string?, data: any?)
 end
 
 local function getCash(player: Player): number
-	return math.max(0, tonumber(DataService:Get(player, CASH_KEY)) or 0)
+	return DebugEconomyConfig.GetEffectiveCash(player, DataService:Get(player, CASH_KEY))
 end
 
 local function roundNonNegative(value: any): number
@@ -142,10 +151,70 @@ local function isProductEnabled(productKey: string?): boolean
 	return productId ~= nil and productId > 0
 end
 
+local function getPromptProductForCrate(crateDefinition): (string?, any?, string?)
+	local productKey = crateDefinition.productKey
+	local productConfig = getProductConfig(productKey)
+	if not productConfig then
+		return nil, nil, "This crate is unavailable."
+	end
+
+	local productId = math.floor(tonumber(productConfig.id) or 0)
+	if productId <= 0 then
+		return productKey, nil, "This crate is not available yet."
+	end
+
+	return productKey, productConfig, nil
+end
+
+local function buildProductPurchasePayload(crateDefinition, productKey: string, productConfig)
+	return {
+		crateId = crateDefinition.id,
+		crateDisplayName = crateDefinition.displayName,
+		productKey = productKey,
+		productId = math.floor(tonumber(productConfig.id) or 0),
+		displayName = tostring(productConfig.displayName or crateDefinition.displayName),
+		price = math.floor(tonumber(productConfig.price) or 0),
+	}
+end
+
+local function setPendingPromptPurchase(player: Player, productKey: string, crateId: string)
+	pendingPromptPurchases[player] = {
+		productKey = productKey,
+		crateId = crateId,
+		requestedAt = os.clock(),
+	}
+end
+
+local function clearPendingPromptPurchase(player: Player, productKey: string?)
+	local pending = pendingPromptPurchases[player]
+	if not pending then
+		return
+	end
+	if typeof(productKey) == "string" and productKey ~= "" and pending.productKey ~= productKey then
+		return
+	end
+	pendingPromptPurchases[player] = nil
+end
+
+local function hasPendingPromptPurchase(player: Player, productKey: string, crateId: string): boolean
+	local pending = pendingPromptPurchases[player]
+	if not pending then
+		return false
+	end
+
+	if os.clock() - pending.requestedAt > PENDING_PROMPT_PURCHASE_TTL_SECONDS then
+		pendingPromptPurchases[player] = nil
+		return false
+	end
+
+	return pending.productKey == productKey and pending.crateId == crateId
+end
+
 local function buildStatePayload(player: Player)
 	return {
 		crates = CrateRollConfig.GetCratesPayload(),
 		cash = getCash(player),
+		infiniteCash = DebugEconomyConfig.HasInfiniteCash(player),
 		crateTokens = getCrateTokens(player),
 		ownedBombSkins = BombSkinService:GetOwnedSkins(player),
 		bombSkinCopies = BombSkinService:GetSkinCopies(player),
@@ -318,22 +387,26 @@ local function grantRoll(player: Player, crateDefinition, source: string): (bool
 	return true, rollPayload
 end
 
+local function rollToken(player: Player, crateDefinition, source: string)
+	local ok, rollPayload = grantRoll(player, crateDefinition, source)
+	if not ok then
+		return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
+	end
+
+	if not consumeCrateToken(player, crateDefinition.id) then
+		return response(false, "TokenUnavailable", "Crate token is unavailable.", buildStatePayload(player))
+	end
+
+	return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
+		roll = rollPayload,
+		reward = rollPayload.reward,
+		state = buildStatePayload(player),
+	})
+end
+
 local function rollCash(player: Player, crateDefinition)
 	if getCrateTokenCount(player, crateDefinition.id) > 0 then
-		local ok, rollPayload = grantRoll(player, crateDefinition, "CrateToken")
-		if not ok then
-			return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
-		end
-
-		if not consumeCrateToken(player, crateDefinition.id) then
-			return response(false, "TokenUnavailable", "Crate token is unavailable.", buildStatePayload(player))
-		end
-
-		return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
-			roll = rollPayload,
-			reward = rollPayload.reward,
-			state = buildStatePayload(player),
-		})
+		return rollToken(player, crateDefinition, "CrateToken")
 	end
 
 	local price = tonumber(crateDefinition.cashPrice)
@@ -352,7 +425,7 @@ local function rollCash(player: Player, crateDefinition)
 		return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
 	end
 
-	if price > 0 then
+	if price > 0 and not DebugEconomyConfig.ShouldBypassCashSpend(player) then
 		DataService:Set(player, CASH_KEY, function(currentValue)
 			return math.max(0, (tonumber(currentValue) or 0) - price)
 		end)
@@ -367,27 +440,28 @@ end
 
 local function rollPrompt(player: Player, crateDefinition)
 	if getCrateTokenCount(player, crateDefinition.id) > 0 then
-		local ok, rollPayload = grantRoll(player, crateDefinition, "CrateToken")
-		if not ok then
-			return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
-		end
-
-		if not consumeCrateToken(player, crateDefinition.id) then
-			return response(false, "TokenUnavailable", "Crate token is unavailable.", buildStatePayload(player))
-		end
-
-		return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
-			roll = rollPayload,
-			reward = rollPayload.reward,
-			state = buildStatePayload(player),
-		})
+		return rollToken(player, crateDefinition, "CrateToken")
 	end
 
 	if tonumber(crateDefinition.cashPrice) ~= nil then
 		return rollCash(player, crateDefinition)
 	end
 
-	return response(false, "PurchaseRequired", "This crate requires a purchase.", buildStatePayload(player))
+	local productKey, productConfig, unavailableMessage = getPromptProductForCrate(crateDefinition)
+	if not productKey or not productConfig then
+		return response(
+			false,
+			"PurchaseUnavailable",
+			unavailableMessage or "This crate is not available yet.",
+			buildStatePayload(player)
+		)
+	end
+
+	setPendingPromptPurchase(player, productKey, crateDefinition.id)
+	return response(false, "PurchaseRequired", "This crate requires a purchase.", {
+		productPurchase = buildProductPurchasePayload(crateDefinition, productKey, productConfig),
+		state = buildStatePayload(player),
+	})
 end
 
 local function rollPromptFree(player: Player, crateDefinition)
@@ -437,6 +511,7 @@ local function resolveRequest(rawRequest)
 	return {
 		action = action,
 		crateId = rawRequest.crateId,
+		productKey = rawRequest.productKey,
 	}
 end
 
@@ -463,6 +538,9 @@ local function handleInvoke(player: Player, rawRequest)
 		return withRollLock(player, function()
 			return rollCash(player, crateDefinition)
 		end)
+	elseif request.action == CrateRollConfig.Actions.ClearPromptPurchase then
+		clearPendingPromptPurchase(player, request.productKey)
+		return response(true, "OK", "OK", nil)
 	end
 
 	return response(false, "UnknownAction", "Unknown crate action.", nil)
@@ -537,6 +615,20 @@ end
 local function handlePurchaseProcessed(player: Player, productKey: string, context)
 	local productConfig = getProductConfig(productKey)
 	if productConfig and tonumber(productConfig.crateTokens) ~= nil then
+		local crateDefinition = CrateRollConfig.GetDefinition(productConfig.crateId)
+		if not crateDefinition or not hasPendingPromptPurchase(player, productKey, crateDefinition.id) then
+			return
+		end
+
+		clearPendingPromptPurchase(player, productKey)
+		local resultPayload = withRollLock(player, function()
+			return rollToken(player, crateDefinition, "Robux")
+		end)
+
+		if typeof(resultPayload) == "table" then
+			resultPayload.productContext = context
+		end
+		fireRollResult(player, resultPayload)
 		return
 	end
 
@@ -643,6 +735,7 @@ end
 function CrateRollService:OnPlayerRemoving(player: Player)
 	requestWindows[player] = nil
 	rollLocks[player] = nil
+	pendingPromptPurchases[player] = nil
 end
 
 return CrateRollService

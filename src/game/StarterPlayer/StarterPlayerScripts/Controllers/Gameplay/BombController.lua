@@ -2,7 +2,6 @@ local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
@@ -87,6 +86,8 @@ BombController._started = false
 BombController._primaryBombInputSuppressed = false
 BombController._abilityThrowActive = false
 BombController._abilityReleaseCallback = nil :: (() -> ())?
+BombController._pendingAbilityProjectileId = nil :: string?
+BombController._pendingAbilityAimDirection = nil :: Vector3?
 BombController._lastDebugLogTimes = {} :: { [string]: number }
 BombController._heldBombs = {} :: {
 	[Player]: {
@@ -546,6 +547,8 @@ function BombController:_playPredictedLocalThrow(rootPart: BasePart, aimDirectio
 	local projectileId = self:_createPredictedProjectileId()
 	local currentTime = getServerTime()
 	local cookStartedAt = LocalPlayer:GetAttribute(ATTR.CookStartedAt)
+	local origin = getThrowOrigin(rootPart)
+	local initialVelocity = getProjectileLaunchVelocity(aimDirection)
 	local remainingFuse = BombConfig.FuseSeconds
 	local fuseStartedAt = currentTime
 	if typeof(cookStartedAt) == "number" and cookStartedAt > 0 then
@@ -558,10 +561,10 @@ function BombController:_playPredictedLocalThrow(rootPart: BasePart, aimDirectio
 		projectileId = projectileId,
 		customProjectile = true,
 		bombSkinId = getPlayerBombSkinId(LocalPlayer),
-		origin = getThrowOrigin(rootPart),
-		position = getThrowOrigin(rootPart),
-		initialVelocity = getProjectileLaunchVelocity(aimDirection),
-		velocity = getProjectileLaunchVelocity(aimDirection),
+		origin = origin,
+		position = origin,
+		initialVelocity = initialVelocity,
+		velocity = initialVelocity,
 		acceleration = Vector3.new(0, -(workspace.Gravity * BombConfig.ProjectileGravityScale), 0),
 		startedAt = currentTime,
 		fuseStartedAt = fuseStartedAt,
@@ -584,7 +587,15 @@ function BombController:_fireReleaseFromAnimation()
 
 	local abilityReleaseCallback = self._abilityReleaseCallback
 	if abilityReleaseCallback then
+		local rootPart = getRootPart()
+		if rootPart then
+			local aimDirection = getMouseAimDirection()
+			self._pendingAbilityAimDirection = aimDirection
+			self._pendingAbilityProjectileId = self:_playPredictedLocalThrow(rootPart, aimDirection)
+		end
 		abilityReleaseCallback()
+		self._pendingAbilityProjectileId = nil
+		self._pendingAbilityAimDirection = nil
 	elseif self._releaseRemote then
 		local rootPart = getRootPart()
 		if rootPart then
@@ -770,6 +781,22 @@ end
 
 function BombController:SetPrimaryBombInputSuppressed(suppressed: boolean)
 	self._primaryBombInputSuppressed = suppressed == true
+end
+
+function BombController:AugmentAbilityActivationPayload(payload: any): any
+	local projectileId = self._pendingAbilityProjectileId
+	if typeof(projectileId) ~= "string" or projectileId == "" then
+		return payload
+	end
+
+	local nextPayload = if typeof(payload) == "table" then table.clone(payload) else {}
+	if typeof(nextPayload.clientProjectileId) ~= "string" or nextPayload.clientProjectileId == "" then
+		nextPayload.clientProjectileId = projectileId
+	end
+	if typeof(nextPayload.aimDirection) ~= "Vector3" and typeof(self._pendingAbilityAimDirection) == "Vector3" then
+		nextPayload.aimDirection = self._pendingAbilityAimDirection
+	end
+	return nextPayload
 end
 
 function BombController:BeginAbilityThrowHold(): boolean

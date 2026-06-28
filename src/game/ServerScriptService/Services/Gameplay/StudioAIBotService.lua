@@ -21,6 +21,7 @@ local TEMPLATE_FOLDER_PATH = { "GameAssets", "NPCTemplates" }
 local TEMPLATE_NAME = "StudioAITargetR6"
 local BOT_USER_ID_BASE = -900000
 local MONITOR_INTERVAL_SECONDS = 1
+local ADMIN_FILL_REQUEST_TIMEOUT_SECONDS = 60
 local PATH_TIMEOUT_SECONDS = 3
 local AIM_SOLVER_STEPS = 36
 local MIN_AIM_SOLVER_SECONDS = 0.12
@@ -57,6 +58,11 @@ local StudioAIBotService = {}
 local bots: { BotRecord } = {}
 local monitorRunning = false
 local activeRoundId: number? = nil
+local adminFillPending = false
+local adminFillRoundId: number? = nil
+local adminFillRequestedAt = 0
+local adminFillTargetTeamSize = 0
+local adminFillMaxBotsTotal = 0
 local nextBotId = 0
 local rng = Random.new()
 
@@ -66,9 +72,33 @@ local function getConfig()
 	return if typeof(config) == "table" then config else {}
 end
 
-local function isEnabled(): boolean
+local function isStudioBotsEnabled(): boolean
 	local config = getConfig()
 	return RunService:IsStudio() and config.Enabled == true
+end
+
+local function clearAdminFill()
+	adminFillPending = false
+	adminFillRoundId = nil
+	adminFillRequestedAt = 0
+	adminFillTargetTeamSize = 0
+	adminFillMaxBotsTotal = 0
+end
+
+local function isAdminFillPending(): boolean
+	if not adminFillPending then
+		return false
+	end
+	if os.clock() - adminFillRequestedAt <= ADMIN_FILL_REQUEST_TIMEOUT_SECONDS then
+		return true
+	end
+
+	clearAdminFill()
+	return false
+end
+
+local function shouldMaintainBotsForRound(roundId: number): boolean
+	return isStudioBotsEnabled() or adminFillRoundId == roundId
 end
 
 local function readNumber(value: any, fallback: number, minValue: number?, maxValue: number?): number
@@ -741,7 +771,7 @@ local function spawnBot(teamName: string, spawnPart: BasePart, roundId: number)
 		bot.throwToken += 1
 		local respawnDelay = readNumber(getConfig().RespawnSeconds, 4, 0, 60)
 		task.delay(respawnDelay, function()
-			if activeRoundId ~= roundId or not isEnabled() then
+			if activeRoundId ~= roundId or not shouldMaintainBotsForRound(roundId) then
 				return
 			end
 			local state = RoundService:GetState()
@@ -793,15 +823,32 @@ local function syncBotsForTeam(teamName: string, map: Model, roundId: number, ta
 end
 
 local function syncBots()
-	if not isEnabled() then
+	local studioEnabled = isStudioBotsEnabled()
+	local pendingAdminFill = isAdminFillPending()
+	if not studioEnabled and not pendingAdminFill and not adminFillRoundId then
 		cleanupAll()
+		monitorRunning = false
 		return
 	end
 
 	local state = RoundService:GetState()
 	if not isCurrentRound(state) then
 		cleanupAll()
+		if adminFillRoundId then
+			clearAdminFill()
+		end
 		return
+	end
+
+	if not studioEnabled and adminFillRoundId ~= state.roundId then
+		if pendingAdminFill then
+			adminFillPending = false
+			adminFillRoundId = state.roundId
+		else
+			cleanupAll()
+			clearAdminFill()
+			return
+		end
 	end
 
 	local map = getActiveMap()
@@ -815,15 +862,19 @@ local function syncBots()
 		activeRoundId = state.roundId
 	end
 
-	local config = getConfig()
-	local targetTeamSize = math.floor(readNumber(config.TargetTeamSize, 6, 0, 24))
-	local maxBotsTotal = math.floor(readNumber(config.MaxBotsTotal, targetTeamSize * 2, 0, 48))
+	local targetTeamSize = adminFillTargetTeamSize
+	local maxBotsTotal = adminFillMaxBotsTotal
+	if studioEnabled then
+		local config = getConfig()
+		targetTeamSize = math.floor(readNumber(config.TargetTeamSize, 6, 0, 24))
+		maxBotsTotal = math.floor(readNumber(config.MaxBotsTotal, targetTeamSize * 2, 0, 48))
+	end
 	syncBotsForTeam(RoundConfig.Teams.Red.name, map, state.roundId, targetTeamSize, maxBotsTotal)
 	syncBotsForTeam(RoundConfig.Teams.Blue.name, map, state.roundId, targetTeamSize, maxBotsTotal)
 end
 
-function StudioAIBotService:OnStart()
-	if not RunService:IsStudio() or monitorRunning then
+local function ensureMonitorRunning()
+	if monitorRunning then
 		return
 	end
 
@@ -837,6 +888,28 @@ function StudioAIBotService:OnStart()
 			task.wait(MONITOR_INTERVAL_SECONDS)
 		end
 	end)
+end
+
+function StudioAIBotService:RequestAdminFillNextRound(options): boolean
+	if RunService:IsStudio() then
+		return false
+	end
+
+	local targetTeamSize = if typeof(options) == "table" then options.targetTeamSize else nil
+	local maxBotsTotal = if typeof(options) == "table" then options.maxBotsTotal else nil
+	adminFillPending = true
+	adminFillRoundId = nil
+	adminFillRequestedAt = os.clock()
+	adminFillTargetTeamSize = math.floor(readNumber(targetTeamSize, 6, 1, 24))
+	adminFillMaxBotsTotal = math.floor(readNumber(maxBotsTotal, adminFillTargetTeamSize * 2, 1, 48))
+	ensureMonitorRunning()
+	return true
+end
+
+function StudioAIBotService:OnStart()
+	if isStudioBotsEnabled() then
+		ensureMonitorRunning()
+	end
 end
 
 return StudioAIBotService

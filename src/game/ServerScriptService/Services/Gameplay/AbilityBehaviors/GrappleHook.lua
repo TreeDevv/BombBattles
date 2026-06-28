@@ -12,6 +12,7 @@ local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local CombatMotionService = require(ServerScriptService.Services.CombatMotionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
@@ -428,11 +429,11 @@ local function cancelSession(session: GrappleSession, reason: string)
 
 	local targetRoot = session.targetRoot
 	if targetRoot and targetRoot.Parent and session.kind ~= "Bomb" then
-		targetRoot.AssemblyLinearVelocity = Vector3.zero
 		if session.targetPlayer then
-			pcall(function()
-				targetRoot:SetNetworkOwner(session.targetPlayer)
-			end)
+			CombatMotionService.SendSetVelocity(session.targetPlayer, session.targetPlayer.Character, Vector3.zero, {
+				sourceType = "Ability",
+				sourceId = "GrappleHook",
+			})
 		end
 	end
 
@@ -608,7 +609,11 @@ local function stepEnemySession(session: GrappleSession, now: number)
 	local definition = AbilityConfig.GetDefinition("GrappleHook")
 	local pullSpeed = getDefinitionNumber(definition, "enemyPullSpeed", 95)
 	local upwardBias = getDefinitionNumber(definition, "enemyUpwardBias", 14)
-	targetRoot.AssemblyLinearVelocity = offset.Unit * pullSpeed + Vector3.yAxis * upwardBias
+	CombatMotionService.SendSetVelocity(targetPlayer, targetPlayer.Character, offset.Unit * pullSpeed + Vector3.yAxis * upwardBias, {
+		sourceType = "Ability",
+		sourceId = "GrappleHook",
+		movementSuppressUntil = session.pullStartAt + session.maxDuration,
+	})
 end
 
 local function stepBombSession(session: GrappleSession, now: number, dt: number)
@@ -795,10 +800,6 @@ local function createEnemySession(context: ServerActivateContext, rootPart: Base
 	activeByShooter[context.player] = session
 	activeByTarget[enemyPlayer] = session
 	ensureHeartbeat()
-
-	pcall(function()
-		enemyRoot:SetNetworkOwner(nil)
-	end)
 
 	local damage = getDefinitionNumber(definition, "damageOnEnemyHit", 20)
 	local humanoid = enemyPlayer.Character and enemyPlayer.Character:FindFirstChildOfClass("Humanoid")

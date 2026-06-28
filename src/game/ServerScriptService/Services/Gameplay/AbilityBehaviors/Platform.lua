@@ -1,11 +1,13 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local CombatMotionService = require(ServerScriptService.Services.CombatMotionService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -78,6 +80,20 @@ local function getCharacterRoot(player: Player): BasePart?
 		return rootPart
 	end
 	return nil
+end
+
+local function setCharacterVelocity(rootPart: BasePart, velocity: Vector3, suppressSeconds: number?)
+	local character = rootPart:FindFirstAncestorOfClass("Model")
+	local player = character and Players:GetPlayerFromCharacter(character)
+	if player then
+		CombatMotionService.SendSetVelocity(player, character, velocity, {
+			sourceType = "Ability",
+			sourceId = "Platform",
+			movementSuppressSeconds = suppressSeconds,
+		})
+	else
+		rootPart.AssemblyLinearVelocity = velocity
+	end
 end
 
 local function getActiveMap(): Instance?
@@ -522,11 +538,11 @@ local function stabilizeRoot(rootPart: BasePart, definition: AbilityDefinition)
 		horizontal = horizontal.Unit * maxHorizontalSpeed
 	end
 
-	rootPart.AssemblyLinearVelocity = Vector3.new(
+	setCharacterVelocity(rootPart, Vector3.new(
 		horizontal.X,
 		math.max(velocity.Y, -maxDownwardSpeed),
 		horizontal.Z
-	)
+	), 0.12)
 end
 
 local function rescueRootToPlatform(rootPart: BasePart, placement: Placement, definition: AbilityDefinition)
@@ -560,11 +576,11 @@ local function rescueRootToPlatform(rootPart: BasePart, placement: Placement, de
 	if maxHorizontalSpeed > 0 and horizontal.Magnitude > maxHorizontalSpeed then
 		horizontal = horizontal.Unit * maxHorizontalSpeed
 	end
-	rootPart.AssemblyLinearVelocity = Vector3.new(
+	setCharacterVelocity(rootPart, Vector3.new(
 		horizontal.X,
 		math.max(getNumber(definition, "rescueUpwardVelocity", 4), 0),
 		horizontal.Z
-	)
+	), 0.18)
 end
 
 local function stabilizeCharacterForLanding(rootPart: BasePart, definition: AbilityDefinition, seconds: number)
@@ -585,11 +601,11 @@ local function stabilizeCharacterForLanding(rootPart: BasePart, definition: Abil
 			local velocity = rootPart.AssemblyLinearVelocity
 			local maxDownwardSpeed = math.abs(getNumber(definition, "stabilizedDownwardSpeed", -6))
 			local horizontalDamping = math.clamp(getNumber(definition, "rescueTickHorizontalDamping", 0.82), 0, 1)
-			rootPart.AssemblyLinearVelocity = Vector3.new(
+			setCharacterVelocity(rootPart, Vector3.new(
 				velocity.X * horizontalDamping,
 				math.max(velocity.Y, -maxDownwardSpeed),
 				velocity.Z * horizontalDamping
-			)
+			), interval + 0.05)
 			task.wait(interval)
 		end
 		if STABILIZE_SERIAL_BY_ROOT[rootPart] == serial then

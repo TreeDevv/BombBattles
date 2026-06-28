@@ -4,6 +4,7 @@ local RunService = game:GetService("RunService")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local Globals = require(ReplicatedStorage.Shared.Config.Lists.Globals)
+local DebugEconomyConfig = require(ReplicatedStorage.Shared.Config.DebugEconomyConfig)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 local ProfileService = require(ServerScriptService.Packages.ProfileService)
@@ -23,6 +24,7 @@ local LOSSES_KEY = Schema.Losses and Schema.Losses.key or "losses"
 local CURRENT_WIN_STREAK_KEY = Schema.CurrentWinStreak and Schema.CurrentWinStreak.key or "currentWinStreak"
 local BEST_WIN_STREAK_KEY = Schema.BestWinStreak and Schema.BestWinStreak.key or "bestWinStreak"
 local ABILITY_USAGE_KEY = Schema.AbilityUsage and Schema.AbilityUsage.key or "abilityUsage"
+local ABILITY_GAMES_USED_KEY = Schema.AbilityGamesUsed and Schema.AbilityGamesUsed.key or "abilityGamesUsed"
 
 local ATTR_BY_KEY: { [string]: string } = {}
 if CASH_KEY then
@@ -127,7 +129,9 @@ local function createLeaderstats(player: Player, profile: any)
 
 	local value = Instance.new("StringValue")
 	value.Name = "cash"
-	value.Value = Globals.formatNumber(tonumber(profile.Data[CASH_KEY]) or 0, true)
+	value.Value = if DebugEconomyConfig.HasInfiniteCash(player)
+		then DebugEconomyConfig.DisplayCashText
+		else Globals.formatNumber(tonumber(profile.Data[CASH_KEY]) or 0, true)
 	value.Parent = folder
 end
 
@@ -139,7 +143,9 @@ local function updateLeaderstatsCash(player: Player, cashValue: number)
 
 	local cash = stats:FindFirstChild("cash")
 	if cash and cash:IsA("StringValue") then
-		cash.Value = Globals.formatNumber(tonumber(cashValue) or 0, true)
+		cash.Value = if DebugEconomyConfig.HasInfiniteCash(player)
+			then DebugEconomyConfig.DisplayCashText
+			else Globals.formatNumber(tonumber(cashValue) or 0, true)
 	end
 end
 
@@ -346,11 +352,19 @@ function DataService:OnPlayerAdded(player: Player)
 	createReplica(player, profile)
 	createLeaderstats(player, profile)
 	processGlobalUpdates(player, profile)
+
+	if Leaderboards.PublishPlayer(self, player) then
+		Leaderboards.refresh(self, false)
+	end
 end
 
 function DataService:OnPlayerRemoving(player: Player)
 	flushTimePlayedForPlayer(player, true)
-	Leaderboards.PublishPlayer(self, player)
+	if Leaderboards.PublishPlayer(self, player, nil, nil, {
+		removeZeroValues = true,
+	}) then
+		Leaderboards.refresh(self, false)
+	end
 
 	local profile = PROFILES[player]
 	if profile then
@@ -438,6 +452,42 @@ function DataService:RecordAbilityUsage(player: Player, abilityId: string)
 	end)
 end
 
+function DataService:RecordAbilityGameUsed(player: Player, abilityId: string, gameKey: string)
+	if not (player and player.Parent == Players) then
+		return
+	end
+	if typeof(abilityId) ~= "string" or abilityId == "" then
+		return
+	end
+	if typeof(gameKey) ~= "string" or gameKey == "" then
+		return
+	end
+
+	self:Set(player, ABILITY_GAMES_USED_KEY, function(currentValue)
+		local usage = if typeof(currentValue) == "table" then deepCopy(currentValue) else {}
+		local record = usage[abilityId]
+		local count = 0
+		local lastGameKey = ""
+
+		if typeof(record) == "table" then
+			count = roundNonNegative(record.count)
+			lastGameKey = if typeof(record.lastGameKey) == "string" then record.lastGameKey else ""
+		elseif typeof(record) == "number" then
+			count = roundNonNegative(record)
+		end
+
+		if lastGameKey == gameKey then
+			return usage
+		end
+
+		usage[abilityId] = {
+			count = count + 1,
+			lastGameKey = gameKey,
+		}
+		return usage
+	end)
+end
+
 function DataService:AdminAddLeaderboardStats(player: Player, increments): (boolean, string?)
 	return Leaderboards.AdminAddStats(self, player, increments)
 end
@@ -493,7 +543,9 @@ local function wipeProfileByUserId(userId: number): (boolean, string?)
 	end
 
 	Leaderboards.RemovePlayer(resolvedUserId)
-	Leaderboards.refresh(DataService, false)
+	Leaderboards.refresh(DataService, false, nil, nil, nil, {
+		broadcast = true,
+	})
 	return true, nil
 end
 

@@ -31,23 +31,32 @@ local MIN_KILL_REPLAY_FRAMES = ReplayClipPolicy.MinKillReplayFrames
 local MIN_KILL_REPLAY_SEND_FRAMES = ReplayClipPolicy.MinKillReplaySendFrames
 local MIN_POTG_REPLAY_FRAMES = ReplayClipPolicy.MinPOTGReplayFrames
 local MIN_POTG_FALLBACK_SEND_FRAMES = 1
-local MAX_ROUND_DESTRUCTION_EVENTS = ReplayClipPolicy.GetPOTGClipCaps().maxDestructionEvents
-local CLIENT_ANIMATION_STATE_MAX_RATE = 20
+local MAX_ROUND_DESTRUCTION_EVENTS = math.max(ReplayClipPolicy.GetPOTGClipCaps().maxDestructionEvents * 4, 512)
+local CLIENT_ANIMATION_STATE_MAX_RATE = 30
 local CLIENT_ANIMATION_STATE_STALE_SECONDS = 0.5
 local MAX_REPLAY_ANIMATION_SPEED = 220
 local CLIENT_REPLAY_SAMPLE_HISTORY_SECONDS = ReplayConstants.BUFFER_SECONDS + 1
-local MAX_REPLAY_VISUAL_SAMPLE_AGE = 0.25
+local MAX_REPLAY_VISUAL_SAMPLE_AGE = 0.12
 local MAX_CLIENT_REPLAY_SAMPLE_SKEW = 2
 local MAX_REPLAY_POSE_JOINTS = 32
 local MAX_REPLAY_JOINT_NAME_LENGTH = 48
 local MIN_REPLAY_CAMERA_FOV = 20
 local MAX_REPLAY_CAMERA_FOV = 120
 local DEBUG_REPLAY_DESTRUCTION_LEAD_SECONDS = 0.5
-local MAX_DEBRIS_PAYLOADS_PER_DESTRUCTION_EVENT = 8
-local MAX_DEBRIS_BLOCKS_PER_DESTRUCTION_EVENT = 72
+local MAX_DEBRIS_PAYLOADS_PER_DESTRUCTION_EVENT = 16
+local MAX_DEBRIS_BLOCKS_PER_DESTRUCTION_EVENT = 160
+local MAX_REPLAY_DESTRUCTION_TARGETS_PER_EVENT = 128
 local MAX_RANDOM_SEED = 2147483647
-local STORE_RECORDED_DEBRIS_PAYLOADS_BY_DEFAULT = false
+local STORE_RECORDED_DEBRIS_PAYLOADS_BY_DEFAULT = true
 local MAX_ARCHIVED_POTG_CLIPS = 16
+local REPLAY_DESTRUCTION_BOOLEAN_OPTION_FIELDS = table.freeze({
+	"forceSubtract",
+	"exactCullTargets",
+	"skipTerminalNoop",
+	"reuseTargetPart",
+	"prefilterTargets",
+	"prefilteredTargets",
+})
 
 local initialized = false
 local running = false
@@ -355,7 +364,10 @@ local function getInferredAnimationState(player: Player, character: Model, human
 		moveMagnitude = if effectiveSpeed > 0.5 then math.clamp(effectiveSpeed / 24, 0, 1) else 0
 	end
 
-	return {
+	local bombCooking = player:GetAttribute(BombConfig.Attributes.Cooking) == true
+	local bombCookStartedAt = getNumberAttribute(player, BombConfig.Attributes.CookStartedAt)
+	local bombSkinId = BombSkinConfig.NormalizeSkinId(player:GetAttribute(BombSkinConfig.AttributeName))
+	local state = {
 		grounded = getBooleanAttribute(character, "Movement_Grounded") or inferGrounded(humanoid),
 		sprinting = getBooleanAttribute(character, "Movement_Sprinting") or effectiveSpeed >= 21,
 		crouching = getBooleanAttribute(character, "Movement_Crouching") or false,
@@ -366,10 +378,23 @@ local function getInferredAnimationState(player: Player, character: Model, human
 		lastJumpKind = getStringAttribute(character, "Movement_LastJumpKind"),
 		shiftLocked = getBooleanAttribute(character, "Camera_ShiftLocked") or false,
 		linearVelocity = clampVectorMagnitude(linearVelocity, MAX_REPLAY_ANIMATION_SPEED) or Vector3.zero,
-		bombCooking = player:GetAttribute(BombConfig.Attributes.Cooking) == true,
-		bombCookStartedAt = getNumberAttribute(player, BombConfig.Attributes.CookStartedAt),
-		bombSkinId = BombSkinConfig.NormalizeSkinId(player:GetAttribute(BombSkinConfig.AttributeName)),
+		bombCooking = bombCooking,
+		bombCookStartedAt = bombCookStartedAt,
+		bombSkinId = bombSkinId,
 	}
+
+	if bombCooking then
+		state.heldBomb = {
+			bombType = BombConfig.RuntimeBombName,
+			bombSkinId = if bombSkinId ~= "" then bombSkinId else BombSkinConfig.DefaultSkinId,
+			fuseStartedAt = bombCookStartedAt,
+			fuseEndsAt = if isFiniteNumber(bombCookStartedAt) then bombCookStartedAt + BombConfig.FuseSeconds else nil,
+			visualScale = BombConfig.HeldVisualScale,
+			sizeScale = BombConfig.HeldVisualScale,
+		}
+	end
+
+	return state
 end
 
 local function mergeClientAnimationState(inferredState, clientState)
@@ -389,6 +414,7 @@ local function mergeClientAnimationState(inferredState, clientState)
 	merged.bombCooking = inferredState.bombCooking
 	merged.bombCookStartedAt = inferredState.bombCookStartedAt
 	merged.bombSkinId = inferredState.bombSkinId
+	merged.heldBomb = inferredState.heldBomb or merged.heldBomb
 	return merged
 end
 
@@ -460,6 +486,36 @@ local function sanitizeReplayPose(payload, sampleTime: number)
 	}
 end
 
+local function sanitizeReplayHeldBomb(payload)
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+
+	local heldBomb = {}
+	local bombSkinId = BombSkinConfig.NormalizeSkinId(payload.bombSkinId)
+	if bombSkinId ~= "" then
+		heldBomb.bombSkinId = bombSkinId
+	end
+	local bombType = sanitizeReplayString(payload.bombType, 48)
+	if bombType then
+		heldBomb.bombType = bombType
+	end
+	if isFiniteNumber(payload.fuseStartedAt) then
+		heldBomb.fuseStartedAt = payload.fuseStartedAt
+	end
+	if isFiniteNumber(payload.fuseEndsAt) then
+		heldBomb.fuseEndsAt = payload.fuseEndsAt
+	end
+	if isFiniteNumber(payload.visualScale) then
+		heldBomb.visualScale = math.clamp(payload.visualScale, 0.25, 5)
+	end
+	if isFiniteNumber(payload.sizeScale) then
+		heldBomb.sizeScale = math.clamp(payload.sizeScale, 0.25, 5)
+	end
+
+	return if next(heldBomb) then heldBomb else nil
+end
+
 local function sanitizeClientAnimationState(payload, currentTime: number)
 	if typeof(payload) ~= "table" then
 		return nil
@@ -516,6 +572,11 @@ local function sanitizeClientAnimationState(payload, currentTime: number)
 	copyNumber("bombCookStartedAt", nil, 0, math.huge)
 	copyString("bombSkinId", nil, BombSkinConfig.MaxSkinIdLength)
 	copyString("lastJumpKind", nil, 32)
+
+	local heldBomb = sanitizeReplayHeldBomb(payload.heldBomb)
+	if heldBomb then
+		state.heldBomb = heldBomb
+	end
 
 	local linearVelocity = clampVectorMagnitude(payload.linearVelocity, MAX_REPLAY_ANIMATION_SPEED)
 	if linearVelocity then
@@ -1293,6 +1354,34 @@ local function copyDebrisPayloads(payloads)
 	return if #results > 0 then results else nil
 end
 
+local function copyDestructionReplayOptions(source, target)
+	if typeof(source) ~= "table" or typeof(target) ~= "table" then
+		return
+	end
+
+	if source.terrainShape == "Ellipsoid" or source.terrainShape == "Sphere" then
+		target.terrainShape = source.terrainShape
+	end
+	if isFiniteNumber(source.terrainVerticalScale) then
+		target.terrainVerticalScale = math.clamp(source.terrainVerticalScale, 0.05, 1)
+	end
+	if isFiniteNumber(source.maxTargetsPerExplosion) then
+		target.maxTargetsPerExplosion = math.clamp(
+			math.floor(source.maxTargetsPerExplosion),
+			1,
+			MAX_REPLAY_DESTRUCTION_TARGETS_PER_EVENT
+		)
+	end
+	if isFiniteNumber(source.transparentCollisionClearance) then
+		target.transparentCollisionClearance = math.clamp(source.transparentCollisionClearance, 0, 80)
+	end
+	for _, fieldName in ipairs(REPLAY_DESTRUCTION_BOOLEAN_OPTION_FIELDS) do
+		if typeof(source[fieldName]) == "boolean" then
+			target[fieldName] = source[fieldName]
+		end
+	end
+end
+
 local function copyDestructionEvent(event, includeDebrisPayloads: boolean?)
 	if typeof(event) ~= "table" then
 		return nil
@@ -1314,6 +1403,7 @@ local function copyDestructionEvent(event, includeDebrisPayloads: boolean?)
 		bombId = event.bombId,
 		ownerUserId = event.ownerUserId,
 	}
+	copyDestructionReplayOptions(event, copy)
 	if includeDebrisPayloads == true then
 		copy.debrisPayloads = copyDebrisPayloads(event.debrisPayloads)
 	end
@@ -2276,8 +2366,12 @@ function ReplayService.RecordMapDestruction(first, second)
 		bombId = payload.bombId,
 		ownerUserId = payload.ownerUserId,
 	}
+	copyDestructionReplayOptions(payload, event)
 	if payload.storeReplayDebrisPayloads == true or STORE_RECORDED_DEBRIS_PAYLOADS_BY_DEFAULT then
 		event.debrisPayloads = copyDebrisPayloads(payload.debrisPayloads)
+		if event.debrisPayloads then
+			RuntimeProfiler.Count("Server/Replay/MapDestructionDebrisPayloadsStored", #event.debrisPayloads)
+		end
 	elseif typeof(payload.debrisPayloads) == "table" then
 		RuntimeProfiler.Count("Server/Replay/MapDestructionDebrisPayloadCopySkipped")
 	end
@@ -2363,11 +2457,13 @@ local function formatCandidateSummary(candidate, index: number): string
 		return ("#%d <invalid>"):format(index)
 	end
 
-	return ("#%d player=%s score=%s kills=%s base=%s reason=%s start=%.3f end=%.3f"):format(
+	return ("#%d player=%s score=%s combat=%s kills=%s damage=%s base=%s reason=%s start=%.3f end=%.3f"):format(
 		index,
 		tostring(candidate.playerUserId),
 		tostring(candidate.score),
+		tostring(candidate.combatRank),
 		tostring(candidate.kills),
+		tostring(candidate.playerDamage),
 		tostring(candidate.baseDamage),
 		tostring(candidate.reason),
 		if isFiniteNumber(candidate.startTime) then candidate.startTime else 0,

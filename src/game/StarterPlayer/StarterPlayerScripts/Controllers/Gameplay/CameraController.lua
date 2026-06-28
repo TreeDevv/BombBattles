@@ -69,6 +69,12 @@ CameraController._headLockedCamera = nil :: Camera?
 CameraController._headLockedSubject = nil :: BasePart?
 CameraController._previousCameraSubject = nil :: Instance?
 CameraController._settingsConnection = nil :: RBXScriptConnection?
+CameraController._touchAimActive = false
+CameraController._touchAimYaw = 0
+CameraController._touchAimPitch = 0
+CameraController._touchAimDistance = 0
+CameraController._touchAimPreviousCameraType = nil :: Enum.CameraType?
+CameraController._touchAimPreviousSubject = nil :: Instance?
 
 local function getControls(): Controls?
 	local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
@@ -168,6 +174,16 @@ local function getEffectiveShiftLocked(manualShiftLocked: boolean, firstPerson: 
 	return manualShiftLocked or firstPerson
 end
 
+local function getLookYawPitch(lookVector: Vector3): (number, number)
+	local direction = if lookVector.Magnitude > 0.001 then lookVector.Unit else Vector3.new(0, 0, -1)
+	return math.atan2(direction.X, direction.Z), math.asin(math.clamp(direction.Y, -1, 1))
+end
+
+local function directionFromYawPitch(yaw: number, pitch: number): Vector3
+	local horizontal = math.cos(pitch)
+	return Vector3.new(math.sin(yaw) * horizontal, math.sin(pitch), math.cos(yaw) * horizontal)
+end
+
 local function isFrameFOVActive(): boolean
 	return LocalPlayer:GetAttribute(FRAME_FOV_ACTIVE_ATTR) == true
 end
@@ -263,6 +279,18 @@ function CameraController:_setShiftLocked(shiftLocked: boolean)
 	end
 end
 
+function CameraController:SetShiftLocked(shiftLocked: boolean)
+	self:_setShiftLocked(shiftLocked == true)
+end
+
+function CameraController:ToggleShiftLocked()
+	self:_setShiftLocked(not self._shiftLocked)
+end
+
+function CameraController:IsShiftLocked(): boolean
+	return self._shiftLocked == true
+end
+
 function CameraController:_restoreCameraSubject(camera: Camera?, character: Model?)
 	if not self._headLockedCamera and not self._headLockedSubject and not self._previousCameraSubject then
 		return
@@ -283,6 +311,47 @@ function CameraController:_restoreCameraSubject(camera: Camera?, character: Mode
 	self._headLockedCamera = nil
 	self._headLockedSubject = nil
 	self._previousCameraSubject = nil
+end
+
+function CameraController:_stopTouchAim(restoreCameraType: boolean)
+	if not self._touchAimActive then
+		return
+	end
+
+	local camera = workspace.CurrentCamera
+	if restoreCameraType and camera then
+		camera.CameraType = self._touchAimPreviousCameraType or Enum.CameraType.Custom
+		if isValidCameraSubject(self._touchAimPreviousSubject) then
+			camera.CameraSubject = self._touchAimPreviousSubject
+		end
+	end
+
+	self._touchAimActive = false
+	self._touchAimDistance = 0
+	self._touchAimPreviousCameraType = nil
+	self._touchAimPreviousSubject = nil
+end
+
+function CameraController:_updateTouchAimCamera(camera: Camera, character: Model)
+	if not self._touchAimActive then
+		return
+	end
+
+	local rootPart = getRootPart(character)
+	if not rootPart then
+		self:_stopTouchAim(true)
+		return
+	end
+
+	local focusPosition = rootPart.Position + Vector3.new(0, CameraConfig.TouchAimFocusHeight, 0)
+	local lookDirection = directionFromYawPitch(self._touchAimYaw, self._touchAimPitch)
+	if lookDirection.Magnitude <= 0.001 then
+		lookDirection = Vector3.new(0, 0, -1)
+	end
+
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = CFrame.lookAt(focusPosition - lookDirection.Unit * self._touchAimDistance, focusPosition)
+	camera.Focus = CFrame.new(focusPosition)
 end
 
 function CameraController:_updateHeadLockedCameraSubject(camera: Camera, character: Model, effectiveShiftLocked: boolean)
@@ -489,6 +558,69 @@ function CameraController:PlayBombThrowPunch()
 			CameraConfig.ThrowShakeRotationInfluence * shakeScale
 		)
 	end
+end
+
+function CameraController:BeginTouchAim()
+	local camera = workspace.CurrentCamera
+	local character = self:_getCharacter()
+	if not (camera and character and getRootPart(character)) then
+		return false
+	end
+
+	local yaw, pitch = getLookYawPitch(camera.CFrame.LookVector)
+	local distance = (camera.CFrame.Position - camera.Focus.Position).Magnitude
+	self._touchAimYaw = yaw
+	self._touchAimPitch = math.clamp(
+		pitch,
+		math.rad(CameraConfig.TouchAimMinPitchDegrees),
+		math.rad(CameraConfig.TouchAimMaxPitchDegrees)
+	)
+	self._touchAimDistance = math.clamp(
+		if distance > 0.1 then distance else CameraConfig.TouchAimMinDistance,
+		CameraConfig.TouchAimMinDistance,
+		CameraConfig.TouchAimMaxDistance
+	)
+	self._touchAimPreviousCameraType = camera.CameraType
+	self._touchAimPreviousSubject = camera.CameraSubject
+	self._touchAimActive = true
+	self:_updateTouchAimCamera(camera, character)
+	return true
+end
+
+function CameraController:ApplyTouchAimDelta(delta: Vector2)
+	if not self._touchAimActive or typeof(delta) ~= "Vector2" then
+		return false
+	end
+
+	self._touchAimYaw -= delta.X * CameraConfig.TouchAimYawSensitivity
+	self._touchAimPitch = math.clamp(
+		self._touchAimPitch - delta.Y * CameraConfig.TouchAimPitchSensitivity,
+		math.rad(CameraConfig.TouchAimMinPitchDegrees),
+		math.rad(CameraConfig.TouchAimMaxPitchDegrees)
+	)
+
+	local camera = workspace.CurrentCamera
+	local character = self:_getCharacter()
+	if camera and character then
+		self:_updateTouchAimCamera(camera, character)
+	end
+	return true
+end
+
+function CameraController:EndTouchAim()
+	self:_stopTouchAim(true)
+end
+
+function CameraController:BeginBombTouchAim()
+	return self:BeginTouchAim()
+end
+
+function CameraController:ApplyBombTouchAimDelta(delta: Vector2)
+	return self:ApplyTouchAimDelta(delta)
+end
+
+function CameraController:EndBombTouchAim()
+	self:EndTouchAim()
 end
 
 function CameraController:PlayAirBurstPunch()
@@ -913,6 +1045,7 @@ function CameraController:_step(dt: number)
 		if camera then
 			self._currentFOV = camera.FieldOfView
 		end
+		self:_stopTouchAim(true)
 		self:_forceMouseUnlock()
 		self._headLockedCamera = nil
 		self._headLockedSubject = nil
@@ -922,11 +1055,14 @@ function CameraController:_step(dt: number)
 
 	local character = self:_getCharacter()
 	if not camera or not character then
+		self:_stopTouchAim(true)
 		self:_resetCameraState(camera)
 		self:_forceMouseUnlock()
 		self:_restoreCameraSubject(camera, character)
 		return
 	end
+
+	self:_updateTouchAimCamera(camera, character)
 
 	local firstPerson = isFirstPerson(camera)
 	local effectiveShiftLocked = getEffectiveShiftLocked(self._shiftLocked, firstPerson)
@@ -1105,7 +1241,7 @@ end
 
 function CameraController:_handleShiftLockAction(_actionName: string, inputState: Enum.UserInputState, _inputObject: InputObject)
 	if inputState == Enum.UserInputState.Begin then
-		self:_setShiftLocked(not self._shiftLocked)
+		self:ToggleShiftLocked()
 	end
 
 	return Enum.ContextActionResult.Sink

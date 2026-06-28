@@ -155,6 +155,9 @@
         "BombProjectileService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombProjectileService.lua"
         },
+        "CombatMotionService": {
+          "$path": "src/game/ServerScriptService/Services/Gameplay/CombatMotionService.lua"
+        },
         "BombSkinService": {
           "$path": "src/game/ServerScriptService/Services/Gameplay/BombSkinService.lua"
         },
@@ -299,6 +302,9 @@
           "BombTrajectoryClient": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/BombTrajectoryClient.lua"
           },
+          "CombatMotionController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/CombatMotionController.lua"
+          },
           "EmoteController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/Gameplay/EmoteController.lua"
           },
@@ -370,6 +376,15 @@
           },
           "ScoreboardController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ScoreboardController.lua"
+          },
+          "PCControlsController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/PCControlsController.lua"
+          },
+          "MobileButtonsController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/MobileButtonsController.lua"
+          },
+          "MobileShiftLockController": {
+            "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/MobileShiftLockController.lua"
           },
           "ResultsScreenController": {
             "$path": "src/game/StarterPlayer/StarterPlayerScripts/Controllers/UI/ResultsScreenController.lua"
@@ -491,6 +506,10 @@
     "StarterGui": {
       "$className": "StarterGui",
       "$ignoreUnknownInstances": true,
+      "Mobile/ConsoleShiftLock": {
+        "$className": "ScreenGui",
+        "$ignoreUnknownInstances": true
+      },
       "HoverClient": {
         "$path": "src/game/StarterGui/HoverClient"
       }

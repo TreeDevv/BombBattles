@@ -11,6 +11,7 @@ local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
+local CombatMotionService = require(ServerScriptService.Services.CombatMotionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
@@ -210,12 +211,6 @@ end
 
 local function restorePulledPlayer(player: Player)
 	PULLED_PLAYERS[player] = nil
-	local _, _, rootPart = getPlayerParts(player)
-	if rootPart then
-		pcall(function()
-			rootPart:SetNetworkOwner(player)
-		end)
-	end
 end
 
 local function stopHeartbeatIfIdle()
@@ -264,7 +259,7 @@ local function pullPlayers(dt: number)
 				continue
 			end
 
-			local _, _, rootPart = getPlayerParts(target)
+			local character, _, rootPart = getPlayerParts(target)
 			if not rootPart then
 				continue
 			end
@@ -285,11 +280,12 @@ local function pullPlayers(dt: number)
 			pulledThisStep[target] = true
 			if not PULLED_PLAYERS[target] then
 				PULLED_PLAYERS[target] = true
-				pcall(function()
-					rootPart:SetNetworkOwner(nil)
-				end)
 			end
-			rootPart.AssemblyLinearVelocity = rootPart.AssemblyLinearVelocity:Lerp(desired, alpha)
+			CombatMotionService.SendSetVelocity(target, character, rootPart.AssemblyLinearVelocity:Lerp(desired, alpha), {
+				sourceType = "Ability",
+				sourceId = "BlackHole",
+				movementSuppressUntil = math.min(field.activeEndsAt, currentTime + 0.35),
+			})
 		end
 	end
 
@@ -429,7 +425,7 @@ function BlackHole.OnActivate(context: ServerActivateContext): AbilityActivation
 
 	local origin = getThrowOrigin(rootPart)
 	local aimDirection = getAimDirectionFromPayload(context.payload, rootPart.CFrame.LookVector)
-	local projectileId = createProjectileId(context.player)
+	local projectileId = AbilityBehaviorServices.GetClientProjectileId(context) or createProjectileId(context.player)
 	local skinId = BombSkinService:GetEquippedSkinId(context.player)
 	local launchSpeed = getDefinitionNumber(context.definition, "projectileLaunchSpeed", BombConfig.ProjectileLaunchSpeed)
 	local upwardVelocity = getDefinitionNumber(context.definition, "projectileUpwardVelocity", BombConfig.ProjectileUpwardVelocity)

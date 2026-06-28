@@ -600,6 +600,8 @@ local function formatSubheading(state): string
 
 	if stateName == RoundStates.WaitingForPlayers then
 		return "Waiting for players..."
+	elseif stateName == RoundStates.MapVoting then
+		return "Vote for a map..."
 	elseif stateName == RoundStates.Intermission then
 		return "Intermission..."
 	elseif stateName == RoundStates.AssigningTeams then
@@ -677,12 +679,16 @@ local function render()
 	local state = RoundService:GetState()
 	local stateName = state and state.state
 	local isActive = stateName == RoundStates.Active
+	local isMapVoting = stateName == RoundStates.MapVoting
 	local isIntermission = stateName == RoundStates.Intermission
-	local usesIntermissionAppearance = isIntermission or stateName == RoundStates.WaitingForPlayers
+	local usesIntermissionAppearance = isMapVoting or isIntermission or stateName == RoundStates.WaitingForPlayers
 
 	applyScreenStyle(currentWidgets, usesIntermissionAppearance == true)
 
-	if isIntermission then
+	if isMapVoting then
+		currentWidgets.mainHeading.Text = "MAP VOTING"
+		currentWidgets.subheading.Text = "Vote for the next map..."
+	elseif isIntermission then
 		currentWidgets.mainHeading.Text = "INTERMISSION"
 		currentWidgets.subheading.Text = "Waiting for next round..."
 	else

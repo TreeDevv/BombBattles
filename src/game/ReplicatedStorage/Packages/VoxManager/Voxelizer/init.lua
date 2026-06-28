@@ -25,6 +25,29 @@ local VoxDestruct = {
 }
 
 local BLOCK_EPSILON = 0.001
+local BEDROCK_AXIS_ALIGNMENT = 0.999
+
+local function getTerrainVerticalScale(options): number
+	if typeof(options) ~= "table" or options.terrainShape ~= "Ellipsoid" then
+		return 1
+	end
+
+	local scale = options.terrainVerticalScale
+	if typeof(scale) ~= "number" or scale ~= scale or scale <= 0 then
+		return 1
+	end
+	return math.clamp(scale, 0.05, 1)
+end
+
+local function getTerrainShapeDistance(worldPosition: Vector3, center: Vector3, options): number
+	local offset = worldPosition - center
+	local verticalScale = getTerrainVerticalScale(options)
+	if verticalScale >= 1 then
+		return offset.Magnitude
+	end
+
+	return Vector3.new(offset.X, offset.Y / verticalScale, offset.Z).Magnitude
+end
 
 local function getConfigNumber(config, name: string, fallback: number): number
 	local value = if config then config[name] else nil
@@ -201,9 +224,17 @@ local function getTerrainDamage(distance: number, sphereRadius: number, terrainC
 	return 0
 end
 
-local function applyTerrainDamageToBlock(block, targetCFrame: CFrame, sphereCenter: Vector3, sphereRadius: number, terrainConfig, sourceInfo)
+local function applyTerrainDamageToBlock(
+	block,
+	targetCFrame: CFrame,
+	sphereCenter: Vector3,
+	sphereRadius: number,
+	terrainConfig,
+	sourceInfo,
+	options
+)
 	local worldPosition = targetCFrame:PointToWorldSpace(block.center)
-	local distance = (worldPosition - sphereCenter).Magnitude
+	local distance = getTerrainShapeDistance(worldPosition, sphereCenter, options)
 	if distance > sphereRadius then
 		return false
 	end
@@ -260,6 +291,90 @@ local function addBlock(blocks, minCorner: Vector3, maxCorner: Vector3)
 	})
 end
 
+local function getBedrockTopY(options): number?
+	if typeof(options) ~= "table" or typeof(options.bedrockTopY) ~= "number" then
+		return nil
+	end
+	local bedrockTopY = options.bedrockTopY
+	if bedrockTopY ~= bedrockTopY or math.abs(bedrockTopY) == math.huge then
+		return nil
+	end
+	return bedrockTopY
+end
+
+local function getLocalBedrockY(targetCFrame: CFrame, bedrockTopY: number): number
+	return targetCFrame:PointToObjectSpace(Vector3.new(targetCFrame.Position.X, bedrockTopY, targetCFrame.Position.Z)).Y
+end
+
+local function getBlockWorldYExtents(targetCFrame: CFrame, block): (number, number)
+	local center = block.center
+	local halfSize = block.size * 0.5
+	local minY = math.huge
+	local maxY = -math.huge
+
+	for xSign = -1, 1, 2 do
+		for ySign = -1, 1, 2 do
+			for zSign = -1, 1, 2 do
+				local localCorner = center + Vector3.new(halfSize.X * xSign, halfSize.Y * ySign, halfSize.Z * zSign)
+				local worldY = targetCFrame:PointToWorldSpace(localCorner).Y
+				minY = math.min(minY, worldY)
+				maxY = math.max(maxY, worldY)
+			end
+		end
+	end
+
+	return minY, maxY
+end
+
+local function isBlockFullyBelowBedrock(block, targetCFrame: CFrame, options): boolean
+	local bedrockTopY = getBedrockTopY(options)
+	if not bedrockTopY then
+		return false
+	end
+
+	local _, maxY = getBlockWorldYExtents(targetCFrame, block)
+	return maxY <= bedrockTopY + BLOCK_EPSILON
+end
+
+local function addRemovedBlock(block, targetCFrame: CFrame, options, remainingBlocks, removedBlocks): boolean
+	local bedrockTopY = getBedrockTopY(options)
+	if not bedrockTopY then
+		table.insert(removedBlocks, block)
+		return true
+	end
+
+	local minWorldY, maxWorldY = getBlockWorldYExtents(targetCFrame, block)
+	if maxWorldY <= bedrockTopY + BLOCK_EPSILON then
+		table.insert(remainingBlocks, block)
+		RuntimeProfiler.Count("Server/Destruction/Voxelizer/BedrockFullyClampedBlocks")
+		return false
+	end
+	if minWorldY >= bedrockTopY - BLOCK_EPSILON then
+		table.insert(removedBlocks, block)
+		return true
+	end
+
+	local upDot = targetCFrame.UpVector:Dot(Vector3.yAxis)
+	if math.abs(upDot) < BEDROCK_AXIS_ALIGNMENT then
+		table.insert(remainingBlocks, block)
+		RuntimeProfiler.Count("Server/Destruction/Voxelizer/BedrockRotatedCrossingBlocks")
+		return false
+	end
+
+	local localBedrockY = getLocalBedrockY(targetCFrame, bedrockTopY)
+	local blockMin = block.center - block.size * 0.5
+	local blockMax = block.center + block.size * 0.5
+	if upDot >= 0 then
+		addBlock(remainingBlocks, blockMin, Vector3.new(blockMax.X, localBedrockY, blockMax.Z))
+		addBlock(removedBlocks, Vector3.new(blockMin.X, localBedrockY, blockMin.Z), blockMax)
+	else
+		addBlock(removedBlocks, blockMin, Vector3.new(blockMax.X, localBedrockY, blockMax.Z))
+		addBlock(remainingBlocks, Vector3.new(blockMin.X, localBedrockY, blockMin.Z), blockMax)
+	end
+	RuntimeProfiler.Count("Server/Destruction/Voxelizer/BedrockSplitBlocks")
+	return true
+end
+
 local function subdivideAABB(
 	aabbCenter: Vector3,
 	halfSize: Vector3,
@@ -284,12 +399,21 @@ local function subdivideAABB(
 
 	if isTerminal then
 		local block = { center = aabbCenter, size = fullSize }
-		if typeof(options) == "table" and options.forceSubtract == true then
-			table.insert(removedBlocks, { center = aabbCenter, size = fullSize })
-		elseif applyTerrainDamageToBlock(block, targetCFrame, sphereCenterWorld, sphereRadius, terrainConfig, sourceInfo) then
-			table.insert(removedBlocks, { center = aabbCenter, size = fullSize })
+		if isBlockFullyBelowBedrock(block, targetCFrame, options) then
+			table.insert(remainingBlocks, block)
+		elseif typeof(options) == "table" and options.forceSubtract == true then
+			local worldPosition = targetCFrame:PointToWorldSpace(block.center)
+			if getTerrainShapeDistance(worldPosition, sphereCenterWorld, options) <= sphereRadius then
+				addRemovedBlock(block, targetCFrame, options, remainingBlocks, removedBlocks)
+			else
+				table.insert(remainingBlocks, block)
+			end
+		elseif
+			applyTerrainDamageToBlock(block, targetCFrame, sphereCenterWorld, sphereRadius, terrainConfig, sourceInfo, options)
+		then
+			addRemovedBlock(block, targetCFrame, options, remainingBlocks, removedBlocks)
 		else
-			table.insert(remainingBlocks, { center = aabbCenter, size = fullSize })
+			table.insert(remainingBlocks, block)
 		end
 		return
 	end
@@ -345,7 +469,8 @@ local function partitionTargetBlocks(targetSize: Vector3, localSphereCenter: Vec
 	)
 	local outsideBlocks = {}
 
-	if impactMax.X - impactMin.X <= BLOCK_EPSILON
+	if
+		impactMax.X - impactMin.X <= BLOCK_EPSILON
 		or impactMax.Y - impactMin.Y <= BLOCK_EPSILON
 		or impactMax.Z - impactMin.Z <= BLOCK_EPSILON
 	then
@@ -412,6 +537,50 @@ local function canReuseTargetPart(target: BasePart, options): boolean
 	return shouldReuseTargetPart(options) and #target:GetChildren() == 0
 end
 
+local function isTextureOrDecalChild(instance: Instance): boolean
+	return instance:IsA("Texture") or instance:IsA("Decal")
+end
+
+local function getTextureOrDecalChildren(target: BasePart): { Instance }
+	local children = {}
+	for _, child in ipairs(target:GetChildren()) do
+		if isTextureOrDecalChild(child) then
+			table.insert(children, child)
+		end
+	end
+	return children
+end
+
+local function clearVoxelTextureOrDecalChildren(part: BasePart)
+	for _, child in ipairs(part:GetChildren()) do
+		if isTextureOrDecalChild(child) then
+			child:Destroy()
+		end
+	end
+end
+
+local function applyVoxelTextureOrDecalChildren(part: BasePart, originalInfo)
+	clearVoxelTextureOrDecalChildren(part)
+
+	local textureOrDecalChildren = originalInfo.TextureOrDecalChildren
+	if typeof(textureOrDecalChildren) ~= "table" then
+		return
+	end
+
+	for _, child in ipairs(textureOrDecalChildren) do
+		if typeof(child) ~= "Instance" or not child.Parent or not isTextureOrDecalChild(child) then
+			continue
+		end
+
+		local ok, clone = pcall(function()
+			return child:Clone()
+		end)
+		if ok and clone and isTextureOrDecalChild(clone) then
+			clone.Parent = part
+		end
+	end
+end
+
 local function configureVoxelPart(
 	part: BasePart,
 	size: Vector3,
@@ -448,6 +617,7 @@ local function configureVoxelPart(
 	end
 
 	part.Material = originalInfo.Material
+	applyVoxelTextureOrDecalChildren(part, originalInfo)
 	part.Name = "MeshedVoxel"
 	part:SetAttribute(sourceInfo.HealthAttribute, sourceInfo.MaxHealth)
 	part:SetAttribute(sourceInfo.DamageMultiplierAttribute, sourceInfo.DamageMultiplier)
@@ -456,7 +626,12 @@ local function configureVoxelPart(
 	end
 end
 
-local function isTargetOutsideSphere(target: BasePart, sphereCenterWorld: Vector3, sphereRadius: number, options): boolean
+local function isTargetOutsideSphere(
+	target: BasePart,
+	sphereCenterWorld: Vector3,
+	sphereRadius: number,
+	options
+): boolean
 	local localSphereCenter = target.CFrame:PointToObjectSpace(sphereCenterWorld)
 	local effectiveSphereRadius = getEffectiveSubtractRadius(target, sphereRadius, options)
 	return Utils.isAABBOutsideSphere(Vector3.zero, target.Size * 0.5, localSphereCenter, effectiveSphereRadius)
@@ -558,7 +733,7 @@ function VoxDestruct.octreeMeshSubtraction(
 	if not impactBlock then
 		RuntimeProfiler.Count("Server/Destruction/Voxelizer/NoImpactSkipped")
 		RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
-		return {}, nil
+		return {}, nil, false
 	end
 
 	if
@@ -570,12 +745,26 @@ function VoxDestruct.octreeMeshSubtraction(
 			center = impactBlock.center,
 			size = impactBlock.size,
 		}
-		if applyTerrainDamageToBlock(block, targetCFrame, sphereCenterWorld, effectiveSphereRadius, terrainConfig, sourceInfo) then
-			table.insert(removedBlocks, block)
+		if isBlockFullyBelowBedrock(block, targetCFrame, options) then
+			RuntimeProfiler.Count("Server/Destruction/Voxelizer/BedrockTerminalNoopSkipped")
+			RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
+			return {}, nil, false
+		elseif
+			applyTerrainDamageToBlock(
+				block,
+				targetCFrame,
+				sphereCenterWorld,
+				effectiveSphereRadius,
+				terrainConfig,
+				sourceInfo,
+				options
+			)
+		then
+			addRemovedBlock(block, targetCFrame, options, remainingBlocks, removedBlocks)
 		else
 			RuntimeProfiler.Count("Server/Destruction/Voxelizer/TerminalNoopSkipped")
 			RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
-			return {}, nil
+			return {}, nil, false
 		end
 	else
 		local subdivideToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/SubdivideImpact")
@@ -599,6 +788,11 @@ function VoxDestruct.octreeMeshSubtraction(
 	RuntimeProfiler.Count("Server/Destruction/Voxelizer/OutsideBlocks", #outsideBlocks)
 	RuntimeProfiler.Count("Server/Destruction/Voxelizer/RemainingBlocksPreMerge", #remainingBlocks)
 	RuntimeProfiler.Count("Server/Destruction/Voxelizer/RemovedBlocks", #removedBlocks)
+	if #removedBlocks == 0 then
+		RuntimeProfiler.Count("Server/Destruction/Voxelizer/BedrockNoopSkipped")
+		RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
+		return {}, nil, false
+	end
 	local mergeToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/GreedyMergeRemaining")
 	local mergedBlocks = Mesh.greedyMergeBlocks(remainingBlocks)
 	RuntimeProfiler.End("Server/Destruction/Voxelizer/GreedyMergeRemaining", mergeToken)
@@ -616,6 +810,7 @@ function VoxDestruct.octreeMeshSubtraction(
 		CollisionGroup = target.CollisionGroup,
 		CastShadow = target.CastShadow,
 		CustomPhysicalProperties = target.CustomPhysicalProperties,
+		TextureOrDecalChildren = getTextureOrDecalChildren(target),
 	}
 
 	local meshedFolder = outputFolder
@@ -668,7 +863,16 @@ function VoxDestruct.octreeMeshSubtraction(
 			part = VoxDestruct.VoxelCache:GetPart()
 			part.Parent = nil
 		end
-		configureVoxelPart(part, voxel.size, worldCFrame, originalInfo, sourceInfo, randomColor, generatedVoxelTag, needsTag)
+		configureVoxelPart(
+			part,
+			voxel.size,
+			worldCFrame,
+			originalInfo,
+			sourceInfo,
+			randomColor,
+			generatedVoxelTag,
+			needsTag
+		)
 		part.Parent = meshedFolder
 	end
 	if reusedTarget then
@@ -686,12 +890,19 @@ function VoxDestruct.octreeMeshSubtraction(
 	if debris then
 		local debrisToken = RuntimeProfiler.Begin("Server/Destruction/Voxelizer/Debris")
 		if typeof(options) == "table" and options.forceSpawnDebris == true then
-			local maxDebrisParts = if typeof(options.maxDebrisParts) == "number" then math.max(math.floor(options.maxDebrisParts), 0) else math.huge
-			local spawnedDebrisParts = if typeof(options.spawnedDebrisParts) == "number" then math.max(math.floor(options.spawnedDebrisParts), 0) else 0
+			local maxDebrisParts = if typeof(options.maxDebrisParts) == "number"
+				then math.max(math.floor(options.maxDebrisParts), 0)
+				else math.huge
+			local spawnedDebrisParts = if typeof(options.spawnedDebrisParts) == "number"
+				then math.max(math.floor(options.spawnedDebrisParts), 0)
+				else 0
 			local remainingDebrisParts = math.max(maxDebrisParts - spawnedDebrisParts, 0)
 			if remainingDebrisParts > 0 then
-				debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
-				local payloadBlocks = if debrisPayload and typeof(debrisPayload.blocks) == "table" then #debrisPayload.blocks else 0
+				debrisPayload =
+					Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+				local payloadBlocks = if debrisPayload and typeof(debrisPayload.blocks) == "table"
+					then #debrisPayload.blocks
+					else 0
 				local spawned, spawnAttempts = Debris.spawnPayload(debrisPayload, {
 					parentFolder = options.debrisFolder,
 					maxParts = remainingDebrisParts,
@@ -715,9 +926,16 @@ function VoxDestruct.octreeMeshSubtraction(
 			end
 		elseif debrisConfig and debrisConfig.ClientSimulated == true then
 			if debrisConfig.CompactPayloads == true or debrisConfig.DebrisCompactPayloads == true then
-				debrisPayload = Debris.makeCompactPayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+				debrisPayload = Debris.makeCompactPayload(
+					removedBlocks,
+					targetCFrame,
+					sphereCenterWorld,
+					originalInfo,
+					debrisConfig
+				)
 			else
-				debrisPayload = Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
+				debrisPayload =
+					Debris.makePayload(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
 			end
 		else
 			Debris.makeDebris(removedBlocks, targetCFrame, sphereCenterWorld, originalInfo, debrisConfig)
@@ -726,7 +944,7 @@ function VoxDestruct.octreeMeshSubtraction(
 	end
 
 	RuntimeProfiler.End("Server/Destruction/Voxelizer/OctreeMeshSubtraction", totalToken)
-	return finalVoxels, debrisPayload
+	return finalVoxels, debrisPayload, true
 end
 
 function VoxDestruct.subtractHitbox(
@@ -781,13 +999,14 @@ function VoxDestruct.subtractHitbox(
 		if not object:IsA("BasePart") or object == sphereHitbox or object.Locked then
 			continue
 		end
-		if shouldExactCullTargets(options) and isTargetOutsideSphere(object, sphereCenterWorld, sphereRadius, options) then
+		if
+			shouldExactCullTargets(options) and isTargetOutsideSphere(object, sphereCenterWorld, sphereRadius, options)
+		then
 			RuntimeProfiler.Count("Server/Destruction/Voxelizer/ExactCullSkipped")
 			continue
 		end
 
-		targetsHit += 1
-		local _, debrisPayload = VoxDestruct.octreeMeshSubtraction(
+		local _, debrisPayload, changed = VoxDestruct.octreeMeshSubtraction(
 			object,
 			sphereHitbox,
 			minSize,
@@ -802,6 +1021,10 @@ function VoxDestruct.subtractHitbox(
 			outputFolder,
 			options
 		)
+		if not changed then
+			continue
+		end
+		targetsHit += 1
 		if debrisPayload then
 			table.insert(debrisPayloads, debrisPayload)
 		end

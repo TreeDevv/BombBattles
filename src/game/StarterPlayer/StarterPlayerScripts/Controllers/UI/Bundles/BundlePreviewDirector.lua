@@ -7,7 +7,12 @@ local Workspace = game:GetService("Workspace")
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AnimationConfig = require(ReplicatedStorage.Shared.Config.AnimationConfig)
 local BundleCatalog = require(ReplicatedStorage.Shared.Config.BundleCatalog)
+local EmoteConfig = require(ReplicatedStorage.Shared.Emotes.EmoteConfig)
+local EmoteEffect = require(ReplicatedStorage.Shared.Emotes.EmoteEffect)
 local EmitService = require(ReplicatedStorage.Shared.Effects.EmitService)
+local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local RoundEndFlowConfig = require(ReplicatedStorage.Shared.Config.RoundEndFlowConfig)
+local POTGCutsceneController = require(script.Parent.Parent:WaitForChild("POTGCutsceneController"))
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -16,6 +21,8 @@ local STAGE_CLONE_NAME = "BundlePreviewStage"
 local ACTIVE_SCENE_NAME = "ActiveScene"
 local SOCKETS_NAME = "Sockets"
 local CAMERA_MARKERS_NAME = "CameraMarkers"
+local TEXT_GRADIENT_TEMPLATES_NAME = "TextGradientTemplates"
+local RUNTIME_HEADER_GRADIENT_ATTRIBUTE = "BundlePreviewRuntimeHeaderGradient"
 local CAMERA_BIND_NAME = "BundlePreviewCamera"
 local HIDDEN_TRANSPARENCY = 1
 local PREVIEW_FIELD_OF_VIEW = 58
@@ -30,6 +37,7 @@ local FAT_GUY_ROTATION = CFrame.Angles(0, 0, math.rad(90))
 local FAT_GUY_CENTER_ATTACHMENT_NAME = "Center"
 local DEFAULT_FALLING_CHARACTER_SCALE = 0.82
 local DEFAULT_FALLING_PREVIEW_SCALE_MULTIPLIER = 0.1
+local DEFAULT_INFINITY_PREVIEW_BUBBLE_SCALE_MULTIPLIER = 0.18
 local WIDE_CAMERA_PRESET = "Wide"
 local SINGLE_PEDESTAL_SOCKET = "SinglePedastal"
 local SINGLE_PEDESTAL_CAMERA_PRESET = "SinglePedastal"
@@ -53,17 +61,33 @@ local PREVIEW_FLASH_NAME_PATTERNS = table.freeze({
 	"flash",
 	"flashed",
 })
+local PREVIEW_RANDOM = Random.new()
+local warnedMissingHighlightIntroAttachment = false
 
 local REAL_PRESENTERS = table.freeze({
 	StaticModelPresenter = true,
 	AbilityCastPresenter = true,
 	BundleOverviewPresenter = true,
+	AbilityAuraPresenter = true,
+	EmotePresenter = true,
+	HighlightIntroPresenter = true,
 })
 
 local REAL_PRESETS = table.freeze({
 	PackOverview = true,
 	SingleDisplay = true,
 	EffectArena = true,
+	FullScreen = true,
+})
+
+local INFINITY_BODY_PART_TARGETS = table.freeze({
+	Head = { "Head" },
+	Torso = { "Torso", "UpperTorso", "LowerTorso" },
+	["Left Arm"] = { "Left Arm", "LeftUpperArm", "LeftLowerArm", "LeftHand" },
+	["Right Arm"] = { "Right Arm", "RightUpperArm", "RightLowerArm", "RightHand" },
+	["Left Leg"] = { "Left Leg", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot" },
+	["Right Leg"] = { "Right Leg", "RightUpperLeg", "RightLowerLeg", "RightFoot" },
+	HumanoidRootPart = { "HumanoidRootPart" },
 })
 
 local function normalizeSocketName(socketName: any): any
@@ -89,6 +113,22 @@ local function getReplicatedAsset(path: { string }?): Instance?
 		return nil
 	end
 	return getByPath(ReplicatedStorage, path)
+end
+
+local function findNamedAttachment(root: Instance?, attachmentName: string): Attachment?
+	if not root then
+		return nil
+	end
+
+	local attachment = root:FindFirstChild(attachmentName, true)
+	return if attachment and attachment:IsA("Attachment") then attachment else nil
+end
+
+local function getMapTemplateFolder(): Instance?
+	if typeof(RoundConfig.MapsFolderPath) ~= "table" then
+		return nil
+	end
+	return getByPath(ReplicatedStorage, RoundConfig.MapsFolderPath)
 end
 
 local function getPivot(instance: Instance): CFrame
@@ -171,6 +211,14 @@ local function scaleVisual(instance: Instance, scale: number?)
 	end
 end
 
+local function scaledVector(vector: Vector3, scale: number): Vector3
+	return Vector3.new(
+		math.max(vector.X * scale, 0.01),
+		math.max(vector.Y * scale, 0.01),
+		math.max(vector.Z * scale, 0.01)
+	)
+end
+
 local function getBoundingBox(instance: Instance): (CFrame, Vector3)
 	if instance:IsA("Model") then
 		return instance:GetBoundingBox()
@@ -183,6 +231,147 @@ end
 local function getDefinitionNumber(definition: { [string]: any }?, key: string, fallback: number): number
 	local value = if definition then definition[key] else nil
 	return if typeof(value) == "number" then value else fallback
+end
+
+local function getBaseParts(root: Instance): { BasePart }
+	local parts = {}
+	if root:IsA("BasePart") then
+		table.insert(parts, root)
+	end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			table.insert(parts, descendant)
+		end
+	end
+	return parts
+end
+
+local function getPrimaryPart(root: Instance): BasePart?
+	if root:IsA("BasePart") then
+		return root
+	end
+	if root:IsA("Model") and root.PrimaryPart then
+		return root.PrimaryPart
+	end
+	return root:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function getInfinityTargetParts(character: Model, sourcePartName: string): { BasePart }
+	local targets = {}
+	local targetNames = INFINITY_BODY_PART_TARGETS[sourcePartName]
+	if not targetNames then
+		return targets
+	end
+
+	for _, targetName in ipairs(targetNames) do
+		local target = character:FindFirstChild(targetName)
+		if target and target:IsA("BasePart") then
+			table.insert(targets, target)
+		end
+	end
+
+	return targets
+end
+
+local function shouldCloneInfinityRigChild(child: Instance): boolean
+	return child:IsA("ParticleEmitter")
+		or child:IsA("Attachment")
+		or child:IsA("Beam")
+		or child:IsA("Trail")
+		or child:IsA("PointLight")
+		or child:IsA("SpotLight")
+		or child:IsA("SurfaceLight")
+end
+
+local function enableEffectDescendants(root: Instance)
+	if root:IsA("ParticleEmitter") or root:IsA("Beam") or root:IsA("Trail") then
+		root.Enabled = true
+	elseif root:IsA("PointLight") or root:IsA("SpotLight") or root:IsA("SurfaceLight") then
+		(root :: any).Enabled = true
+	end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("ParticleEmitter") or descendant:IsA("Beam") or descendant:IsA("Trail") then
+			descendant.Enabled = true
+		elseif descendant:IsA("PointLight") or descendant:IsA("SpotLight") or descendant:IsA("SurfaceLight") then
+			(descendant :: any).Enabled = true
+		end
+	end
+end
+
+local function cloneInfinityRigEffects(sourceRig: Model, character: Model, cleanup)
+	for sourcePartName in pairs(INFINITY_BODY_PART_TARGETS) do
+		local sourcePart = sourceRig:FindFirstChild(sourcePartName)
+		if not (sourcePart and sourcePart:IsA("BasePart")) then
+			continue
+		end
+
+		for _, child in ipairs(sourcePart:GetChildren()) do
+			if not shouldCloneInfinityRigChild(child) then
+				continue
+			end
+
+			for _, target in ipairs(getInfinityTargetParts(character, sourcePartName)) do
+				local clone = child:Clone()
+				clone.Name = "InfinityPreview_" .. child.Name
+				clone.Parent = target
+				enableEffectDescendants(clone)
+				cleanup:AddInstance(clone)
+			end
+		end
+	end
+end
+
+local function getInfinityBubbleScaleFactor(clone: Instance, definition: { [string]: any }?, multiplier: number): number
+	local radius = math.max(getDefinitionNumber(definition, "radius", 20), 0.1)
+	local maxDimension = 0
+	for _, part in ipairs(getBaseParts(clone)) do
+		maxDimension = math.max(maxDimension, part.Size.X, part.Size.Y, part.Size.Z)
+	end
+	if maxDimension <= 0 then
+		return 1
+	end
+	return ((radius * 2) / maxDimension) * multiplier
+end
+
+local function attachInfinityBubbleToActor(
+	bubble: Instance,
+	actor: Model,
+	definition: { [string]: any }?,
+	scaleMultiplier: number
+): boolean
+	local rootPart = actor:FindFirstChild("HumanoidRootPart")
+	local primaryPart = getPrimaryPart(bubble)
+	if not (rootPart and rootPart:IsA("BasePart") and primaryPart) then
+		return false
+	end
+
+	pivotTo(bubble, rootPart.CFrame)
+	local color = definition and definition.visualColor
+	local resolvedColor = if typeof(color) == "Color3" then color else Color3.fromRGB(65, 235, 255)
+	local finalTransparency = math.clamp(getDefinitionNumber(definition, "visualTransparency", 0.82), 0, 1)
+	local scale = getInfinityBubbleScaleFactor(bubble, definition, scaleMultiplier)
+	for _, part in ipairs(getBaseParts(bubble)) do
+		part.Anchored = false
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Massless = true
+		part.Color = resolvedColor
+		part.Transparency = finalTransparency
+		part.Size = scaledVector(part.Size, scale)
+		for _, child in ipairs(part:GetChildren()) do
+			if child:IsA("SpecialMesh") then
+				child.Scale = scaledVector(child.Scale, scale)
+			end
+		end
+	end
+
+	local weld = Instance.new("WeldConstraint")
+	weld.Name = "InfinityPreviewBubbleRootWeld"
+	weld.Part0 = rootPart
+	weld.Part1 = primaryPart
+	weld.Parent = primaryPart
+	return true
 end
 
 local function getGiantBottomOffset(giant: Instance): number
@@ -245,7 +434,10 @@ end
 local function scaleNumberSequence(sequence: NumberSequence, scale: number): NumberSequence
 	local keypoints = {}
 	for _, keypoint in ipairs(sequence.Keypoints) do
-		table.insert(keypoints, NumberSequenceKeypoint.new(keypoint.Time, keypoint.Value * scale, keypoint.Envelope * scale))
+		table.insert(
+			keypoints,
+			NumberSequenceKeypoint.new(keypoint.Time, keypoint.Value * scale, keypoint.Envelope * scale)
+		)
 	end
 	return NumberSequence.new(keypoints)
 end
@@ -259,7 +451,8 @@ local function scaleEffects(instance: Instance, scale: number?)
 	for _, descendant in ipairs(instance:GetDescendants()) do
 		if descendant:IsA("ParticleEmitter") then
 			descendant.Size = scaleNumberSequence(descendant.Size, resolvedScale)
-			descendant.Speed = NumberRange.new(descendant.Speed.Min * resolvedScale, descendant.Speed.Max * resolvedScale)
+			descendant.Speed =
+				NumberRange.new(descendant.Speed.Min * resolvedScale, descendant.Speed.Max * resolvedScale)
 		elseif descendant:IsA("Beam") then
 			descendant.Width0 *= resolvedScale
 			descendant.Width1 *= resolvedScale
@@ -365,8 +558,14 @@ local function findCameraMarkerIn(root: Instance?): Instance?
 
 	for _, descendant in ipairs(root:GetDescendants()) do
 		local lowerName = string.lower(descendant.Name)
-		if string.find(lowerName, "camera", 1, true)
-			and (descendant:IsA("Attachment") or descendant:IsA("BasePart") or descendant:IsA("Camera") or descendant:IsA("Model"))
+		if
+			string.find(lowerName, "camera", 1, true)
+			and (
+				descendant:IsA("Attachment")
+				or descendant:IsA("BasePart")
+				or descendant:IsA("Camera")
+				or descendant:IsA("Model")
+			)
 		then
 			return descendant
 		end
@@ -391,6 +590,28 @@ local function getSlotTitle(slot): string
 	end
 
 	return ""
+end
+
+local function getRecipeTextGradientTemplateId(recipe): string?
+	if typeof(recipe) ~= "table" then
+		return nil
+	end
+	local templateId = recipe.TextGradientTemplateId
+	return if typeof(templateId) == "string" and templateId ~= "" then templateId else nil
+end
+
+local function getSlotTextGradientTemplateId(slot, fallbackTemplateId: string?): string?
+	if typeof(slot) ~= "table" then
+		return fallbackTemplateId
+	end
+
+	local templateId = slot.TextGradientTemplateId
+	if typeof(templateId) == "string" and templateId ~= "" then
+		return templateId
+	end
+
+	local recipe = BundleCatalog.GetPreviewRecipe(slot.PreviewId)
+	return getRecipeTextGradientTemplateId(recipe) or fallbackTemplateId
 end
 
 local function makeCleanup()
@@ -475,6 +696,7 @@ function BundlePreviewDirector.new()
 		_description = nil,
 		_running = false,
 		_requestSerial = 0,
+		_fullscreenPreviewActive = false,
 	}, BundlePreviewDirector)
 end
 
@@ -575,9 +797,7 @@ function BundlePreviewDirector:_buildSockets()
 		or getPivot(stage)
 
 	self._cameraMarkers = {
-		Wide = getCameraMarkerCFrame(wideCameraMarker)
-			or (stageCamera and getPivot(stageCamera))
-			or nil,
+		Wide = getCameraMarkerCFrame(wideCameraMarker) or (stageCamera and getPivot(stageCamera)) or nil,
 		SinglePedastal = getCameraMarkerCFrame(singleCameraMarker),
 	}
 
@@ -586,10 +806,10 @@ function BundlePreviewDirector:_buildSockets()
 			or (leftOrigin and getPivot(leftOrigin))
 			or getSocketCFrameFromPart(left, 4)
 			or getPivot(stage),
-		CenterActor = centerRigCFrame
-			or getSocketCFrameFromPart(authoredSockets and authoredSockets:FindFirstChild("CenterActor"), 0)
-			or getSocketCFrameFromPart(center, 4.1)
-			or getPivot(stage),
+		CenterActor = centerRigCFrame or getSocketCFrameFromPart(
+			authoredSockets and authoredSockets:FindFirstChild("CenterActor"),
+			0
+		) or getSocketCFrameFromPart(center, 4.1) or getPivot(stage),
 		RightDisplay = getSocketCFrameFromPart(authoredSockets and authoredSockets:FindFirstChild("RightDisplay"), 0)
 			or (rightOrigin and getPivot(rightOrigin))
 			or getSocketCFrameFromPart(right, 4)
@@ -598,16 +818,18 @@ function BundlePreviewDirector:_buildSockets()
 			or (leftOrigin and getPivot(leftOrigin))
 			or getSocketCFrameFromPart(left, 4)
 			or getPivot(stage),
-		ProjectileOrigin = getSocketCFrameFromPart(authoredSockets and authoredSockets:FindFirstChild("ProjectileOrigin"), 0)
-			or getSocketCFrameFromPart(center, 5.5)
-			or getPivot(stage),
-		ProjectileTarget = getSocketCFrameFromPart(authoredSockets and authoredSockets:FindFirstChild("ProjectileTarget"), 0)
-			or (leftOrigin and getPivot(leftOrigin))
-			or getPivot(stage),
-		CameraFocus = (centerRigCFrame and centerRigCFrame * CFrame.new(0, 2.8, 0))
-			or getSocketCFrameFromPart(authoredSockets and authoredSockets:FindFirstChild("CameraFocus"), 0)
-			or getSocketCFrameFromPart(center, 4.5)
-			or getPivot(stage),
+		ProjectileOrigin = getSocketCFrameFromPart(
+			authoredSockets and authoredSockets:FindFirstChild("ProjectileOrigin"),
+			0
+		) or getSocketCFrameFromPart(center, 5.5) or getPivot(stage),
+		ProjectileTarget = getSocketCFrameFromPart(
+			authoredSockets and authoredSockets:FindFirstChild("ProjectileTarget"),
+			0
+		) or (leftOrigin and getPivot(leftOrigin)) or getPivot(stage),
+		CameraFocus = (centerRigCFrame and centerRigCFrame * CFrame.new(0, 2.8, 0)) or getSocketCFrameFromPart(
+			authoredSockets and authoredSockets:FindFirstChild("CameraFocus"),
+			0
+		) or getSocketCFrameFromPart(center, 4.5) or getPivot(stage),
 		SinglePedastal = singleSocketCFrame,
 		AuthoredActorRoot = centerRigRootCFrame,
 	}
@@ -667,7 +889,44 @@ function BundlePreviewDirector:_getPedestalForSocket(socketName: string): Instan
 	return nil
 end
 
-function BundlePreviewDirector:_setPedestalHeader(socketName: string, title: string?, visible: boolean)
+function BundlePreviewDirector:_getTextGradientTemplate(templateId: string?): UIGradient?
+	local stage = self._stage
+	if typeof(templateId) ~= "string" or templateId == "" or not stage then
+		return nil
+	end
+
+	local templates = stage:FindFirstChild(TEXT_GRADIENT_TEMPLATES_NAME)
+	local template = templates and templates:FindFirstChild(templateId)
+	return if template and template:IsA("UIGradient") then template else nil
+end
+
+function BundlePreviewDirector:_applyHeaderTextGradient(header: TextLabel, templateId: string?)
+	local template = self:_getTextGradientTemplate(templateId)
+	for _, child in ipairs(header:GetChildren()) do
+		if
+			child:IsA("UIGradient")
+			and (template ~= nil or child:GetAttribute(RUNTIME_HEADER_GRADIENT_ATTRIBUTE) == true)
+		then
+			child:Destroy()
+		end
+	end
+
+	if not template then
+		return
+	end
+
+	local gradient = template:Clone()
+	gradient.Name = template.Name
+	gradient:SetAttribute(RUNTIME_HEADER_GRADIENT_ATTRIBUTE, true)
+	gradient.Parent = header
+end
+
+function BundlePreviewDirector:_setPedestalHeader(
+	socketName: string,
+	title: string?,
+	visible: boolean,
+	textGradientTemplateId: string?
+)
 	local pedestal = self:_getPedestalForSocket(socketName)
 	if not pedestal then
 		return
@@ -680,24 +939,36 @@ function BundlePreviewDirector:_setPedestalHeader(socketName: string, title: str
 		local header = billboard:FindFirstChild("Header", true)
 		if header and header:IsA("TextLabel") and typeof(title) == "string" and title ~= "" then
 			header.Text = title
+			self:_applyHeaderTextGradient(header, textGradientTemplateId)
 		end
 	end
 end
 
-function BundlePreviewDirector:_setPedestalsForSlots(slots: { any }?, preserveOthers: boolean?)
+function BundlePreviewDirector:_setPedestalsForSlots(
+	slots: { any }?,
+	preserveOthers: boolean?,
+	fallbackTextGradientTemplateId: string?
+)
 	local visibleBySocket = {}
 	local titleBySocket = {}
+	local textGradientBySocket = {}
 	for _, slot in ipairs(slots or {}) do
 		if typeof(slot) == "table" and typeof(slot.Socket) == "string" then
 			local socketName = normalizeSocketName(slot.Socket)
 			visibleBySocket[socketName] = true
 			titleBySocket[socketName] = getSlotTitle(slot)
+			textGradientBySocket[socketName] = getSlotTextGradientTemplateId(slot, fallbackTextGradientTemplateId)
 		end
 	end
 	local socketNames = if preserveOthers then NORMAL_DISPLAY_SOCKET_NAMES else DISPLAY_SOCKET_NAMES
 	for _, socketName in ipairs(socketNames) do
 		self:_setPedestalVisible(socketName, visibleBySocket[socketName] == true)
-		self:_setPedestalHeader(socketName, titleBySocket[socketName], visibleBySocket[socketName] == true)
+		self:_setPedestalHeader(
+			socketName,
+			titleBySocket[socketName],
+			visibleBySocket[socketName] == true,
+			textGradientBySocket[socketName] or fallbackTextGradientTemplateId
+		)
 	end
 	self:_hideAuthoredDisplayObjects()
 end
@@ -705,6 +976,7 @@ end
 function BundlePreviewDirector:_setPedestalsForSockets(
 	socketNames: { string }?,
 	titleBySocket: { [string]: string }?,
+	textGradientBySocket: { [string]: string? }?,
 	preserveOthers: boolean?
 )
 	local visibleBySocket = {}
@@ -717,8 +989,11 @@ function BundlePreviewDirector:_setPedestalsForSockets(
 	for _, socketName in ipairs(socketsToUpdate) do
 		socketName = normalizeSocketName(socketName)
 		local title = titleBySocket and (titleBySocket[socketName] or titleBySocket.SinglePedestal) or nil
+		local textGradientTemplateId = textGradientBySocket
+				and (textGradientBySocket[socketName] or textGradientBySocket.SinglePedestal)
+			or nil
 		self:_setPedestalVisible(socketName, visibleBySocket[socketName] == true)
-		self:_setPedestalHeader(socketName, title, visibleBySocket[socketName] == true)
+		self:_setPedestalHeader(socketName, title, visibleBySocket[socketName] == true, textGradientTemplateId)
 	end
 	self:_hideAuthoredDisplayObjects()
 end
@@ -750,7 +1025,8 @@ function BundlePreviewDirector:_computeCameraCFrame(cameraPreset: string?): CFra
 		focus = self._sockets.SinglePedastal
 		if not cameraCFrame and focus then
 			warn("[BundlesPreview] Missing CameraMarkers.SinglePedastal; using single pedestal fallback camera")
-			cameraCFrame = CFrame.lookAt(focus.Position + Vector3.new(0, 5.25, 15), focus.Position + Vector3.new(0, 1.2, 0))
+			cameraCFrame =
+				CFrame.lookAt(focus.Position + Vector3.new(0, 5.25, 15), focus.Position + Vector3.new(0, 1.2, 0))
 		end
 	else
 		cameraCFrame = self._cameraMarkers.Wide
@@ -772,12 +1048,14 @@ function BundlePreviewDirector:_debugCameraTarget(previewId: string?, cameraPres
 	local source = if cameraPreset == SINGLE_PEDESTAL_CAMERA_PRESET
 		then "CameraMarkers.SinglePedastal"
 		else "CameraMarkers." .. tostring(cameraPreset)
-	warn(("[BundlesPreview] Camera target preview=%s preset=%s source=%s position=%s"):format(
-		tostring(previewId),
-		tostring(cameraPreset),
-		source,
-		targetCFrame and tostring(targetCFrame.Position) or "nil"
-	))
+	warn(
+		("[BundlesPreview] Camera target preview=%s preset=%s source=%s position=%s"):format(
+			tostring(previewId),
+			tostring(cameraPreset),
+			source,
+			targetCFrame and tostring(targetCFrame.Position) or "nil"
+		)
+	)
 end
 
 function BundlePreviewDirector:_applyCameraFrame()
@@ -824,10 +1102,13 @@ function BundlePreviewDirector:_bindCameraGuard()
 	end
 
 	bindCamera(Workspace.CurrentCamera)
-	table.insert(self._cameraGuardConnections, Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-		self:_bindCameraGuard()
-		enforce()
-	end))
+	table.insert(
+		self._cameraGuardConnections,
+		Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+			self:_bindCameraGuard()
+			enforce()
+		end)
+	)
 end
 
 function BundlePreviewDirector:_cancelCameraTween()
@@ -931,7 +1212,8 @@ function BundlePreviewDirector:_transitionCameraToPreset(
 	cameraPreset: string,
 	tweenInfo: TweenInfo?,
 	onComplete: (() -> ())?,
-	previewId: string?
+	previewId: string?,
+	instant: boolean?
 )
 	local resolvedTweenInfo = tweenInfo or CAMERA_PREVIEW_TWEEN
 	local targetCFrame = self:_computeCameraCFrame(cameraPreset)
@@ -944,9 +1226,24 @@ function BundlePreviewDirector:_transitionCameraToPreset(
 	end
 
 	local camera = Workspace.CurrentCamera
+	self._cameraPreset = cameraPreset
+	if instant then
+		if camera then
+			camera.CameraType = Enum.CameraType.Scriptable
+		end
+		self:_cancelCameraTween()
+		self._cameraCFrame = targetCFrame
+		self._cameraFov = PREVIEW_FIELD_OF_VIEW
+		self:_applyCameraFrame()
+		self:_bindCamera()
+		if onComplete then
+			onComplete()
+		end
+		return
+	end
+
 	local startCFrame = self._cameraCFrame or (camera and camera.CFrame) or targetCFrame
 	local startFov = self._cameraFov or (camera and camera.FieldOfView) or PREVIEW_FIELD_OF_VIEW
-	self._cameraPreset = cameraPreset
 	if camera then
 		camera.CameraType = Enum.CameraType.Scriptable
 	end
@@ -956,7 +1253,11 @@ function BundlePreviewDirector:_transitionCameraToPreset(
 	local transitionSerial = self._cameraTransitionSerial
 	if cameraPreset == SINGLE_PEDESTAL_CAMERA_PRESET then
 		task.delay(resolvedTweenInfo.Time + CAMERA_SNAP_FALLBACK_DELAY, function()
-			if self._cameraTransitionSerial ~= transitionSerial or self._cameraPreset ~= cameraPreset or not self._running then
+			if
+				self._cameraTransitionSerial ~= transitionSerial
+				or self._cameraPreset ~= cameraPreset
+				or not self._running
+			then
 				return
 			end
 
@@ -970,11 +1271,13 @@ function BundlePreviewDirector:_transitionCameraToPreset(
 				return
 			end
 
-			warn(("[BundlesPreview] Camera tween missed %s for %s by %.2f studs; snapping to marker"):format(
-				SINGLE_PEDESTAL_CAMERA_PRESET,
-				tostring(previewId),
-				distance
-			))
+			warn(
+				("[BundlesPreview] Camera tween missed %s for %s by %.2f studs; snapping to marker"):format(
+					SINGLE_PEDESTAL_CAMERA_PRESET,
+					tostring(previewId),
+					distance
+				)
+			)
 			self._cameraCFrame = targetCFrame
 			self._cameraFov = PREVIEW_FIELD_OF_VIEW
 			self:_applyCameraFrame()
@@ -1024,7 +1327,7 @@ function BundlePreviewDirector:_restoreCamera(smooth: boolean?, onComplete: (() 
 	end
 end
 
-function BundlePreviewDirector:_createStage()
+function BundlePreviewDirector:_createStage(instantCamera: boolean?)
 	local source = self:_getStageSource()
 	if not source then
 		warn("[BundlesPreview] Missing ReplicatedStorage.Assets.Staging")
@@ -1043,17 +1346,17 @@ function BundlePreviewDirector:_createStage()
 	self:_saveCamera()
 	self:_buildSockets()
 	self:_hideAuthoredDisplayObjects()
-	self:_applyCamera(true)
+	self:_applyCamera(not instantCamera)
 
 	return true
 end
 
-function BundlePreviewDirector:Start()
+function BundlePreviewDirector:Start(options: { [string]: any }?)
 	if self._running then
 		return true
 	end
 	self._running = true
-	return self:_createStage()
+	return self:_createStage(typeof(options) == "table" and options.InstantCamera == true)
 end
 
 function BundlePreviewDirector:_clearLane(socketName: string)
@@ -1154,7 +1457,8 @@ function BundlePreviewDirector:_playStaticModel(recipe, parent: Instance, cleanu
 	local socketName = normalizeSocketName(socketOverride or config.Socket or "RightDisplay")
 	local socketCFrame = self._sockets[socketName] or self._sockets.RightDisplay or CFrame.new()
 	if config.UsePedestalAttachment == true then
-		socketCFrame = self:_getPedestalAttachmentCFrame(socketName, config.AttachmentName or "BombOrigin") or socketCFrame
+		socketCFrame = self:_getPedestalAttachmentCFrame(socketName, config.AttachmentName or "BombOrigin")
+			or socketCFrame
 	end
 	local clone = self:_cloneAsset(config.AssetPath, recipe.Id or "StaticPreview")
 	if not clone then
@@ -1229,7 +1533,8 @@ function BundlePreviewDirector:_playAbilityCast(recipe, parent: Instance, cleanu
 	local loopDelay = math.max(tonumber(config.LoopDelay) or DEFAULT_LOOP_DELAY, 1.5)
 	local flareScale = tonumber(config.FlareScale) or tonumber(config.VisualScale) or 1
 	local definition = AbilityConfig.GetDefinition(config.AbilityId or "FatBomb")
-	local gameplayFallingScale = getDefinitionNumber(definition, "fallingCharacterScale", DEFAULT_FALLING_CHARACTER_SCALE)
+	local gameplayFallingScale =
+		getDefinitionNumber(definition, "fallingCharacterScale", DEFAULT_FALLING_CHARACTER_SCALE)
 	local previewScaleMultiplier = tonumber(config.FallingPreviewScaleMultiplier)
 		or DEFAULT_FALLING_PREVIEW_SCALE_MULTIPLIER
 	local fallingScale = tonumber(config.FallingScale)
@@ -1255,7 +1560,10 @@ function BundlePreviewDirector:_playAbilityCast(recipe, parent: Instance, cleanu
 				MaxLightRange = 4,
 			})
 			flare.Parent = parent
-			pivotTo(flare, CFrame.new(basePosition + Vector3.new(0, 0.35, 0)) * CFrame.Angles(math.rad(-82), 0, math.rad(10)))
+			pivotTo(
+				flare,
+				CFrame.new(basePosition + Vector3.new(0, 0.35, 0)) * CFrame.Angles(math.rad(-82), 0, math.rad(10))
+			)
 			cleanup:AddInstance(flare)
 			EmitService.Emit(flare, "[BundlesPreview]")
 		end
@@ -1441,8 +1749,22 @@ function BundlePreviewDirector:_playIdle(humanoid: Humanoid, cleanup)
 	end)
 end
 
-function BundlePreviewDirector:_prepareActor(parent: Instance, cleanup)
-	local socketCFrame = self._sockets.AuthoredActorRoot or self._sockets.CenterActor or CFrame.new()
+function BundlePreviewDirector:_prepareCharacterActor(
+	parent: Instance,
+	cleanup,
+	socketName: string?,
+	actorName: string?,
+	onReady: ((Model, Humanoid?) -> ())?,
+	options: { [string]: any }?
+)
+	local normalizedSocket = normalizeSocketName(socketName or "CenterActor")
+	local socketCFrame = if normalizedSocket == "CenterActor"
+		then self._sockets.AuthoredActorRoot or self._sockets.CenterActor or CFrame.new()
+		else self._sockets[normalizedSocket] or self._sockets.CenterActor or CFrame.new()
+	local actorYawDegrees = if typeof(options) == "table" then tonumber(options.ActorYawDegrees) or 0 else 0
+	if actorYawDegrees ~= 0 then
+		socketCFrame *= CFrame.Angles(0, math.rad(actorYawDegrees), 0)
+	end
 	task.spawn(function()
 		local actor = self:_createLocalPlayerActor()
 		if cleanup:IsCancelled() or not parent.Parent then
@@ -1455,23 +1777,121 @@ function BundlePreviewDirector:_prepareActor(parent: Instance, cleanup)
 			return
 		end
 
-		actor.Name = "PreviewActor"
+		actor.Name = actorName or "PreviewActor"
 		self:_prepPreviewRig(actor)
 		actor.Parent = parent
 		pivotRigRootToCFrame(actor, socketCFrame)
 		cleanup:AddInstance(actor)
-		self._actor = actor
 
 		local humanoid = actor:FindFirstChildOfClass("Humanoid")
+		if not cleanup:IsCancelled() and onReady then
+			onReady(actor, humanoid)
+		end
+	end)
+end
+
+function BundlePreviewDirector:_prepareActor(parent: Instance, cleanup)
+	self:_prepareCharacterActor(parent, cleanup, "CenterActor", "PreviewActor", function(_actor, humanoid)
 		if humanoid and not cleanup:IsCancelled() then
 			self:_playIdle(humanoid, cleanup)
 		end
 	end)
 end
 
+function BundlePreviewDirector:_playEmoteActor(recipe, parent: Instance, cleanup, socketOverride: string?, options)
+	local config = recipe.Config or {}
+	local emoteId = if typeof(config.EmoteId) == "string" then config.EmoteId else "Honored One"
+	local definition = EmoteConfig.GetDefinition(emoteId)
+	local assetFolder = EmoteConfig.GetAssetFolder(emoteId)
+	if not (definition and assetFolder) then
+		warn(("[BundlesPreview] Missing emote preview assets for %s"):format(tostring(emoteId)))
+		return
+	end
+
+	local socketName = normalizeSocketName(socketOverride or config.Socket or "CenterActor")
+	local actorYawDegrees = config.ActorYawDegrees
+	if typeof(options) == "table" and options.ActorYawDegrees ~= nil then
+		actorYawDegrees = options.ActorYawDegrees
+	end
+
+	self:_prepareCharacterActor(parent, cleanup, socketName, "EmotePreviewActor", function(actor)
+		if cleanup:IsCancelled() then
+			return
+		end
+
+		local runtime = EmoteEffect.CreateRuntime(definition.id, actor, assetFolder)
+		cleanup:AddTask(function()
+			runtime:Destroy()
+		end)
+
+		local behavior = definition.behavior
+		local ok, err = pcall(function()
+			if behavior and type(behavior.Begin) == "function" then
+				behavior:Begin(actor, runtime)
+			end
+		end)
+		if not ok then
+			warn(("[BundlesPreview] Failed to play emote preview %s: %s"):format(definition.id, tostring(err)))
+			runtime:Destroy()
+		end
+	end, {
+		ActorYawDegrees = actorYawDegrees,
+	})
+end
+
+function BundlePreviewDirector:_playAbilityAura(recipe, parent: Instance, cleanup, socketOverride: string?)
+	local config = recipe.Config or {}
+	local abilityId = if typeof(config.AbilityId) == "string" then config.AbilityId else "Infinity"
+	local definition = AbilityConfig.GetDefinition(abilityId)
+	if not definition then
+		warn(("[BundlesPreview] Missing ability definition for aura preview %s"):format(tostring(abilityId)))
+		return
+	end
+
+	local socketName = normalizeSocketName(socketOverride or config.Socket or "RightDisplay")
+	self:_prepareCharacterActor(parent, cleanup, socketName, "InfinityPreviewActor", function(actor, humanoid)
+		if cleanup:IsCancelled() then
+			return
+		end
+		if humanoid then
+			self:_playIdle(humanoid, cleanup)
+		end
+
+		local rigTemplate = getReplicatedAsset(definition.rigEffectsAssetPath)
+		if rigTemplate and rigTemplate:IsA("Model") then
+			cloneInfinityRigEffects(rigTemplate, actor, cleanup)
+		else
+			warn("[BundlesPreview] Missing Infinity RigEffects preview asset")
+		end
+
+		local bubbleTemplate = getReplicatedAsset(definition.bubbleAssetPath)
+		if bubbleTemplate then
+			local bubble = bubbleTemplate:Clone()
+			bubble.Name = "InfinityPreviewBubble"
+			if
+				attachInfinityBubbleToActor(
+					bubble,
+					actor,
+					definition,
+					tonumber(config.BubbleScaleMultiplier) or DEFAULT_INFINITY_PREVIEW_BUBBLE_SCALE_MULTIPLIER
+				)
+			then
+				bubble.Parent = parent
+				cleanup:AddInstance(bubble)
+			else
+				bubble:Destroy()
+			end
+		else
+			warn("[BundlesPreview] Missing Infinity Bubble preview asset")
+		end
+	end, {
+		ActorYawDegrees = config.ActorYawDegrees,
+	})
+end
+
 function BundlePreviewDirector:_playBundleOverview(recipe, parent: Instance, cleanup, preservePedestals: boolean?)
 	local slots = recipe.Config and recipe.Config.Slots or {}
-	self:_setPedestalsForSlots(slots, preservePedestals)
+	self:_setPedestalsForSlots(slots, preservePedestals, getRecipeTextGradientTemplateId(recipe))
 
 	for _, slot in ipairs(slots) do
 		if typeof(slot) ~= "table" then
@@ -1490,6 +1910,18 @@ function BundlePreviewDirector:_playBundleOverview(recipe, parent: Instance, cle
 		local mode = slot.Mode
 		if mode == "IdleActor" then
 			self:_prepareActor(slotParent, cleanup)
+		elseif mode == "Emote" then
+			local childRecipe = BundleCatalog.GetPreviewRecipe(slot.PreviewId)
+			if childRecipe then
+				self:_playEmoteActor(childRecipe, slotParent, cleanup, normalizeSocketName(slot.Socket), {
+					ActorYawDegrees = slot.ActorYawDegrees,
+				})
+			end
+		elseif mode == "AbilityAura" then
+			local childRecipe = BundleCatalog.GetPreviewRecipe(slot.PreviewId)
+			if childRecipe then
+				self:_playAbilityAura(childRecipe, slotParent, cleanup, normalizeSocketName(slot.Socket))
+			end
 		elseif mode == "Static" then
 			local childRecipe = BundleCatalog.GetPreviewRecipe(slot.PreviewId)
 			if childRecipe then
@@ -1527,6 +1959,10 @@ function BundlePreviewDirector:_playRecipe(
 		self:_playStaticModel(recipe, parent, cleanup, socketOverride)
 	elseif presenter == "AbilityCastPresenter" then
 		self:_playAbilityCast(recipe, parent, cleanup, socketOverride)
+	elseif presenter == "AbilityAuraPresenter" then
+		self:_playAbilityAura(recipe, parent, cleanup, socketOverride)
+	elseif presenter == "EmotePresenter" then
+		self:_playEmoteActor(recipe, parent, cleanup, socketOverride)
 	elseif presenter == "BundleOverviewPresenter" then
 		self:_playBundleOverview(recipe, parent, cleanup, options and options.PreservePedestals == true)
 	end
@@ -1557,20 +1993,100 @@ function BundlePreviewDirector:_getLaneCameraPreset(recipe): string
 	return SINGLE_PEDESTAL_CAMERA_PRESET
 end
 
-function BundlePreviewDirector:Play(previewId: string)
-	if not self._running and not self:Start() then
-		return
+function BundlePreviewDirector:_getRandomMapHighlightIntroCFrame(): CFrame?
+	local attachmentName = RoundEndFlowConfig.POTGAttachmentName
+	if typeof(attachmentName) ~= "string" or attachmentName == "" then
+		return nil
 	end
 
+	local candidates = {}
+	local mapTemplateFolder = getMapTemplateFolder()
+	if mapTemplateFolder then
+		for _, mapConfig in ipairs(RoundConfig.Maps or {}) do
+			if typeof(mapConfig) ~= "table" or typeof(mapConfig.id) ~= "string" then
+				continue
+			end
+
+			local mapTemplate = mapTemplateFolder:FindFirstChild(mapConfig.id)
+			local attachment = findNamedAttachment(mapTemplate, attachmentName)
+			if attachment then
+				table.insert(candidates, attachment)
+			end
+		end
+
+		if #candidates == 0 then
+			for _, child in ipairs(mapTemplateFolder:GetChildren()) do
+				local attachment = findNamedAttachment(child, attachmentName)
+				if attachment then
+					table.insert(candidates, attachment)
+				end
+			end
+		end
+	end
+
+	if #candidates > 0 then
+		return candidates[PREVIEW_RANDOM:NextInteger(1, #candidates)].WorldCFrame
+	end
+
+	local activeMapName = RoundConfig.ActiveMapName
+	local activeMap = if typeof(activeMapName) == "string" then Workspace:FindFirstChild(activeMapName) else nil
+	local activeAttachment = findNamedAttachment(activeMap, attachmentName)
+	if activeAttachment then
+		return activeAttachment.WorldCFrame
+	end
+
+	if not warnedMissingHighlightIntroAttachment then
+		warn(("[BundlesPreview] No map %s attachment found for highlight intro preview"):format(attachmentName))
+		warnedMissingHighlightIntroAttachment = true
+	end
+	return nil
+end
+
+function BundlePreviewDirector:Play(previewId: string, onComplete: ((string) -> ())?, options: { [string]: any }?)
 	local recipe = BundleCatalog.GetPreviewRecipe(previewId)
 	if not recipe then
 		warn(("[BundlesPreview] Unknown preview id %s"):format(tostring(previewId)))
 		return
 	end
 
+	if recipe.Presenter == "HighlightIntroPresenter" then
+		if self._running then
+			self:Stop(false)
+		end
+
+		local config = recipe.Config or {}
+		local cutsceneId = if typeof(config.CutsceneId) == "string" then config.CutsceneId else "HollowPurple"
+		self._fullscreenPreviewActive = true
+		local started = POTGCutsceneController:PlayPreview(cutsceneId, function(reason)
+			self._fullscreenPreviewActive = false
+			if onComplete then
+				onComplete(reason)
+			end
+		end, {
+			cameraCFrame = self:_getRandomMapHighlightIntroCFrame(),
+			potgPlayerUserId = LocalPlayer.UserId,
+			revealAfterPreviewCallback = typeof(options) == "table" and options.RevealAfterPreviewCallback == true,
+		})
+		if not started then
+			self._fullscreenPreviewActive = false
+		end
+		if not started and onComplete then
+			onComplete("Unavailable")
+		end
+		return
+	end
+
+	local instantCamera = typeof(options) == "table" and options.InstantCamera == true
+	if not self._running and not self:Start({
+		InstantCamera = instantCamera,
+	}) then
+		return
+	end
+
 	self._requestSerial += 1
 	local requestSerial = self._requestSerial
 	local mode = recipe.PreviewMode
+	local textGradientTemplateId = getRecipeTextGradientTemplateId(recipe)
 	if mode == "Lane" then
 		local socketName = self:_getLaneSocket(recipe)
 		local cameraPreset = self:_getLaneCameraPreset(recipe)
@@ -1583,6 +2099,8 @@ function BundlePreviewDirector:Play(previewId: string)
 		self._laneCleanups[socketName] = cleanup
 		self:_setPedestalsForSockets({ socketName }, {
 			[socketName] = typeof(recipe.Title) == "string" and recipe.Title or "",
+		}, {
+			[socketName] = textGradientTemplateId,
 		}, true)
 		self:_playRecipe(recipe, lane, cleanup, socketName)
 		self:_transitionCameraToPreset(cameraPreset, CAMERA_PREVIEW_TWEEN, function()
@@ -1592,8 +2110,10 @@ function BundlePreviewDirector:Play(previewId: string)
 			self:_clearAllExceptLane(socketName)
 			self:_setPedestalsForSockets({ socketName }, {
 				[socketName] = typeof(recipe.Title) == "string" and recipe.Title or "",
+			}, {
+				[socketName] = textGradientTemplateId,
 			})
-		end, previewId)
+		end, previewId, instantCamera)
 		return
 	end
 
@@ -1617,12 +2137,16 @@ function BundlePreviewDirector:Play(previewId: string)
 		end
 		self:_clearLanes()
 		if recipe.Presenter == "BundleOverviewPresenter" then
-			self:_setPedestalsForSlots(recipe.Config and recipe.Config.Slots or nil)
+			self:_setPedestalsForSlots(recipe.Config and recipe.Config.Slots or nil, nil, textGradientTemplateId)
 		end
-	end, previewId)
+	end, previewId, instantCamera)
 end
 
 function BundlePreviewDirector:Stop(smooth: boolean?)
+	if self._fullscreenPreviewActive then
+		self._fullscreenPreviewActive = false
+		POTGCutsceneController:CancelPreview()
+	end
 	if not self._running then
 		return
 	end

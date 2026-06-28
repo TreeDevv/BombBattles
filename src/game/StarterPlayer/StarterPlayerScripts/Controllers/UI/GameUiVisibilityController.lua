@@ -16,11 +16,13 @@ local FRAME_BACKDROP_NAME = "FrameControllerBackdrop"
 
 local EXCLUDED_SCREEN_GUIS = {
 	Freecam = true,
+	["Mobile/ConsoleShiftLock"] = true,
 	ScreenEffects = true,
 }
 
 local TOUCH_CONTROL_EXCLUSIONS = {
 	Buttons = true,
+	MobileButtons = true,
 }
 
 type UiRecord = {

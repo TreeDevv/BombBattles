@@ -83,9 +83,10 @@ function GameStateNotificationController:_showForState(state: RoundState, isInit
 		if not isInitial and self._lastState ~= RoundStates.WaitingForPlayers then
 			self:_showOnce(roundId, "waiting", "Waiting for players", "Gold", DEFAULT_DURATION)
 		end
+	elseif stateName == RoundStates.MapVoting then
+		self:_showOnce(roundId, "map-voting", "Vote for a map", "Blue", DEFAULT_DURATION)
 	elseif stateName == RoundStates.Intermission then
-		local text = if state.votingOpen == false then "Intermission" else "Intermission - vote for a map"
-		self:_showOnce(roundId, "intermission", text, "Blue", DEFAULT_DURATION)
+		self:_showOnce(roundId, "intermission", "Intermission", "Blue", DEFAULT_DURATION)
 	elseif stateName == RoundStates.RoundStarting then
 		self:_showOnce(roundId, "round-starting", "Round starting", "Gold", DEFAULT_DURATION)
 	elseif stateName == RoundStates.Active then

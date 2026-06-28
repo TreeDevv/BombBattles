@@ -250,7 +250,7 @@ function ChargeBomb.OnActivate(context: ServerActivateContext): AbilityActivatio
 	local chargeScale = getChargeScale(context.definition, chargeAlpha)
 	local origin = getThrowOrigin(rootPart)
 	local aimDirection = getAimDirectionFromPayload(context.payload, rootPart.CFrame.LookVector)
-	local projectileId = createProjectileId(context.player)
+	local projectileId = AbilityBehaviorServices.GetClientProjectileId(context) or createProjectileId(context.player)
 	local skinId = BombSkinService:GetEquippedSkinId(context.player)
 
 	local launched = projectileService:Launch({

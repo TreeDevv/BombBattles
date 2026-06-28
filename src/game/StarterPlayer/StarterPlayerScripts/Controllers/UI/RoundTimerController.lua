@@ -19,6 +19,7 @@ local TOAST_HEIGHT = 34
 local TIMER_NOTIFICATION_GAP = 6
 
 local VISIBLE_STATES = {
+	[RoundStates.MapVoting] = true,
 	[RoundStates.Intermission] = true,
 	[RoundStates.RoundStarting] = true,
 }

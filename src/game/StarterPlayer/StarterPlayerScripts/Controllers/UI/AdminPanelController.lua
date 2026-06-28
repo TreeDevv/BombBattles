@@ -12,6 +12,7 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local REMOTES_FOLDER_NAME = "Remotes"
 local TOGGLE_KEY = Enum.KeyCode.P
+local CARPET_BOMB_KEY = Enum.KeyCode.L
 
 local AdminPanelController = {}
 
@@ -584,6 +585,9 @@ function AdminPanelController:_buildPanel()
 	self:_addButton(scroller, "Demo All Explosions", function()
 		self:_runCommand("bomb.demoAllExplosions", {})
 	end)
+	self:_addButton(scroller, "Stress 50 Bombs", function()
+		self:_runCommand("bomb.stressExplosionGrid", {})
+	end)
 	self:_addButtonRow(scroller, {
 		{
 			text = "Set Speed",
@@ -652,8 +656,13 @@ function AdminPanelController:OnStart()
 		if gameProcessed then
 			return
 		end
+		if UserInputService:GetFocusedTextBox() then
+			return
+		end
 		if input.KeyCode == TOGGLE_KEY then
 			self:_togglePanel()
+		elseif input.KeyCode == CARPET_BOMB_KEY then
+			self:_runCommand("bomb.carpetBombCastles", {})
 		end
 	end)
 end

@@ -166,7 +166,7 @@ function Bullet.OnActivate(context: ServerActivateContext): AbilityActivationRes
 
 	local origin = getThrowOrigin(rootPart)
 	local aimDirection = getAimDirectionFromPayload(context.payload, rootPart.CFrame.LookVector)
-	local projectileId = createProjectileId(context.player)
+	local projectileId = AbilityBehaviorServices.GetClientProjectileId(context) or createProjectileId(context.player)
 	local skinId = BombSkinService:GetEquippedSkinId(context.player)
 	local maxRange = math.max(getDefinitionNumber(context.definition, "maxRange", 450), 0)
 	local remainingFuse = math.max(getDefinitionNumber(context.definition, "maxFlightSeconds", BombConfig.FuseSeconds), 0.05)

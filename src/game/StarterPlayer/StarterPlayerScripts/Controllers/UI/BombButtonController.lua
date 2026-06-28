@@ -1,12 +1,14 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local BombController = require(script.Parent:WaitForChild("BombController"))
+local CameraController = require(script.Parent:WaitForChild("CameraController"))
 
 local ATTR = BombConfig.Attributes
 
@@ -54,6 +56,10 @@ BombButtonController._buttonColorTween = nil :: Tween?
 BombButtonController._buttonColorConnection = nil :: RBXScriptConnection?
 BombButtonController._cooldownRechargeEndsAt = 0
 BombButtonController._lastBombCount = nil :: number?
+BombButtonController._touchInputObject = nil :: InputObject?
+BombButtonController._touchLastPosition = nil :: Vector2?
+BombButtonController._touchAimEndConnection = nil :: RBXScriptConnection?
+BombButtonController._touchAimCameraActive = false
 
 local function getServerTime(): number
 	return workspace:GetServerTimeNow()
@@ -80,6 +86,17 @@ local function isCooking(): boolean
 	return LocalPlayer:GetAttribute(ATTR.Cooking) == true
 end
 
+local function isTouchPrimary(): boolean
+	local ok, preferredInput = pcall(function()
+		return UserInputService.PreferredInput
+	end)
+	if ok and typeof(preferredInput) == "EnumItem" then
+		return preferredInput.Name == "Touch"
+	end
+
+	return UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+end
+
 local function scaleUDim2(value: UDim2, factor: number): UDim2
 	return UDim2.new(value.X.Scale * factor, value.X.Offset * factor, value.Y.Scale * factor, value.Y.Offset * factor)
 end
@@ -94,6 +111,18 @@ local function getDefaultSize(button: GuiObject): UDim2
 end
 
 function BombButtonController:_disconnectButton()
+	local hadTouchAim = self._touchInputObject ~= nil or self._touchAimEndConnection ~= nil or self._touchAimCameraActive
+	if self._touchAimEndConnection then
+		self._touchAimEndConnection:Disconnect()
+		self._touchAimEndConnection = nil
+	end
+	self._touchInputObject = nil
+	self._touchLastPosition = nil
+	if hadTouchAim and self._touchAimCameraActive then
+		CameraController:EndTouchAim()
+	end
+	self._touchAimCameraActive = false
+
 	for _, connection in ipairs(self._buttonConnections) do
 		connection:Disconnect()
 	end
@@ -545,6 +574,15 @@ function BombButtonController:_onHoldReleased()
 	self._pressing = false
 	self:_endCookTimer()
 	self:_syncCount()
+	if self._touchInputObject then
+		self._touchInputObject = nil
+		self._touchLastPosition = nil
+		self:_setTouchReleasedVisual()
+		if self._touchAimCameraActive then
+			CameraController:EndTouchAim()
+			self._touchAimCameraActive = false
+		end
+	end
 end
 
 function BombButtonController:_onCookingChanged()
@@ -554,6 +592,121 @@ function BombButtonController:_onCookingChanged()
 		end
 	elseif not BombController:IsHoldingBomb() then
 		self:_endCookTimer()
+	end
+end
+
+function BombButtonController:_setTouchPressedVisual()
+	local button = self._button
+	if not (button and not button:GetAttribute("OnCooldown")) then
+		return
+	end
+
+	local smallSize = self:_getSmallSize()
+	if smallSize then
+		self:_tweenButton({ Size = smallSize })
+	end
+end
+
+function BombButtonController:_setTouchReleasedVisual()
+	local button = self._button
+	if not (button and not button:GetAttribute("OnCooldown")) then
+		return
+	end
+
+	self:_tweenButton({ Size = self._normalSize or getDefaultSize(button) })
+end
+
+function BombButtonController:_beginTouchHold(inputObject: InputObject)
+	if self._touchInputObject ~= nil or inputObject.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+	if not BombController:BeginBombHold() then
+		return
+	end
+	if self._touchAimEndConnection then
+		self._touchAimEndConnection:Disconnect()
+		self._touchAimEndConnection = nil
+	end
+
+	local position = inputObject.Position
+	self._touchInputObject = inputObject
+	self._touchLastPosition = Vector2.new(position.X, position.Y)
+	self._touchAimCameraActive = CameraController:BeginTouchAim()
+	self:_setTouchPressedVisual()
+end
+
+function BombButtonController:_endTouchAimAfterThrow()
+	if self._touchAimEndConnection then
+		self._touchAimEndConnection:Disconnect()
+		self._touchAimEndConnection = nil
+	end
+
+	local connection: RBXScriptConnection?
+	connection = BombController.ThrowReleased:Connect(function()
+		if self._touchAimEndConnection ~= connection then
+			return
+		end
+		self._touchAimEndConnection = nil
+		if connection then
+			connection:Disconnect()
+		end
+		if self._touchAimCameraActive then
+			CameraController:EndTouchAim()
+			self._touchAimCameraActive = false
+		end
+	end)
+	self._touchAimEndConnection = connection
+
+	task.delay(0.8, function()
+		if self._touchAimEndConnection ~= connection then
+			return
+		end
+		self._touchAimEndConnection = nil
+		if connection then
+			connection:Disconnect()
+		end
+		if self._touchAimCameraActive then
+			CameraController:EndTouchAim()
+			self._touchAimCameraActive = false
+		end
+	end)
+end
+
+function BombButtonController:_updateTouchHold(inputObject: InputObject)
+	if inputObject ~= self._touchInputObject or inputObject.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+
+	local position = inputObject.Position
+	local currentPosition = Vector2.new(position.X, position.Y)
+	local previousPosition = self._touchLastPosition or currentPosition
+	self._touchLastPosition = currentPosition
+
+	local delta = currentPosition - previousPosition
+	if delta.Magnitude > 0 then
+		CameraController:ApplyTouchAimDelta(delta)
+	end
+end
+
+function BombButtonController:_endTouchHold(inputObject: InputObject?)
+	if inputObject and inputObject ~= self._touchInputObject then
+		return
+	end
+	if not self._touchInputObject then
+		return
+	end
+
+	self._touchInputObject = nil
+	self._touchLastPosition = nil
+	local releaseStarted = BombController:ReleaseBombHold()
+	self:_setTouchReleasedVisual()
+	if releaseStarted then
+		self:_endTouchAimAfterThrow()
+	else
+		if self._touchAimCameraActive then
+			CameraController:EndTouchAim()
+			self._touchAimCameraActive = false
+		end
 	end
 end
 
@@ -577,28 +730,42 @@ function BombButtonController:_bindButton(button: ImageButton)
 		end
 	end))
 
-	table.insert(self._buttonConnections, button.MouseButton1Down:Connect(function()
-		if not BombController:BeginBombHold() then
-			return
-		end
-
-		if not button:GetAttribute("OnCooldown") then
-			local smallSize = self:_getSmallSize()
-			if smallSize then
-				self:_tweenButton({ Size = smallSize })
+	if not isTouchPrimary() then
+		table.insert(self._buttonConnections, button.MouseButton1Down:Connect(function()
+			if not BombController:BeginBombHold() then
+				return
 			end
-		end
-	end))
 
-	table.insert(self._buttonConnections, button.MouseButton1Up:Connect(function()
-		if not button:GetAttribute("OnCooldown") then
-			local hoverSize = self:_getHoverSize()
-			if hoverSize then
-				self:_tweenButton({ Size = hoverSize })
+			if not button:GetAttribute("OnCooldown") then
+				local smallSize = self:_getSmallSize()
+				if smallSize then
+					self:_tweenButton({ Size = smallSize })
+				end
 			end
-		end
-		BombController:ReleaseBombHold()
-	end))
+		end))
+
+		table.insert(self._buttonConnections, button.MouseButton1Up:Connect(function()
+			if not button:GetAttribute("OnCooldown") then
+				local hoverSize = self:_getHoverSize()
+				if hoverSize then
+					self:_tweenButton({ Size = hoverSize })
+				end
+			end
+			BombController:ReleaseBombHold()
+		end))
+	end
+
+	if UserInputService.TouchEnabled then
+		table.insert(self._buttonConnections, button.InputBegan:Connect(function(inputObject: InputObject)
+			self:_beginTouchHold(inputObject)
+		end))
+		table.insert(self._buttonConnections, UserInputService.InputChanged:Connect(function(inputObject: InputObject)
+			self:_updateTouchHold(inputObject)
+		end))
+		table.insert(self._buttonConnections, UserInputService.InputEnded:Connect(function(inputObject: InputObject)
+			self:_endTouchHold(inputObject)
+		end))
+	end
 
 	table.insert(self._buttonConnections, button.MouseLeave:Connect(function()
 		self._hovering = false

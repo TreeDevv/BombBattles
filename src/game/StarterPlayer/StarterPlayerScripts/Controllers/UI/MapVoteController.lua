@@ -142,6 +142,16 @@ local function getChoiceVoters(state, choiceId: string): { number }
 	return voters
 end
 
+local function getChoiceVoteCount(state, choiceId: string): number
+	local voteCounts = state and state.voteCounts
+	local count = if typeof(voteCounts) == "table" then voteCounts[choiceId] else nil
+	if typeof(count) == "number" then
+		return math.max(0, count)
+	end
+
+	return #getChoiceVoters(state, choiceId)
+end
+
 local function findSelectedChoiceId(state): string
 	local choices = getVoteChoices(state)
 	for _, choice in ipairs(choices) do
@@ -286,7 +296,9 @@ function MapVoteController:_setCardChoice(card: CardRecord, choice: VoteChoice?,
 	card.button.Selectable = choice ~= nil
 
 	if card.label then
-		card.label.Text = if choice then choice.displayName else ""
+		card.label.Text = if choice
+			then ("%s (%d)"):format(choice.displayName, getChoiceVoteCount(state, choice.choiceId))
+			else ""
 	end
 	if card.back then
 		local thumbnailImage = choice and choice.thumbnailImage
@@ -323,7 +335,7 @@ function MapVoteController:_syncVisibility()
 	local state = RoundController:GetState()
 	local roundId = if state and typeof(state.roundId) == "number" then state.roundId else 0
 	local votingOpen = state ~= nil
-		and state.state == RoundStates.Intermission
+		and state.state == RoundStates.MapVoting
 		and state.votingOpen == true
 		and #getVoteChoices(state) > 0
 
@@ -363,7 +375,6 @@ function MapVoteController:_submitChoice(card: CardRecord)
 	self._pendingChoiceId = card.choiceId
 	self:_render()
 	RoundController:SubmitMapVote(card.choiceId)
-	FrameController:CloseFrame(FRAME_NAME)
 end
 
 function MapVoteController:_captureAvatarTemplate(playerList: Frame?): ImageLabel?

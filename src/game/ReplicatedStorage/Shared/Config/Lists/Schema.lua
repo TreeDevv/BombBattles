@@ -51,6 +51,11 @@ return {
 		value = {},
 	},
 
+	AbilityGamesUsed = {
+		key = "abilityGamesUsed",
+		value = {},
+	},
+
 	DailyLeaderboardStats = {
 		key = "dailyLeaderboardStats",
 		value = {

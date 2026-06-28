@@ -14,6 +14,7 @@ InputBindings.Actions = table.freeze({
 function InputBindings.GetShiftLockInputs(): { any }
 	return {
 		PlayerSettings:GetKeyCode("shiftLockKey", Enum.KeyCode.LeftControl),
+		Enum.KeyCode.ButtonR3,
 	}
 end
 

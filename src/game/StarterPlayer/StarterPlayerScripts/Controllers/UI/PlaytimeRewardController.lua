@@ -1,9 +1,9 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local TweenService = game:GetService("TweenService")
 
 local PlaytimeRewardConfig = require(ReplicatedStorage.Shared.Config.PlaytimeRewardConfig)
+local Signal = require(ReplicatedStorage.Shared.Common.Signal)
 
 local FrameController = require(script.Parent:WaitForChild("FrameController"))
 
@@ -11,8 +11,8 @@ local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local FRAME_NAME = PlaytimeRewardConfig.FrameName
-local PROGRESS_TWEEN = TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local LOCKED_CIRCLE_COLOR = Color3.fromRGB(0, 0, 0)
+local DEFAULT_COMPLETE_CIRCLE_COLOR = Color3.fromRGB(255, 236, 128)
 
 type RewardPayload = {
 	type: string,
@@ -47,19 +47,19 @@ type RewardCard = {
 
 local PlaytimeRewardController = {}
 
+PlaytimeRewardController.ClaimableCountChanged = Signal.new()
 PlaytimeRewardController._connections = {} :: { RBXScriptConnection }
 PlaytimeRewardController._frameConnections = {} :: { RBXScriptConnection }
 PlaytimeRewardController._frame = nil :: GuiObject?
 PlaytimeRewardController._timer = nil :: TextLabel?
 PlaytimeRewardController._progressSlider = nil :: UIGradient?
-PlaytimeRewardController._progressValue = nil :: NumberValue?
-PlaytimeRewardController._progressTween = nil :: Tween?
 PlaytimeRewardController._rewardCards = {} :: { RewardCard }
 PlaytimeRewardController._circles = {} :: { Frame }
 PlaytimeRewardController._circleCompleteColor = nil :: Color3?
 PlaytimeRewardController._state = nil :: StatePayload?
 PlaytimeRewardController._requestRemote = nil :: RemoteFunction?
 PlaytimeRewardController._stateRemote = nil :: RemoteEvent?
+PlaytimeRewardController._claimableCount = 0
 PlaytimeRewardController._rebindQueued = false
 PlaytimeRewardController._warnedMissingFrame = false
 
@@ -208,6 +208,60 @@ local function sortByPosition(left: GuiObject, right: GuiObject): boolean
 	return left.Position.X.Offset < right.Position.X.Offset
 end
 
+local function getCircleIndex(circle: GuiObject): number?
+	local indexText = string.match(circle.Name, "^Circle(%d+)$")
+	local index = tonumber(indexText)
+	if index and index >= 1 then
+		return index
+	end
+	return nil
+end
+
+local function sortCircles(left: Frame, right: Frame): boolean
+	local leftIndex = getCircleIndex(left)
+	local rightIndex = getCircleIndex(right)
+	if leftIndex and rightIndex and leftIndex ~= rightIndex then
+		return leftIndex < rightIndex
+	elseif leftIndex then
+		return true
+	elseif rightIndex then
+		return false
+	end
+	return sortByPosition(left, right)
+end
+
+local function getClaimableCount(state: StatePayload?): number
+	if not state then
+		return 0
+	end
+
+	local elapsed = tonumber(state.sessionSeconds) or 0
+	local claimedTiers = if typeof(state.claimedTiers) == "table" then state.claimedTiers else {}
+	local count = 0
+	for _, tier in ipairs(state.tiers or {}) do
+		local targetSeconds = tonumber(tier.targetSeconds) or math.huge
+		if claimedTiers[tier.id] ~= true and elapsed >= targetSeconds then
+			count += 1
+		end
+	end
+	return count
+end
+
+local function getHighestClaimedTierIndex(state: StatePayload?): number
+	if not state then
+		return 0
+	end
+
+	local claimedTiers = if typeof(state.claimedTiers) == "table" then state.claimedTiers else {}
+	local highestIndex = 0
+	for index, tier in ipairs(state.tiers or {}) do
+		if claimedTiers[tier.id] == true then
+			highestIndex = math.max(highestIndex, index)
+		end
+	end
+	return highestIndex
+end
+
 function PlaytimeRewardController:_claimTier(tierId: string)
 	local remote = self._requestRemote
 	if not remote then
@@ -301,16 +355,17 @@ function PlaytimeRewardController:_buildCircles()
 	end
 
 	for _, child in ipairs(progressBar:GetChildren()) do
-		if child:IsA("Frame") and child.Name == "Circle" then
+		if child:IsA("Frame") and (child.Name == "Circle" or getCircleIndex(child) ~= nil) then
 			table.insert(self._circles, child)
 		end
 	end
 
-	table.sort(self._circles, sortByPosition)
+	table.sort(self._circles, sortCircles)
 	local firstCircle = self._circles[1]
-	if firstCircle then
+	if firstCircle and firstCircle.BackgroundColor3 ~= LOCKED_CIRCLE_COLOR then
 		self._circleCompleteColor = firstCircle.BackgroundColor3
 	end
+	self._circleCompleteColor = self._circleCompleteColor or DEFAULT_COMPLETE_CIRCLE_COLOR
 end
 
 function PlaytimeRewardController:_updateRewardCards()
@@ -365,33 +420,15 @@ end
 
 function PlaytimeRewardController:_updateProgress()
 	local state = self._state
-	if not state then
-		return
-	end
 
-	local elapsed = tonumber(state.sessionSeconds) or 0
-	local maxTargetSeconds = math.max(1, tonumber(state.maxTargetSeconds) or PlaytimeRewardConfig.GetMaxTargetSeconds())
-	local ratio = math.clamp(elapsed / maxTargetSeconds, 0, 1)
+	local claimedIndex = getHighestClaimedTierIndex(state)
+	local tierCount = math.max(1, if state then #(state.tiers or {}) else 0, #self._circles)
+	local ratio = math.clamp(claimedIndex / tierCount, 0, 1)
+	setSliderProgress(self._progressSlider, ratio)
 
-	if not self._progressValue then
-		self._progressValue = Instance.new("NumberValue")
-		self._progressValue.Value = 0
-		track(self._frameConnections, self._progressValue.Changed:Connect(function(value)
-			setSliderProgress(self._progressSlider, value)
-		end))
-	end
-
-	if self._progressTween then
-		self._progressTween:Cancel()
-	end
-	self._progressTween = TweenService:Create(self._progressValue, PROGRESS_TWEEN, { Value = ratio })
-	self._progressTween:Play()
-
-	local completeColor = self._circleCompleteColor or Color3.fromRGB(255, 236, 128)
+	local completeColor = self._circleCompleteColor or DEFAULT_COMPLETE_CIRCLE_COLOR
 	for index, circle in ipairs(self._circles) do
-		local tier = (state.tiers or {})[index]
-		local reached = tier ~= nil and elapsed >= (tonumber(tier.targetSeconds) or math.huge)
-		circle.BackgroundColor3 = if reached then completeColor else LOCKED_CIRCLE_COLOR
+		circle.BackgroundColor3 = if index <= claimedIndex then completeColor else LOCKED_CIRCLE_COLOR
 	end
 end
 
@@ -399,6 +436,16 @@ function PlaytimeRewardController:_render()
 	self:_updateRewardCards()
 	self:_updateTimer()
 	self:_updateProgress()
+end
+
+function PlaytimeRewardController:_syncClaimableCount()
+	local nextCount = getClaimableCount(self._state)
+	if nextCount == self._claimableCount then
+		return
+	end
+
+	self._claimableCount = nextCount
+	self.ClaimableCountChanged:Fire(nextCount)
 end
 
 function PlaytimeRewardController:_setState(payload: any)
@@ -425,10 +472,15 @@ function PlaytimeRewardController:_setState(payload: any)
 	payload.maxTargetSeconds = math.max(1, tonumber(payload.maxTargetSeconds) or PlaytimeRewardConfig.GetMaxTargetSeconds())
 
 	self._state = payload :: StatePayload
+	self:_syncClaimableCount()
 	if #self._rewardCards == 0 then
 		self:_buildRewardCards()
 	end
 	self:_render()
+end
+
+function PlaytimeRewardController:GetClaimableCount(): number
+	return self._claimableCount
 end
 
 function PlaytimeRewardController:_requestState()
@@ -473,8 +525,6 @@ function PlaytimeRewardController:_bindFrame(frame: Instance?)
 	self._frame = nil
 	self._timer = nil
 	self._progressSlider = nil
-	self._progressValue = nil
-	self._progressTween = nil
 	self._circleCompleteColor = nil
 
 	if not (frame and frame:IsA("GuiObject")) then
@@ -539,7 +589,12 @@ function PlaytimeRewardController:OnStart()
 
 	self:_bindPlayerGui(PlayerGui)
 	track(self._connections, PlayerGui.DescendantAdded:Connect(function(descendant)
-		if descendant.Name == FRAME_NAME or descendant.Name == "DivineTemplate" or descendant.Name == "Circle" then
+		if
+			descendant.Name == FRAME_NAME
+			or descendant.Name == "DivineTemplate"
+			or descendant.Name == "Circle"
+			or string.match(descendant.Name, "^Circle%d+$") ~= nil
+		then
 			self:_scheduleRebind()
 		end
 	end))

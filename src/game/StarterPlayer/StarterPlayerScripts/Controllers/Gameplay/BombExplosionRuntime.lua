@@ -1,4 +1,5 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
@@ -12,6 +13,8 @@ local VoxelDebris = require(ReplicatedStorage.Packages.VoxManager.Voxelizer.Debr
 
 local BombExplosionRuntime = {}
 local MAX_TERRAIN_DEBRIS_PARTS_PER_EXPLOSION = 48
+local MAX_TERRAIN_DEBRIS_PARTS_PER_HEARTBEAT = 16
+local MAX_TERRAIN_DEBRIS_PAYLOADS_PER_HEARTBEAT = 1
 local FULL_VFX_WINDOW_SECONDS = 0.35
 local MAX_FULL_VFX_PER_WINDOW = 4
 local MAX_FULL_VFX_PER_HEARTBEAT = 2
@@ -22,6 +25,8 @@ local fullVfxWindowStartedAt = 0
 local fullVfxWindowCount = 0
 local fullVfxHeartbeat = 0
 local fullVfxHeartbeatCount = 0
+local terrainDebrisQueue = {}
+local terrainDebrisConnection: RBXScriptConnection? = nil
 
 function BombExplosionRuntime.CreateVisibilityCache()
 	return ExplosionVisibility.CreateCache()
@@ -166,6 +171,81 @@ function BombExplosionRuntime.PlayEffect(controller, context, position: Vector3,
 	end
 end
 
+local function stopTerrainDebrisQueueIfIdle()
+	if #terrainDebrisQueue > 0 then
+		return
+	end
+	if terrainDebrisConnection then
+		terrainDebrisConnection:Disconnect()
+		terrainDebrisConnection = nil
+	end
+end
+
+local function finishTerrainDebrisRecord(record)
+	RuntimeProfiler.Count("Client/BombController/TerrainDebrisPartsSpawned", record.spawnedParts or 0)
+	RuntimeProfiler.Count("Client/BombController/TerrainDebrisSpawnAttempts", record.spawnAttempts or 0)
+end
+
+local function processTerrainDebrisQueue()
+	local framePartsRemaining = MAX_TERRAIN_DEBRIS_PARTS_PER_HEARTBEAT
+	local payloadsProcessed = 0
+
+	while framePartsRemaining > 0 and payloadsProcessed < MAX_TERRAIN_DEBRIS_PAYLOADS_PER_HEARTBEAT and #terrainDebrisQueue > 0 do
+		local record = terrainDebrisQueue[1]
+		if record.remainingParts <= 0 or record.nextIndex > #record.payloads then
+			finishTerrainDebrisRecord(record)
+			table.remove(terrainDebrisQueue, 1)
+			continue
+		end
+
+		local payload = record.payloads[record.nextIndex]
+		record.nextIndex += 1
+		payloadsProcessed += 1
+
+		local maxParts = math.min(record.remainingParts, framePartsRemaining)
+		local spawned, attempts = VoxelDebris.spawnPayload(payload, {
+			maxParts = maxParts,
+		})
+		spawned = if typeof(spawned) == "number" then math.max(math.floor(spawned), 0) else 0
+		attempts = if typeof(attempts) == "number" then math.max(math.floor(attempts), 0) else 0
+
+		record.spawnedParts += spawned
+		record.spawnAttempts += attempts
+		record.remainingParts -= spawned
+		framePartsRemaining -= spawned
+
+		if record.remainingParts <= 0 or record.nextIndex > #record.payloads then
+			finishTerrainDebrisRecord(record)
+			table.remove(terrainDebrisQueue, 1)
+		end
+	end
+
+	RuntimeProfiler.Gauge("Client/BombController/TerrainDebrisQueueDepth", #terrainDebrisQueue)
+	stopTerrainDebrisQueueIfIdle()
+end
+
+local function ensureTerrainDebrisQueueConnection()
+	if terrainDebrisConnection then
+		return
+	end
+
+	terrainDebrisConnection = RunService.Heartbeat:Connect(processTerrainDebrisQueue)
+end
+
+local function enqueueTerrainDebris(payloads)
+	table.insert(terrainDebrisQueue, {
+		payloads = payloads,
+		nextIndex = 1,
+		remainingParts = MAX_TERRAIN_DEBRIS_PARTS_PER_EXPLOSION,
+		spawnedParts = 0,
+		spawnAttempts = 0,
+	})
+	RuntimeProfiler.Count("Client/BombController/TerrainDebrisQueued")
+	RuntimeProfiler.Count("Client/BombController/TerrainDebrisPayloadsQueued", #payloads)
+	RuntimeProfiler.Gauge("Client/BombController/TerrainDebrisQueueDepth", #terrainDebrisQueue)
+	ensureTerrainDebrisQueueConnection()
+end
+
 function BombExplosionRuntime.PlayTerrainDebris(controller, context, payloads)
 	if typeof(payloads) ~= "table" then
 		return
@@ -184,26 +264,7 @@ function BombExplosionRuntime.PlayTerrainDebris(controller, context, payloads)
 		return
 	end
 
-	local remainingParts = MAX_TERRAIN_DEBRIS_PARTS_PER_EXPLOSION
-	local spawnedParts = 0
-	local spawnAttempts = 0
-	for _, payload in ipairs(payloads) do
-		if remainingParts <= 0 then
-			break
-		end
-		local spawned, attempts = VoxelDebris.spawnPayload(payload, {
-			maxParts = remainingParts,
-		})
-		if typeof(spawned) == "number" and spawned > 0 then
-			spawnedParts += spawned
-			remainingParts -= spawned
-		end
-		if typeof(attempts) == "number" then
-			spawnAttempts += attempts
-		end
-	end
-	RuntimeProfiler.Count("Client/BombController/TerrainDebrisPartsSpawned", spawnedParts)
-	RuntimeProfiler.Count("Client/BombController/TerrainDebrisSpawnAttempts", spawnAttempts)
+	enqueueTerrainDebris(payloads)
 end
 
 function BombExplosionRuntime.HandleExplode(controller, context, payload, payloadPlayer: Player?)

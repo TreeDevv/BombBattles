@@ -228,7 +228,7 @@ function StickyBomb.OnActivate(context: ServerActivateContext): AbilityActivatio
 
 	local origin = getThrowOrigin(rootPart)
 	local aimDirection = getAimDirectionFromPayload(context.payload, rootPart.CFrame.LookVector)
-	local projectileId = createProjectileId(context.player)
+	local projectileId = AbilityBehaviorServices.GetClientProjectileId(context) or createProjectileId(context.player)
 	local skinId = BombSkinService:GetEquippedSkinId(context.player)
 	local launchSpeed = getDefinitionNumber(context.definition, "projectileLaunchSpeed", BombConfig.ProjectileLaunchSpeed)
 	local upwardVelocity = getDefinitionNumber(context.definition, "projectileUpwardVelocity", BombConfig.ProjectileUpwardVelocity)

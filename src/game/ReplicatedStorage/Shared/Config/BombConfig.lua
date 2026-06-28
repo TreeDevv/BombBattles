@@ -103,6 +103,8 @@ return table.freeze({
 	NearRadius = 15,
 	OuterRadius = 27,
 	TerrainDestructionRadius = 18,
+	TerrainDestructionShape = "Ellipsoid",
+	TerrainDestructionVerticalScale = 0.55,
 
 	PlayerDirectDamage = 100,
 	PlayerNearDamageMax = 70,

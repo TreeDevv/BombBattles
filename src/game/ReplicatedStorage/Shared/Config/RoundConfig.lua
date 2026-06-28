@@ -4,6 +4,7 @@ return {
 
 	MinPlayers = 2,
 	IntermissionSeconds = 30,
+	MapVoteSeconds = 15,
 	RoundStartingSeconds = 3,
 	RoundSeconds = 180,
 	PlayOfTheGameSeconds = 10,

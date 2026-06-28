@@ -546,7 +546,7 @@ function ResultsScreenController:_syncFromState()
 		self:_openForResults(results)
 	elseif state.state == RoundStates.Resetting then
 		FrameController:CloseFrame(RESULTS_FRAME_NAME, true)
-	elseif state.state == RoundStates.Intermission or state.state == RoundStates.Active then
+	elseif state.state == RoundStates.MapVoting or state.state == RoundStates.Intermission or state.state == RoundStates.Active then
 		self._dismissedRoundId = nil
 		self._shownRoundId = nil
 		FrameController:CloseFrame(RESULTS_FRAME_NAME, true)

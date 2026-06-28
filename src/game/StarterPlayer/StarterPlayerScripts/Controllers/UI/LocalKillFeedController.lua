@@ -1,7 +1,9 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 
+local AudioSettings = require(ReplicatedStorage.Shared.Audio.AudioSettings)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -12,6 +14,10 @@ local KILL_FEED_REMOTE_NAME = "KillFeed"
 local HUD_NAME = "HUD"
 local FEED_NAME = "Kills"
 local TEMPLATE_NAME = "Template"
+local ASSETS_FOLDER_NAME = "Assets"
+local SOUNDS_FOLDER_NAME = "Sounds"
+local KILL_SOUND_NAME = "KillSound"
+local KILL_SOUND_CLEANUP_SECONDS = 8
 local MAX_ENTRIES = 4
 local HOLD_SECONDS = 3.2
 local ENTER_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
@@ -205,6 +211,49 @@ local function createFadeLayer(hud: ScreenGui): Frame
 	fadeLayer.ZIndex = 100
 	fadeLayer.Parent = hud
 	return fadeLayer
+end
+
+local function getKillSoundTemplate(): Sound?
+	local assets = ReplicatedStorage:FindFirstChild(ASSETS_FOLDER_NAME)
+	local sounds = assets and assets:FindFirstChild(SOUNDS_FOLDER_NAME)
+	local sound = sounds and sounds:FindFirstChild(KILL_SOUND_NAME)
+	return if sound and sound:IsA("Sound") then sound else nil
+end
+
+local function playKillSound()
+	local template = getKillSoundTemplate()
+	if not template or template.SoundId == "" then
+		return
+	end
+
+	local sound = template:Clone()
+	sound.Looped = false
+	sound.PlayOnRemove = false
+	sound.TimePosition = 0
+	sound.SoundGroup = AudioSettings.GetGroup("SFX")
+	sound.Parent = SoundService
+
+	local endedConnection: RBXScriptConnection? = nil
+	endedConnection = sound.Ended:Connect(function()
+		if endedConnection then
+			endedConnection:Disconnect()
+			endedConnection = nil
+		end
+		if sound.Parent then
+			sound:Destroy()
+		end
+	end)
+
+	sound:Play()
+	task.delay(KILL_SOUND_CLEANUP_SECONDS, function()
+		if endedConnection then
+			endedConnection:Disconnect()
+			endedConnection = nil
+		end
+		if sound.Parent then
+			sound:Destroy()
+		end
+	end)
 end
 
 local function setAvatarImage(image: ImageLabel | ImageButton, userId: any)
@@ -409,6 +458,8 @@ function LocalKillFeedController:_addEntry(payload)
 	if not self:_shouldAcceptPayload(payload) then
 		return
 	end
+
+	playKillSound()
 
 	local feed = self._feed
 	local template = self._template

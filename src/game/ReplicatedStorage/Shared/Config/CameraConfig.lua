@@ -42,6 +42,13 @@ return table.freeze({
 	FirstPersonHideAccessories = true,
 	MouseBehavior = Enum.MouseBehavior.LockCenter,
 	LockMouseIconEnabled = false,
+	TouchAimYawSensitivity = 0.005,
+	TouchAimPitchSensitivity = 0.0045,
+	TouchAimMinPitchDegrees = -55,
+	TouchAimMaxPitchDegrees = 45,
+	TouchAimFocusHeight = 2.2,
+	TouchAimMinDistance = 7,
+	TouchAimMaxDistance = 18,
 
 	MaxStrafeRollDegrees = 1.25,
 	RollResponsiveness = 12,

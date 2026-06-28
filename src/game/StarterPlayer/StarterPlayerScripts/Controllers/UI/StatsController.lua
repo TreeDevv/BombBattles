@@ -33,7 +33,7 @@ local OWNED_ABILITIES_KEY = Schema.OwnedAbilities and Schema.OwnedAbilities.key 
 local GAMES_PLAYED_KEY = Schema.GamesPlayed and Schema.GamesPlayed.key or "gamesPlayed"
 local LOSSES_KEY = Schema.Losses and Schema.Losses.key or "losses"
 local BEST_WIN_STREAK_KEY = Schema.BestWinStreak and Schema.BestWinStreak.key or "bestWinStreak"
-local ABILITY_USAGE_KEY = Schema.AbilityUsage and Schema.AbilityUsage.key or "abilityUsage"
+local ABILITY_GAMES_USED_KEY = Schema.AbilityGamesUsed and Schema.AbilityGamesUsed.key or "abilityGamesUsed"
 
 type ValueTweenRecord = {
 	tween: Tween,
@@ -67,7 +67,7 @@ local WATCHED_DATA_KEYS = {
 	[GAMES_PLAYED_KEY] = true,
 	[LOSSES_KEY] = true,
 	[BEST_WIN_STREAK_KEY] = true,
-	[ABILITY_USAGE_KEY] = true,
+	[ABILITY_GAMES_USED_KEY] = true,
 }
 
 local StatsController = {}
@@ -135,8 +135,10 @@ local function formatHours(seconds: number): string
 	return ("%s %s"):format(formatInteger(hours), unit)
 end
 
-local function formatRounds(value: number): string
-	return ("%s Rounds"):format(formatInteger(value))
+local function formatGames(value: number): string
+	local rounded = roundNonNegative(value)
+	local unit = if rounded == 1 then "Game" else "Games"
+	return ("%s %s"):format(formatInteger(rounded), unit)
 end
 
 local function scaleUDim2X(size: UDim2, ratio: number): UDim2
@@ -169,6 +171,18 @@ local function getCatalogOrder(): { [string]: number }
 	return order
 end
 
+local function getAbilityGamesUsed(gamesUsed: any, abilityId: string): number
+	if typeof(gamesUsed) ~= "table" then
+		return 0
+	end
+
+	local record = gamesUsed[abilityId]
+	if typeof(record) == "table" then
+		return roundNonNegative(record.count)
+	end
+	return 0
+end
+
 local function getOwnedAbilities(): { string }
 	local rawOwned = DataController:Get(OWNED_ABILITIES_KEY)
 	local ownedMap = {}
@@ -190,15 +204,15 @@ local function getOwnedAbilities(): { string }
 		end
 	end
 
-	local usage = DataController:Get(ABILITY_USAGE_KEY)
+	local gamesUsed = DataController:Get(ABILITY_GAMES_USED_KEY)
 	local catalogOrder = getCatalogOrder()
 	local owned = {}
 	for abilityId in pairs(ownedMap) do
 		table.insert(owned, abilityId)
 	end
 	table.sort(owned, function(leftId, rightId)
-		local leftUsage = if typeof(usage) == "table" then roundNonNegative(usage[leftId]) else 0
-		local rightUsage = if typeof(usage) == "table" then roundNonNegative(usage[rightId]) else 0
+		local leftUsage = getAbilityGamesUsed(gamesUsed, leftId)
+		local rightUsage = getAbilityGamesUsed(gamesUsed, rightId)
 		if leftUsage ~= rightUsage then
 			return leftUsage > rightUsage
 		end
@@ -394,12 +408,12 @@ end
 
 function StatsController:_renderAbilityRows()
 	local ownedAbilities = getOwnedAbilities()
-	local usage = DataController:Get(ABILITY_USAGE_KEY)
+	local gamesUsed = DataController:Get(ABILITY_GAMES_USED_KEY)
 	self:_ensureRowCount(#ownedAbilities)
 
 	local topUsage = 0
 	for _, abilityId in ipairs(ownedAbilities) do
-		local count = if typeof(usage) == "table" then roundNonNegative(usage[abilityId]) else 0
+		local count = getAbilityGamesUsed(gamesUsed, abilityId)
 		topUsage = math.max(topUsage, count)
 	end
 
@@ -412,7 +426,7 @@ function StatsController:_renderAbilityRows()
 		end
 
 		local definition = AbilityConfig.GetDefinition(abilityId)
-		local count = if typeof(usage) == "table" then roundNonNegative(usage[abilityId]) else 0
+		local count = getAbilityGamesUsed(gamesUsed, abilityId)
 		local ratio = if topUsage > 0 then count / topUsage else 0
 
 		rowRecord.row.LayoutOrder = index
@@ -423,7 +437,7 @@ function StatsController:_renderAbilityRows()
 		if rowRecord.icon and definition then
 			rowRecord.icon.Image = definition.icon
 		end
-		self:_setAnimatedNumber(rowRecord.amountLabel, count, formatRounds)
+		self:_setAnimatedNumber(rowRecord.amountLabel, count, formatGames)
 		self:_setAnimatedBar(rowRecord.bar, rowRecord.barBaseSize, ratio)
 	end
 end

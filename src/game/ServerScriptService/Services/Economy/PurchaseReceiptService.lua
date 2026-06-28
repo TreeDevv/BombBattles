@@ -19,6 +19,12 @@ local STARTER_PACK_KEY = "StarterPack"
 local STARTER_PACK_OWNED_ATTR = "StarterPackOwned"
 
 local GIFT_OWNERSHIP_REQUIREMENTS = {
+	InfinityBundle = {
+		abilityId = "Infinity",
+		bombSkinId = "HollowPurple",
+		highlightIntroId = "HollowPurple",
+		emoteId = "Honored One",
+	},
 	FatPack = {
 		abilityId = "FatBomb",
 		bombSkinId = "FatGuy",
@@ -27,6 +33,7 @@ local GIFT_OWNERSHIP_REQUIREMENTS = {
 
 local GIFT_ONE_TIME_PRODUCT_TARGETS = {
 	StarterPack = true,
+	InfinityBundle = true,
 	FatPack = true,
 }
 
@@ -385,6 +392,22 @@ local function profileDataOwnsTarget(data, targetKey: string): boolean
 		if typeof(bombSkinId) == "string" and bombSkinId ~= "" then
 			local ownedBombSkins = data.ownedBombSkins
 			if typeof(ownedBombSkins) ~= "table" or ownedBombSkins[bombSkinId] ~= true then
+				return false
+			end
+		end
+
+		local highlightIntroId = requirements.highlightIntroId
+		if typeof(highlightIntroId) == "string" and highlightIntroId ~= "" then
+			local ownedHighlightIntros = data.ownedHighlightIntros
+			if typeof(ownedHighlightIntros) ~= "table" or ownedHighlightIntros[highlightIntroId] ~= true then
+				return false
+			end
+		end
+
+		local emoteId = requirements.emoteId
+		if typeof(emoteId) == "string" and emoteId ~= "" then
+			local ownedEmotes = data.ownedEmotes
+			if typeof(ownedEmotes) ~= "table" or ownedEmotes[emoteId] ~= true then
 				return false
 			end
 		end
@@ -826,10 +849,10 @@ local function processProductReceipt(receiptInfo)
 			source = "receipt",
 			isNew = true,
 		}
-		PurchaseReceipt.PurchaseProcessed:Fire(player, key or tostring(productId), context)
 		if key then
 			callConfigHook("product", key, "onProcessed", player, context)
 		end
+		PurchaseReceipt.PurchaseProcessed:Fire(player, key or tostring(productId), context)
 		sendClientSound(player, "Kaching")
 		sendPurchaseThanks(player, context.kind, key or tostring(productId), productId, context.source)
 	end

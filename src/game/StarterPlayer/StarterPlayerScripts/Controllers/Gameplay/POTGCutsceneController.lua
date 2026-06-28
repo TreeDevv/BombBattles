@@ -4,6 +4,7 @@ local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
+local SoundService = game:GetService("SoundService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
@@ -14,6 +15,7 @@ local RoundEndFlowConfig = require(ReplicatedStorage.Shared.Config.RoundEndFlowC
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
 local Signal = require(ReplicatedStorage.Shared.Common.Signal)
+local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -37,6 +39,10 @@ local REMOTE_WAIT_SECONDS = 10
 local TRACK_HOLD_LEAD_SECONDS = 1 / 30
 local TRACK_FINAL_POSE_OFFSET_SECONDS = 1 / 240
 local PREPARED_HIGHLIGHT_INTROS_FOLDER_NAME = "PreparedHighlightIntros"
+local CUTSCENE_TRACKS_FOLDER_NAME = "CutsceneTracks"
+local CUTSCENE_SOUND_FALLBACKS = table.freeze({
+	HollowPurple = "BB Gojo Cutscene",
+})
 local moonVFXModule: any? = nil
 local moonVFXModuleInitialized = false
 local checkedForMoonVFXModule = false
@@ -83,6 +89,7 @@ type ActiveCutscene = {
 	fadeTween: Tween?,
 	connections: { RBXScriptConnection },
 	tracks: { AnimationTrack },
+	activeSounds: { Sound },
 	heldTracks: { TrackHoldRecord },
 	cameraTrackHold: TrackHoldRecord?,
 	cameraHoldCFrame: CFrame?,
@@ -97,6 +104,9 @@ type ActiveCutscene = {
 	roundId: number?,
 	completionRemote: RemoteEvent?,
 	isRoundIntro: boolean,
+	isPreview: boolean,
+	revealAfterPreviewCallback: boolean,
+	previewOnComplete: ((string) -> ())?,
 }
 
 local POTGCutsceneController = {}
@@ -148,6 +158,13 @@ local function getRoundIntroCompleteRemote(): RemoteEvent?
 
 	local remote = folder:WaitForChild(RoundEndFlowConfig.Remotes.POTGIntroComplete, REMOTE_WAIT_SECONDS)
 	return if remote and remote:IsA("RemoteEvent") then remote else nil
+end
+
+local function getConfiguredDuration(value: any, fallback: number): number
+	if typeof(value) == "number" and value == value then
+		return math.max(value, 0)
+	end
+	return fallback
 end
 
 local function getControls(): Controls?
@@ -1137,6 +1154,13 @@ local function getCFrameValue(value: any): CFrame?
 	return if typeof(value) == "CFrame" then value else nil
 end
 
+local function getPreviewCompletionCallback(payload): ((string) -> ())?
+	if typeof(payload) == "table" and payload.preview == true and type(payload.onComplete) == "function" then
+		return payload.onComplete
+	end
+	return nil
+end
+
 debugCutscene = function(message: string, ...)
 	if DEBUG_CUTSCENE then
 		print("[POTGCutsceneController] " .. message, ...)
@@ -1319,6 +1343,70 @@ local function stopTracks(tracks: { AnimationTrack })
 			track:Stop(0)
 			track:Destroy()
 		end)
+	end
+end
+
+local function stopCutsceneSounds(sounds: { Sound })
+	for _, sound in ipairs(sounds) do
+		pcall(function()
+			sound:Stop()
+			sound:Destroy()
+		end)
+	end
+	table.clear(sounds)
+end
+
+local function getCutsceneTrackSound(soundName: any): Sound?
+	if typeof(soundName) ~= "string" or soundName == "" then
+		return nil
+	end
+
+	local tracksFolder = workspace:FindFirstChild(CUTSCENE_TRACKS_FOLDER_NAME)
+	local source = tracksFolder and tracksFolder:FindFirstChild(soundName)
+	if source and source:IsA("Sound") then
+		return source
+	end
+
+	local fallbackName = CUTSCENE_SOUND_FALLBACKS[soundName]
+	local fallback = SoundUtil.Resolve(fallbackName or soundName)
+	return if fallback and fallback:IsA("Sound") then fallback else nil
+end
+
+local function playCutsceneSound(active: ActiveCutscene, soundName: any)
+	local source = getCutsceneTrackSound(soundName)
+	if not source then
+		warn(("[POTGCutsceneController] Missing cutscene sound %s.%s"):format(
+			CUTSCENE_TRACKS_FOLDER_NAME,
+			tostring(soundName)
+		))
+		return
+	end
+
+	local sound = source:Clone()
+	sound.Name = "POTGHighlightIntroSound_" .. source.Name
+	sound.Looped = false
+	sound.TimePosition = 0
+	sound.PlayOnRemove = false
+	sound.Parent = SoundService
+	table.insert(active.activeSounds, sound)
+
+	local endedConnection: RBXScriptConnection? = nil
+	endedConnection = sound.Ended:Connect(function()
+		if endedConnection then
+			endedConnection:Disconnect()
+		end
+		if sound.Parent then
+			sound:Destroy()
+		end
+	end)
+	table.insert(active.connections, endedConnection)
+
+	local ok, err = pcall(function()
+		sound:Play()
+	end)
+	if not ok then
+		warn(("[POTGCutsceneController] Failed to play cutscene sound %s: %s"):format(source.Name, tostring(err)))
+		sound:Destroy()
 	end
 end
 
@@ -2073,6 +2161,11 @@ local function runMoonCodeEvent(active: ActiveCutscene, code: string, expectedEf
 end
 
 local function runCutsceneEvent(active: ActiveCutscene, event)
+	if event.type == "Sound" then
+		playCutsceneSound(active, event.soundName)
+		return
+	end
+
 	if event.type == "Code" and typeof(event.code) == "string" then
 		if runMoonCodeEvent(active, event.code, typeof(event.effectName) == "string" and event.effectName or nil) then
 			return
@@ -2217,6 +2310,7 @@ function POTGCutsceneController:_cleanup(active: ActiveCutscene, restoreCamera: 
 	self:_unbindCamera()
 	disconnectConnections(active.connections)
 	stopTracks(active.tracks)
+	stopCutsceneSounds(active.activeSounds)
 	if active.dofEffect and active.dofEffect.Parent then
 		active.dofEffect:Destroy()
 	end
@@ -2251,6 +2345,28 @@ function POTGCutsceneController:_completeRoundIntro(roundId: number?, reason: st
 		reason = reason,
 	})
 	self:_flushAfterRoundIntro()
+end
+
+function POTGCutsceneController:_completePreview(active: ActiveCutscene, reason: string, deferCallback: boolean?)
+	local callback = active.previewOnComplete
+	if not callback then
+		return
+	end
+
+	active.previewOnComplete = nil
+	if deferCallback == false then
+		local ok, err = pcall(function()
+			callback(reason)
+		end)
+		if not ok then
+			warn(("[POTGCutsceneController] Preview completion callback failed: %s"):format(tostring(err)))
+		end
+		return
+	end
+
+	task.defer(function()
+		callback(reason)
+	end)
 end
 
 function POTGCutsceneController:_reportCompletion(active: ActiveCutscene, reason: string)
@@ -2301,6 +2417,7 @@ function POTGCutsceneController:_finish(active: ActiveCutscene, fadeOut: boolean
 		end
 		self:_cleanup(active, true, true)
 		self:_reportCompletion(active, "Canceled")
+		self:_completePreview(active, "Canceled")
 		return
 	end
 
@@ -2331,7 +2448,12 @@ function POTGCutsceneController:_finish(active: ActiveCutscene, fadeOut: boolean
 			self:_destroyOverlay(active)
 			debugCutscene("Finished", "roundId", tostring(active.roundId), "reason", "Completed")
 			self:_reportCompletion(active, "Completed")
+			self:_completePreview(active, "Completed")
 			return
+		end
+
+		if active.revealAfterPreviewCallback then
+			self:_completePreview(active, "Completed", false)
 		end
 
 		local fromBlack = self:_startFade(active, 1, FADE_FROM_BLACK_SECONDS)
@@ -2344,6 +2466,7 @@ function POTGCutsceneController:_finish(active: ActiveCutscene, fadeOut: boolean
 		self:_destroyOverlay(active)
 		debugCutscene("Finished", "roundId", tostring(active.roundId), "reason", "Completed")
 		self:_reportCompletion(active, "Completed")
+		self:_completePreview(active, "Completed")
 	end)
 end
 
@@ -2432,8 +2555,20 @@ end
 function POTGCutsceneController:_play(payload)
 	self:_cancelActive()
 	self._restoreSerial += 1
+	local restoreSerial = self._restoreSerial
 
 	local isRoundIntro = typeof(payload) == "table" and payload.type == "POTGIntro"
+	local isPreview = typeof(payload) == "table" and payload.preview == true
+	local previewOnComplete = getPreviewCompletionCallback(payload)
+	local function completePreview(reason: string)
+		if previewOnComplete then
+			local callback = previewOnComplete
+			previewOnComplete = nil
+			task.defer(function()
+				callback(reason)
+			end)
+		end
+	end
 	local cutsceneSpec = POTGCutsceneConfig.GetCutscene(
 		if typeof(payload) == "table" then payload.cutsceneId else POTGCutsceneConfig.DefaultCutsceneId
 	)
@@ -2446,6 +2581,7 @@ function POTGCutsceneController:_play(payload)
 		if isRoundIntro then
 			self:_reportPayloadCompletion(payload, "Unavailable")
 		end
+		completePreview("Unavailable")
 		return
 	end
 
@@ -2453,6 +2589,7 @@ function POTGCutsceneController:_play(payload)
 		if isRoundIntro then
 			self:_reportPayloadCompletion(payload, "InvalidTemplate")
 		end
+		completePreview("InvalidTemplate")
 		return
 	end
 
@@ -2462,8 +2599,10 @@ function POTGCutsceneController:_play(payload)
 
 	local cameraBone = getCameraPart(clone, cutsceneSpec)
 	local camRigAnimator = getAnimationControllerAnimatorFromRig(clone, cutsceneSpec.cameraRigName)
-	local characterAnimator =
-		if isRoundIntro then applyCandidateAppearanceToAuthoredRig(clone, cutsceneSpec, payload, serverPreparedTemplate) else nil
+	local shouldApplyCandidateAppearance = isRoundIntro or (isPreview and getCandidateUserId(payload) ~= nil)
+	local characterAnimator = if shouldApplyCandidateAppearance
+		then applyCandidateAppearanceToAuthoredRig(clone, cutsceneSpec, payload, serverPreparedTemplate)
+		else nil
 	characterAnimator = characterAnimator or getHumanoidAnimatorFromRig(clone, cutsceneSpec.characterRigName)
 	if not (cameraBone and camRigAnimator and characterAnimator) then
 		warnMissingCutsceneRequirements(cutsceneSpec, clone, cameraBone, camRigAnimator, characterAnimator)
@@ -2471,12 +2610,13 @@ function POTGCutsceneController:_play(payload)
 		if isRoundIntro then
 			self:_reportPayloadCompletion(payload, "InvalidTemplate")
 		end
+		completePreview("InvalidTemplate")
 		return
 	end
 
 	prepCutsceneClone(clone)
 	hideCameraRigVisuals(clone, cutsceneSpec)
-	local targetCameraCFrame = if isRoundIntro then getCFrameValue(payload.cameraCFrame) else nil
+	local targetCameraCFrame = if isRoundIntro or isPreview then getCFrameValue(payload.cameraCFrame) else nil
 
 	local camTrack = loadTrack(
 		clone,
@@ -2506,6 +2646,7 @@ function POTGCutsceneController:_play(payload)
 		if isRoundIntro then
 			self:_reportPayloadCompletion(payload, "NoCameraTrackLength")
 		end
+		completePreview("NoCameraTrackLength")
 		return
 	end
 	if not characterTrack then
@@ -2519,6 +2660,7 @@ function POTGCutsceneController:_play(payload)
 		if isRoundIntro then
 			self:_reportPayloadCompletion(payload, "NoCharacterTrackLength")
 		end
+		completePreview("NoCharacterTrackLength")
 		return
 	end
 
@@ -2582,6 +2724,7 @@ function POTGCutsceneController:_play(payload)
 		fadeTween = nil,
 		connections = {},
 		tracks = tracks,
+		activeSounds = {},
 		heldTracks = heldTracks,
 		cameraTrackHold = cameraTrackHold,
 		cameraHoldCFrame = nil,
@@ -2596,7 +2739,11 @@ function POTGCutsceneController:_play(payload)
 		roundId = if isRoundIntro and typeof(payload.roundId) == "number" then payload.roundId else nil,
 		completionRemote = completionRemote,
 		isRoundIntro = isRoundIntro,
+		isPreview = isPreview,
+		revealAfterPreviewCallback = typeof(payload) == "table" and payload.revealAfterPreviewCallback == true,
+		previewOnComplete = previewOnComplete,
 	}
+	previewOnComplete = nil
 	initializeMotionRecordWorldPivots(active)
 	initializeFinalMotionHolds(active)
 	local preparedCamera = workspace.CurrentCamera
@@ -2611,6 +2758,18 @@ function POTGCutsceneController:_play(payload)
 		self.RoundIntroStarted:Fire({
 			roundId = active.roundId,
 		})
+
+		local timeoutSeconds = getConfiguredDuration(payload.introTimeoutSeconds, RoundEndFlowConfig.POTGIntroClientTimeoutSeconds or 4)
+		if timeoutSeconds > 0 then
+			task.delay(timeoutSeconds, function()
+				if self._restoreSerial ~= restoreSerial or self._active ~= active or active.completed then
+					return
+				end
+
+				debugCutscene("TimedOut", "roundId", tostring(active.roundId), "timeout", string.format("%.2f", timeoutSeconds))
+				self:_finish(active, false)
+			end)
+		end
 	end
 
 	task.spawn(function()
@@ -2629,6 +2788,46 @@ function POTGCutsceneController:_play(payload)
 		local fromBlack = self:_startFade(active, 1, FADE_FROM_BLACK_SECONDS)
 		self:_waitForFade(active, fromBlack)
 	end)
+end
+
+function POTGCutsceneController:PlayPreview(
+	cutsceneId: any,
+	onComplete: ((string) -> ())?,
+	options: { [string]: any }?
+): boolean
+	if self:IsRoundIntroActive() then
+		return false
+	end
+
+	local payload = {
+		cutsceneId = cutsceneId,
+		preview = true,
+		onComplete = onComplete,
+	}
+	if typeof(options) == "table" then
+		if typeof(options.cameraCFrame) == "CFrame" then
+			payload.cameraCFrame = options.cameraCFrame
+		end
+		if isFiniteNumber(options.potgPlayerUserId) then
+			payload.potgPlayerUserId = math.floor(options.potgPlayerUserId)
+		elseif isFiniteNumber(options.userId) then
+			payload.potgPlayerUserId = math.floor(options.userId)
+		end
+		if options.revealAfterPreviewCallback == true then
+			payload.revealAfterPreviewCallback = true
+		end
+	end
+
+	self:_play(payload)
+
+	return self._active ~= nil and self._active.isPreview == true
+end
+
+function POTGCutsceneController:CancelPreview()
+	local active = self._active
+	if active and active.isPreview == true then
+		self:_finish(active, false)
+	end
 end
 
 function POTGCutsceneController:IsRoundIntroActive(): boolean

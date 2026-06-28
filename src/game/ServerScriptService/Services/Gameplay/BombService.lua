@@ -10,6 +10,7 @@ local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibility)
 local BombDamage = require(ReplicatedStorage.Shared.Bombs.BombDamage)
+local BombLaunchClearance = require(ReplicatedStorage.Shared.Bombs.BombLaunchClearance)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
 local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
@@ -22,6 +23,7 @@ local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local AbilityService = require(ServerScriptService.Services.AbilityService)
 local BombProjectileService = require(ServerScriptService.Services.BombProjectileService)
 local BombSkinService = require(ServerScriptService.Services.BombSkinService)
+local CombatMotionService = require(ServerScriptService.Services.CombatMotionService)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local EmoteService = require(ServerScriptService.Services.EmoteService)
 local RoundService = require(ServerScriptService.Services.RoundService)
@@ -88,6 +90,10 @@ local activeProjectiles: { [string]: ProjectileState } = {}
 local seenRoundIds: { [Player]: number } = {}
 local characterConnections: { [Player]: RBXScriptConnection } = {}
 local nextProjectileId = 0
+local nextExplosionDestructionJobId = 0
+local explosionDestructionHeartbeatSerial = 0
+local explosionDestructionQueue = {}
+local MAX_EXPLOSION_DESTRUCTION_JOBS_PER_HEARTBEAT = 1
 
 local function now(): number
 	return workspace:GetServerTimeNow()
@@ -198,6 +204,55 @@ local function fireEffect(effectName: string, payload)
 	if effectRemote then
 		effectRemote:FireAllClients(effectName, payload)
 	end
+end
+
+local function countDebrisPayloads(debrisPayloads): number
+	return if typeof(debrisPayloads) == "table" then #debrisPayloads else 0
+end
+
+local function enqueueExplosionDestruction(position: Vector3, radius: number, sourceContext, options)
+	nextExplosionDestructionJobId += 1
+	table.insert(explosionDestructionQueue, {
+		id = nextExplosionDestructionJobId,
+		enqueuedAt = os.clock(),
+		enqueuedHeartbeat = explosionDestructionHeartbeatSerial,
+		position = position,
+		radius = radius,
+		sourceContext = sourceContext,
+		options = options,
+	})
+	RuntimeProfiler.Count("Server/BombService/ExplosionDestructionQueued")
+	RuntimeProfiler.Gauge("Server/BombService/ExplosionDestructionQueueDepth", #explosionDestructionQueue)
+end
+
+local function processExplosionDestructionQueue()
+	local processed = 0
+	while processed < MAX_EXPLOSION_DESTRUCTION_JOBS_PER_HEARTBEAT and #explosionDestructionQueue > 0 do
+		local job = table.remove(explosionDestructionQueue, 1)
+		if (tonumber(job.enqueuedHeartbeat) or 0) >= explosionDestructionHeartbeatSerial then
+			table.insert(explosionDestructionQueue, 1, job)
+			break
+		end
+
+		processed += 1
+		local queuedMs = math.max((os.clock() - (tonumber(job.enqueuedAt) or os.clock())) * 1000, 0)
+		RuntimeProfiler.RecordDurationMs("Server/BombService/ExplosionDestructionQueueDelay", queuedMs)
+
+		local destructionToken = RuntimeProfiler.Begin("Server/BombService/ExplosionDestructionWorker")
+		local debrisPayloads = DestructionService:DestroySphere(job.position, job.radius, job.sourceContext, job.options)
+		RuntimeProfiler.End("Server/BombService/ExplosionDestructionWorker", destructionToken)
+
+		local payloadCount = countDebrisPayloads(debrisPayloads)
+		RuntimeProfiler.Count("Server/BombService/ExplosionDestructionProcessed")
+		RuntimeProfiler.Count("Server/BombService/TerrainDebrisPayloads", payloadCount)
+		if payloadCount > 0 then
+			fireEffect("TerrainDebris", {
+				payloads = debrisPayloads,
+			})
+		end
+	end
+
+	RuntimeProfiler.Gauge("Server/BombService/ExplosionDestructionQueueDepth", #explosionDestructionQueue)
 end
 
 local function setBombAttributes(player: Player, count: number, rechargeEndsAt: number?)
@@ -363,7 +418,13 @@ local function sanitizeAimDirection(direction: any, fallback: Vector3): Vector3
 end
 
 local function getThrowOrigin(rootPart: BasePart): Vector3
-	return BombThrowOrigin.GetOrigin(rootPart)
+	return BombLaunchClearance.ResolveOrigin(rootPart, BombThrowOrigin.GetOrigin(rootPart), {
+		character = rootPart:FindFirstAncestorOfClass("Model"),
+		radius = BombConfig.SweepRadius,
+		collisionGroup = BOMB_PROJECTILE_COLLISION_GROUP,
+		respectCanCollide = true,
+		ignoreWater = true,
+	})
 end
 
 local function getProjectileFolder(): Folder
@@ -511,6 +572,18 @@ local function readNonNegativeNumber(value: any, fallback: number): number
 	return if typeof(value) == "number" and value == value and value >= 0 then value else fallback
 end
 
+local function readTerrainDestructionShape(value: any, fallback: string): string
+	if value == "Ellipsoid" or value == "Sphere" then
+		return value
+	end
+	return fallback
+end
+
+local function readTerrainVerticalScale(value: any, fallback: number): number
+	local scale = if typeof(value) == "number" and value == value and value > 0 then value else fallback
+	return math.clamp(scale, 0.05, 1)
+end
+
 local function clampMagnitude(vector: Vector3, maxMagnitude: number?): Vector3
 	if not maxMagnitude or maxMagnitude <= 0 then
 		return vector
@@ -556,7 +629,15 @@ local function clampKnockbackAngularVelocity(rootPart: BasePart, explosionConfig
 	rootPart.AssemblyAngularVelocity = clampMagnitude(rootPart.AssemblyAngularVelocity, maxAngularSpeed)
 end
 
-local function applyKnockback(character: Model?, rootPart: BasePart, origin: Vector3, distance: number, multiplier: number?, explosionConfig)
+local function applyKnockback(
+	targetPlayer: Player?,
+	character: Model?,
+	rootPart: BasePart,
+	origin: Vector3,
+	distance: number,
+	multiplier: number?,
+	explosionConfig
+)
 	local away = rootPart.Position - origin
 	if away.Magnitude < 0.05 then
 		away = Vector3.yAxis
@@ -582,10 +663,23 @@ local function applyKnockback(character: Model?, rootPart: BasePart, origin: Vec
 	velocityDelta = clampKnockbackVelocityDelta(rootPart, velocityDelta, explosionConfig)
 
 	if velocityDelta.Magnitude > 0.001 then
-		rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
-		clampKnockbackAngularVelocity(rootPart, explosionConfig)
+		if targetPlayer then
+			CombatMotionService.SendImpulse(targetPlayer, character, velocityDelta, {
+				sourceType = explosionConfig.sourceType or explosionConfig.replaySourceType or "Bomb",
+				sourceId = explosionConfig.sourceId or explosionConfig.replaySourceId,
+				movementSuppressSeconds = KNOCKBACK_MOVEMENT_SUPPRESS_SECONDS,
+				maxAngularSpeed = explosionConfig.maxKnockbackAngularSpeed,
+				maxHorizontalSpeed = explosionConfig.maxKnockbackHorizontalSpeed,
+				maxVerticalSpeed = explosionConfig.maxKnockbackVerticalSpeed,
+			})
+		else
+			rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
+			clampKnockbackAngularVelocity(rootPart, explosionConfig)
+			markCharacterKnockback(character)
+		end
+	else
+		markCharacterKnockback(character)
 	end
-	markCharacterKnockback(character)
 end
 
 local function shouldSuppressBombEffect(result): boolean
@@ -606,6 +700,14 @@ local function resolveExplosionConfig(override)
 		nearRadius = readPositiveNumber(override.nearRadius, BombConfig.NearRadius),
 		outerRadius = readPositiveNumber(override.outerRadius, BombConfig.OuterRadius),
 		terrainRadius = readPositiveNumber(override.terrainRadius, BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius),
+		terrainShape = readTerrainDestructionShape(
+			override.terrainShape,
+			BombConfig.TerrainDestructionShape or "Sphere"
+		),
+		terrainVerticalScale = readTerrainVerticalScale(
+			override.terrainVerticalScale,
+			BombConfig.TerrainDestructionVerticalScale or 1
+		),
 		maxTargetsPerExplosion = readOptionalPositiveNumber(override.maxTargetsPerExplosion, nil),
 		forceTerrainSubtract = override.forceTerrainSubtract == true,
 		playerDirectDamage = readNonNegativeNumber(override.playerDirectDamage, BombConfig.PlayerDirectDamage),
@@ -668,6 +770,8 @@ local function applyExplosionResult(config, result)
 	config.nearRadius = readPositiveNumber(result.nearRadius, config.nearRadius)
 	config.outerRadius = readPositiveNumber(result.outerRadius, config.outerRadius)
 	config.terrainRadius = readPositiveNumber(result.terrainRadius, config.terrainRadius)
+	config.terrainShape = readTerrainDestructionShape(result.terrainShape, config.terrainShape)
+	config.terrainVerticalScale = readTerrainVerticalScale(result.terrainVerticalScale, config.terrainVerticalScale)
 	config.maxTargetsPerExplosion = readOptionalPositiveNumber(result.maxTargetsPerExplosion, config.maxTargetsPerExplosion)
 	if typeof(result.forceTerrainSubtract) == "boolean" then
 		config.forceTerrainSubtract = result.forceTerrainSubtract
@@ -743,7 +847,7 @@ local function applyOwnerKnockback(owner: Player, origin: Vector3, explosionConf
 		local knockbackMultiplier = if typeof(hookResult.knockbackMultiplier) == "number"
 			then math.max(hookResult.knockbackMultiplier, 0)
 			else 1
-		applyKnockback(character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)
+		applyKnockback(owner, character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)
 	end
 end
 
@@ -852,7 +956,7 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 			RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/RecordDamageReplay", replayToken)
 		end
 		if hookResult.skipKnockback ~= true then
-			applyKnockback(character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)
+			applyKnockback(player, character, rootPart, origin, distance, knockbackMultiplier, explosionConfig)
 		end
 	end
 	RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/Players", playersToken)
@@ -889,7 +993,7 @@ local function damageEnemyPlayers(owner: any, origin: Vector3, sourceId: string?
 				RuntimeProfiler.Count("Server/BombService/DeathsFromBotDamage")
 			end
 		end
-		applyKnockback(character, rootPart, origin, distance, 1, explosionConfig)
+		applyKnockback(nil, character, rootPart, origin, distance, 1, explosionConfig)
 	end
 	RuntimeProfiler.End("Server/BombService/DamageEnemyPlayers/Bots", botsToken)
 
@@ -1061,22 +1165,9 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 
 	local hitUserIds = {}
 	local killedUserIds = {}
-	local debrisPayloads = {}
 
 	if isActiveBombOwner(owner) then
 		local ownerUserId = getOwnerUserId(owner)
-		local destructionToken = RuntimeProfiler.Begin("Server/BombService/ExplosionDestruction")
-		debrisPayloads = DestructionService:DestroySphere(position, explosionConfig.terrainRadius, {
-			sourceType = replaySourceType,
-			sourceId = replaySourceId,
-			bombId = projectileId,
-			ownerUserId = ownerUserId,
-			timestamp = impactTimestamp,
-		}, {
-			forceSubtract = explosionConfig.forceTerrainSubtract == true,
-			maxTargetsPerExplosion = explosionConfig.maxTargetsPerExplosion,
-		})
-		RuntimeProfiler.End("Server/BombService/ExplosionDestruction", destructionToken)
 		if isPlayerOwner(owner) then
 			applyOwnerKnockback(owner, position, explosionConfig, projectileId)
 		end
@@ -1089,6 +1180,18 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 			damageEnemyAnchors(owner, position, projectileId, coreDamageMultiplier, explosionConfig)
 			RuntimeProfiler.End("Server/BombService/DamageAnchors", anchorDamageToken)
 		end
+		enqueueExplosionDestruction(position, explosionConfig.terrainRadius, {
+			sourceType = replaySourceType,
+			sourceId = replaySourceId,
+			bombId = projectileId,
+			ownerUserId = ownerUserId,
+			timestamp = impactTimestamp,
+		}, {
+			forceSubtract = explosionConfig.forceTerrainSubtract == true,
+			terrainShape = explosionConfig.terrainShape,
+			terrainVerticalScale = explosionConfig.terrainVerticalScale,
+			maxTargetsPerExplosion = explosionConfig.maxTargetsPerExplosion,
+		})
 	end
 
 	fireEffect("Explode", {
@@ -1104,6 +1207,8 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		nearRadius = explosionConfig.nearRadius,
 		outerRadius = explosionConfig.outerRadius,
 		terrainRadius = explosionConfig.terrainRadius,
+		terrainShape = explosionConfig.terrainShape,
+		terrainVerticalScale = explosionConfig.terrainVerticalScale,
 		knockbackHorizontal = explosionConfig.knockbackHorizontal,
 		knockbackVertical = explosionConfig.knockbackVertical,
 		maxKnockbackHorizontalSpeed = explosionConfig.maxKnockbackHorizontalSpeed,
@@ -1115,7 +1220,6 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 		explosionVisualScale = explosionConfig.explosionVisualScale,
 		chargeScale = explosionConfig.chargeScale,
 		hitUserIds = hitUserIds,
-		debrisPayloads = if #debrisPayloads > 0 then debrisPayloads else nil,
 	})
 	sendWorldText("BombExploded", owner, position, {
 		projectileId = projectileId,
@@ -1162,7 +1266,6 @@ local function explode(owner: any, position: Vector3, source: string, projectile
 	RuntimeProfiler.Count("Server/BombService/Explosions")
 	RuntimeProfiler.Count("Server/BombService/ExplosionHits", #hitUserIds)
 	RuntimeProfiler.Count("Server/BombService/ExplosionKills", #killedUserIds)
-	RuntimeProfiler.Count("Server/BombService/TerrainDebrisPayloads", #debrisPayloads)
 	RuntimeProfiler.End("Server/BombService/Explode", explodeToken)
 end
 
@@ -1575,9 +1678,17 @@ local function throwBomb(player: Player, rootPart: BasePart, targetPayload: any,
 		ownerTeam = ownerTeam,
 		bombType = BombProjectileConfig.BombType.Normal,
 		bombSkinId = skinId,
+		origin = trajectory.origin,
 		position = trajectory.origin,
 		velocity = trajectory.initialVelocity,
+		acceleration = trajectory.acceleration,
+		startedAt = launchTime,
+		fuseStartedAt = startedAt,
+		fuseEndsAt = startedAt + remainingFuse,
 		fuseDuration = remainingFuse,
+		radius = BombConfig.SweepRadius,
+		visualScale = visualScale,
+		sizeScale = visualScale,
 	})
 
 	local function scheduleCleanup(delaySeconds: number)
@@ -2102,6 +2213,7 @@ function BombService:OnStart()
 		heartbeatConnection:Disconnect()
 	end
 	heartbeatConnection = game:GetService("RunService").Heartbeat:Connect(function(deltaTime)
+		explosionDestructionHeartbeatSerial += 1
 		local heartbeatToken = RuntimeProfiler.Begin("Server/BombService/Heartbeat")
 		local currentTime = now()
 		updateProjectileStates(currentTime, deltaTime)
@@ -2118,6 +2230,7 @@ function BombService:OnStart()
 			updateRecharge(player, currentTime)
 			RuntimeProfiler.End("Server/BombService/UpdateRecharge", rechargeToken)
 		end
+		processExplosionDestructionQueue()
 		RuntimeProfiler.Gauge("Server/BombService/PlayersUpdated", playerCount)
 		RuntimeProfiler.End("Server/BombService/Heartbeat", heartbeatToken)
 	end)
@@ -2249,9 +2362,17 @@ function BombService:LaunchStudioAIBomb(request): boolean
 		ownerIsNPC = if ownerIdentity then ownerIdentity.isNPC == true else nil,
 		bombType = BombProjectileConfig.BombType.Normal,
 		bombSkinId = skinId,
+		origin = trajectory.origin,
 		position = trajectory.origin,
 		velocity = trajectory.initialVelocity,
+		acceleration = trajectory.acceleration,
+		startedAt = currentTime,
+		fuseStartedAt = currentTime,
+		fuseEndsAt = currentTime + remainingFuse,
 		fuseDuration = remainingFuse,
+		radius = BombConfig.SweepRadius,
+		visualScale = BombConfig.ProjectileVisualScale,
+		sizeScale = BombConfig.ProjectileVisualScale,
 	})
 	return true
 end

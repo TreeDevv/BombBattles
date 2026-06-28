@@ -33,6 +33,17 @@ local REWARD_RELEASE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Back, Enum.Eas
 local REWARD_HOVER_LIFT = -4
 local REWARD_PRESS_OFFSET = 2
 local REWARD_HOVER_ICON_ROTATION = 2
+local OPEN_BUNDLE_TAG = "OpenBundle"
+local OPEN_BUNDLE_ATTRIBUTES = table.freeze({ "BundlePageId", "Bundle", "PageId" })
+local BUNDLE_PAGE_ALIASES = table.freeze({
+	fat = "FatPackPage",
+	fatpack = "FatPackPage",
+	fatpackpage = "FatPackPage",
+	infinity = "InfinityBundlePage",
+	infinitybundle = "InfinityBundlePage",
+	infinitybundlepage = "InfinityBundlePage",
+	gojo = "InfinityBundlePage",
+})
 
 local BundlesController = {}
 
@@ -43,6 +54,7 @@ BundlesController._frameConnections = {} :: { RBXScriptConnection }
 BundlesController._renderConnections = {} :: { RBXScriptConnection }
 BundlesController._selectedPageId = nil :: string?
 BundlesController._activePreviewId = nil :: string?
+BundlesController._lastStagedPreviewId = nil :: string?
 BundlesController._offerTemplate = nil :: Frame?
 BundlesController._pageCardTemplate = nil :: ImageButton?
 BundlesController._rewardChipTemplate = nil :: ImageButton?
@@ -53,6 +65,9 @@ BundlesController._overlayHidden = false
 BundlesController._frameBasePosition = nil :: UDim2?
 BundlesController._frameTween = nil :: Tween?
 BundlesController._transitionSerial = 0
+BundlesController._fullscreenPreviewActive = false
+BundlesController._openBundleZones = {} :: { [Instance]: any }
+BundlesController._warnedOpenBundleZoneIssues = {} :: { [Instance]: string }
 
 local function disconnectAll(connections: { RBXScriptConnection })
 	for _, connection in ipairs(connections) do
@@ -75,6 +90,31 @@ local function findDescendant(root: Instance?, path: { string }): Instance?
 		end
 	end
 	return current
+end
+
+local function getZonePlus()
+	local packages = ReplicatedStorage:FindFirstChild("Packages")
+	local module = packages and packages:FindFirstChild("ZonePlus")
+	if not (module and module:IsA("ModuleScript")) then
+		return nil
+	end
+
+	local ok, result = pcall(require, module)
+	if ok then
+		return result
+	end
+
+	warn("[BundlesController] ZonePlus failed to load: " .. tostring(result))
+	return nil
+end
+
+local function normalizeBundleTarget(value: any): string?
+	if typeof(value) ~= "string" then
+		return nil
+	end
+
+	local normalized = string.lower(value):gsub("[^%w]", "")
+	return if normalized ~= "" then normalized else nil
 end
 
 local function findFirstChildOfClass(root: Instance?, className: string): Instance?
@@ -125,6 +165,13 @@ local function setImage(root: Instance?, name: string, image: string?)
 	local imageLabel = root and root:FindFirstChild(name, true)
 	if imageLabel and imageLabel:IsA("ImageLabel") and typeof(image) == "string" then
 		imageLabel.Image = image
+	end
+end
+
+local function setSoldOutVisible(root: Instance?, visible: boolean)
+	local soldOut = root and root:FindFirstChild("SoldOut", true)
+	if soldOut and soldOut:IsA("GuiObject") then
+		soldOut.Visible = visible
 	end
 end
 
@@ -519,6 +566,7 @@ function BundlesController:_renderPageCards(collection)
 		card.Visible = true
 		setLabel(card, "BundleName", page.CardTitle or page.Id)
 		setLabel(card, "Timer", formatCountdown(collection.EndsAt))
+		setSoldOutVisible(card, page.SoldOut == true)
 		setSelectedCover(card, page.Id == self._selectedPageId)
 		card.Parent = bottom
 		self._pageCards[page.Id] = card
@@ -664,18 +712,215 @@ function BundlesController:_refreshSelectionVisuals()
 	end
 end
 
+function BundlesController:_warnOpenBundleZone(instance: Instance, message: string)
+	if self._warnedOpenBundleZoneIssues[instance] == message then
+		return
+	end
+
+	self._warnedOpenBundleZoneIssues[instance] = message
+	warn(("[BundlesController] %s (%s)"):format(message, instance:GetFullName()))
+end
+
+function BundlesController:_resolveBundlePageId(target: any): string?
+	if typeof(target) ~= "string" or target == "" then
+		return nil
+	end
+
+	if BundleCatalog.GetPage(target) then
+		return target
+	end
+
+	local normalizedTarget = normalizeBundleTarget(target)
+	if not normalizedTarget then
+		return nil
+	end
+
+	local aliasPageId = BUNDLE_PAGE_ALIASES[normalizedTarget]
+	if aliasPageId and BundleCatalog.GetPage(aliasPageId) then
+		return aliasPageId
+	end
+
+	for pageId, page in pairs(BundleCatalog.Pages) do
+		if normalizeBundleTarget(pageId) == normalizedTarget then
+			return pageId
+		end
+		if typeof(page) == "table" and normalizeBundleTarget(page.CardTitle) == normalizedTarget then
+			return pageId
+		end
+	end
+
+	return nil
+end
+
+function BundlesController:_getOpenBundleZoneTarget(instance: Instance): string?
+	for _, attributeName in ipairs(OPEN_BUNDLE_ATTRIBUTES) do
+		local pageId = self:_resolveBundlePageId(instance:GetAttribute(attributeName))
+		if pageId then
+			return pageId
+		end
+	end
+
+	return nil
+end
+
+function BundlesController:_isStagedPreview(previewId: string?): boolean
+	if typeof(previewId) ~= "string" or previewId == "" then
+		return false
+	end
+
+	local recipe = BundleCatalog.GetPreviewRecipe(previewId)
+	return recipe ~= nil and recipe.Presenter ~= "HighlightIntroPresenter"
+end
+
+function BundlesController:_getReturnStagedPreviewId(): string?
+	if self:_isStagedPreview(self._lastStagedPreviewId) then
+		return self._lastStagedPreviewId
+	end
+
+	local page = BundleCatalog.GetPage(self._selectedPageId)
+	if page and self:_isStagedPreview(page.DefaultPreviewId) then
+		return page.DefaultPreviewId
+	end
+
+	local collection = BundleCatalog.GetDefaultCollection()
+	page = collection and BundleCatalog.GetPage(collection.DefaultPageId) or nil
+	if page and self:_isStagedPreview(page.DefaultPreviewId) then
+		return page.DefaultPreviewId
+	end
+
+	return nil
+end
+
+function BundlesController:_openFromBundleZone(instance: Instance)
+	local pageId = self:_getOpenBundleZoneTarget(instance)
+	if not pageId then
+		self:_warnOpenBundleZone(instance, "OpenBundle zone is missing a valid BundlePageId, Bundle, or PageId attribute")
+		return
+	end
+
+	self:Open(pageId)
+end
+
+function BundlesController:_disconnectOpenBundleZone(instance: Instance)
+	local record = self._openBundleZones[instance]
+	if not record then
+		return
+	end
+
+	self._openBundleZones[instance] = nil
+	self._warnedOpenBundleZoneIssues[instance] = nil
+	if record.enteredConnection then
+		record.enteredConnection:Disconnect()
+	end
+	if record.zone then
+		pcall(function()
+			if type(record.zone.destroy) == "function" then
+				record.zone:destroy()
+			elseif type(record.zone.Destroy) == "function" then
+				record.zone:Destroy()
+			end
+		end)
+	end
+end
+
+function BundlesController:_bindOpenBundleZone(instance: Instance)
+	if self._openBundleZones[instance] then
+		return
+	end
+	if not instance:IsA("BasePart") then
+		self:_warnOpenBundleZone(instance, "OpenBundle tag must be placed on a BasePart")
+		return
+	end
+
+	local zonePlus = getZonePlus()
+	if not zonePlus then
+		self:_warnOpenBundleZone(instance, "ZonePlus is unavailable for OpenBundle zone")
+		return
+	end
+
+	local ok, zone = pcall(function()
+		return zonePlus.new(instance)
+	end)
+	if not ok or not zone then
+		self:_warnOpenBundleZone(instance, "ZonePlus failed to start for OpenBundle zone: " .. tostring(zone))
+		return
+	end
+
+	local enteredConnection = zone.localPlayerEntered:Connect(function()
+		self:_openFromBundleZone(instance)
+	end)
+
+	self._openBundleZones[instance] = {
+		zone = zone,
+		enteredConnection = enteredConnection,
+	}
+
+	task.defer(function()
+		if self._openBundleZones[instance] and zone:findLocalPlayer() then
+			self:_openFromBundleZone(instance)
+		end
+	end)
+end
+
+function BundlesController:_startOpenBundleZones()
+	for _, instance in ipairs(CollectionService:GetTagged(OPEN_BUNDLE_TAG)) do
+		self:_bindOpenBundleZone(instance)
+	end
+
+	table.insert(self._connections, CollectionService:GetInstanceAddedSignal(OPEN_BUNDLE_TAG):Connect(function(instance)
+		self:_bindOpenBundleZone(instance)
+	end))
+	table.insert(self._connections, CollectionService:GetInstanceRemovedSignal(OPEN_BUNDLE_TAG):Connect(function(instance)
+		self:_disconnectOpenBundleZone(instance)
+	end))
+end
+
 function BundlesController:TryPreview(previewId: string?)
 	if typeof(previewId) ~= "string" or previewId == "" then
 		return
 	end
-	if not BundleCatalog.GetPreviewRecipe(previewId) then
+	local recipe = BundleCatalog.GetPreviewRecipe(previewId)
+	if not recipe then
 		warn(("[BundlesController] Unknown preview id %s"):format(previewId))
 		return
 	end
 
 	self._activePreviewId = previewId
-	self._director:Play(previewId)
 	self:_refreshSelectionVisuals()
+
+	if recipe.Presenter == "HighlightIntroPresenter" then
+		local frame = self._frame
+		if not frame then
+			return
+		end
+
+		self._fullscreenPreviewActive = true
+		self:_cancelFrameTween()
+		frame.Visible = false
+		self._director:Play(previewId, function()
+			self._fullscreenPreviewActive = false
+			if self._isOpen and self._frame then
+				self:_pushOverlayHidden()
+				self._frame.Visible = true
+				self._frame.Position = self:_getFrameBasePosition()
+				local returnPreviewId = self:_getReturnStagedPreviewId()
+				if returnPreviewId then
+					self._activePreviewId = returnPreviewId
+					self._lastStagedPreviewId = returnPreviewId
+					self:_refreshSelectionVisuals()
+					self._director:Play(returnPreviewId, nil, {
+						InstantCamera = true,
+					})
+				end
+			end
+		end, {
+			RevealAfterPreviewCallback = true,
+		})
+		return
+	end
+
+	self._lastStagedPreviewId = previewId
+	self._director:Play(previewId)
 end
 
 function BundlesController:SelectPage(pageId: string?)
@@ -691,12 +936,31 @@ function BundlesController:SelectPage(pageId: string?)
 
 	self._selectedPageId = page.Id
 	self._activePreviewId = page.DefaultPreviewId
+	if self:_isStagedPreview(page.DefaultPreviewId) then
+		self._lastStagedPreviewId = page.DefaultPreviewId
+	else
+		self._lastStagedPreviewId = nil
+	end
 	disconnectAll(self._renderConnections)
 	self:_renderHeader(collection)
 	self:_renderPageCards(collection)
 	self:_renderOffers(page)
 	self:_refreshSelectionVisuals()
 	self._director:Play(page.DefaultPreviewId)
+end
+
+function BundlesController:_getOpenPageId(target: string?): string?
+	if typeof(target) == "string" and target ~= "" then
+		local pageId = self:_resolveBundlePageId(target)
+		if pageId then
+			return pageId
+		end
+
+		warn(("[BundlesController] Unknown bundle page target %s; opening default bundle page"):format(target))
+	end
+
+	local collection = BundleCatalog.GetDefaultCollection()
+	return collection and collection.DefaultPageId or nil
 end
 
 function BundlesController:_promptOffer(offerId: string?)
@@ -757,6 +1021,9 @@ function BundlesController:_bindFrame(frame: Frame)
 
 	table.insert(self._frameConnections, frame:GetPropertyChangedSignal("Visible"):Connect(function()
 		if not frame.Visible then
+			if self._fullscreenPreviewActive then
+				return
+			end
 			self._isOpen = false
 			self._director:Stop()
 			self:_popOverlayHidden(false)
@@ -765,6 +1032,7 @@ function BundlesController:_bindFrame(frame: Frame)
 
 	self._isOpen = false
 	self._overlayHidden = false
+	self._fullscreenPreviewActive = false
 	self._frameBasePosition = frame.Position
 	frame.Visible = false
 	self._director:Stop()
@@ -778,7 +1046,7 @@ function BundlesController:_bindCurrentFrame()
 	end
 end
 
-function BundlesController:Open()
+function BundlesController:Open(target: string?)
 	if not self._frame then
 		self:_bindCurrentFrame()
 	end
@@ -791,8 +1059,7 @@ function BundlesController:Open()
 
 	self._isOpen = true
 	self:_pushOverlayHidden()
-	local collection = BundleCatalog.GetDefaultCollection()
-	self:SelectPage(collection and collection.DefaultPageId or nil)
+	self:SelectPage(self:_getOpenPageId(target))
 	self:_showFrameAnimated()
 end
 
@@ -803,6 +1070,7 @@ function BundlesController:Close()
 	end
 
 	local frame = self._frame
+	self._fullscreenPreviewActive = false
 	self._isOpen = false
 	if frame then
 		self:_hideFrameAnimated()
@@ -814,6 +1082,7 @@ end
 
 function BundlesController:OnStart()
 	self:_bindCurrentFrame()
+	self:_startOpenBundleZones()
 
 	table.insert(self._connections, PlayerGui.ChildAdded:Connect(function(child)
 		if child.Name ~= FRAMES_GUI_NAME then

@@ -1,4 +1,5 @@
 local DataStoreService = game:GetService("DataStoreService")
+local MessagingService = game:GetService("MessagingService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -11,10 +12,18 @@ local MAX_ENTRIES = 100
 local MAX_ADMIN_STAT_INCREMENT = 1000000
 local REMOTE_REQUEST_WINDOW_SECONDS = 10
 local REMOTE_MAX_REQUESTS_PER_WINDOW = 30
+local DATASTORE_MAX_RETRIES = 3
+local DATASTORE_BUDGET_WAIT_SECONDS = 8
+local DATASTORE_RETRY_BASE_SECONDS = 0.35
+local CROSS_SERVER_REFRESH_DELAY_SECONDS = 1
+local INBOUND_REFRESH_DEDUPE_LIMIT = 200
 local REMOTES_FOLDER_NAME = "Remotes"
 local GET_LEADERBOARD_REMOTE_NAME = "GetGlobalLeaderboard"
 local LEADERBOARD_UPDATED_REMOTE_NAME = "GlobalLeaderboardUpdated"
 local SCOPE = Globals.SCOPE
+local MESSAGING_TOPIC_NAME = "BBLB_Updated_" .. string.gsub(SCOPE, "[^%w_%-]", "_")
+local ORDERED_READ_REQUEST_TYPE = Enum.DataStoreRequestType.GetSortedAsync
+local ORDERED_WRITE_REQUEST_TYPE = Enum.DataStoreRequestType.SetIncrementSortedAsync
 
 local LIFETIME_KILLS_KEY = Schema.LifetimeKills and Schema.LifetimeKills.key or "lifetimeKills"
 local LIFETIME_WINS_KEY = Schema.LifetimeWins and Schema.LifetimeWins.key or "lifetimeWins"
@@ -61,9 +70,12 @@ local usernameCache: { [number]: string } = {}
 local orderedStores: { [string]: any } = {}
 local cachedLeaderboards: { [string]: { [string]: any } } = {}
 local remoteRequestWindows: { [Player]: { startedAt: number, count: number } } = {}
+local inboundRefreshKeys: { [string]: boolean } = {}
+local inboundRefreshKeyOrder: { string } = {}
 local started = false
 local getLeaderboardRemote: RemoteFunction? = nil
 local leaderboardUpdatedRemote: RemoteEvent? = nil
+local Leaderboards = {}
 
 local function roundNonNegative(value: any): number
 	local numberValue = tonumber(value) or 0
@@ -157,6 +169,93 @@ local function copyArray(values)
 	return copy
 end
 
+local function normalizeIdList(values, configs, order)
+	local normalized = {}
+	local seen = {}
+
+	if typeof(values) == "table" then
+		for _, value in ipairs(values) do
+			if typeof(value) == "string" and configs[value] then
+				addUnique(normalized, seen, value)
+			end
+		end
+	end
+
+	if #normalized <= 0 then
+		for _, value in ipairs(order) do
+			addUnique(normalized, seen, value)
+		end
+	end
+
+	return normalized
+end
+
+local function normalizeBoardIds(boardIds)
+	return normalizeIdList(boardIds, BOARD_CONFIGS, BOARD_ORDER)
+end
+
+local function normalizePeriodIds(periodIds)
+	return normalizeIdList(periodIds, PERIOD_CONFIGS, PERIOD_ORDER)
+end
+
+local function rememberInboundRefresh(key: string): boolean
+	if inboundRefreshKeys[key] then
+		return false
+	end
+
+	inboundRefreshKeys[key] = true
+	table.insert(inboundRefreshKeyOrder, key)
+	if #inboundRefreshKeyOrder > INBOUND_REFRESH_DEDUPE_LIMIT then
+		local oldestKey = table.remove(inboundRefreshKeyOrder, 1)
+		if oldestKey then
+			inboundRefreshKeys[oldestKey] = nil
+		end
+	end
+
+	return true
+end
+
+local function getDataStoreBudget(requestType: Enum.DataStoreRequestType): number
+	local success, budget = pcall(function()
+		return DataStoreService:GetRequestBudgetForRequestType(requestType)
+	end)
+	if success and typeof(budget) == "number" then
+		return budget
+	end
+	return math.huge
+end
+
+local function waitForDataStoreBudget(requestType: Enum.DataStoreRequestType): boolean
+	local timeoutAt = os.clock() + DATASTORE_BUDGET_WAIT_SECONDS
+	while os.clock() < timeoutAt do
+		if getDataStoreBudget(requestType) > 0 then
+			return true
+		end
+		task.wait(0.25)
+	end
+	return getDataStoreBudget(requestType) > 0
+end
+
+local function runDataStoreCall(requestType: Enum.DataStoreRequestType, failureContext: string, callback)
+	local lastErr = nil
+	for attempt = 1, DATASTORE_MAX_RETRIES do
+		waitForDataStoreBudget(requestType)
+
+		local success, result = pcall(callback)
+		if success then
+			return true, result
+		end
+
+		lastErr = result
+		if attempt < DATASTORE_MAX_RETRIES then
+			task.wait(DATASTORE_RETRY_BASE_SECONDS * attempt)
+		end
+	end
+
+	warn("[Leaderboards] " .. failureContext .. ":", lastErr)
+	return false, lastErr
+end
+
 local function getUsernameForUserId(userId: number): string
 	if usernameCache[userId] then
 		return usernameCache[userId]
@@ -247,56 +346,79 @@ local function getProfileValueForBoard(dataService, player: Player, boardId: str
 	return roundNonNegative(bucket[boardConfig.statName])
 end
 
-local function setOrderedStoreValue(store, userId: number, value: number)
-	if not store or value <= 0 then
-		return
-	end
-
-	local success, err = pcall(function()
-		store:SetAsync(tostring(userId), value)
-	end)
-	if not success then
-		warn("[Leaderboards] Failed to publish ordered store value:", err)
-	end
-end
-
-local function removeOrderedStoreValue(store, userId: number)
+local function removeOrderedStoreValue(store, userId: number): boolean
 	if not store then
-		return
+		return false
 	end
 
-	local success, err = pcall(function()
-		store:RemoveAsync(tostring(userId))
+	local success = runDataStoreCall(ORDERED_WRITE_REQUEST_TYPE, "Failed to remove ordered store value", function()
+		return store:RemoveAsync(tostring(userId))
 	end)
-	if not success then
-		warn("[Leaderboards] Failed to remove ordered store value:", err)
-	end
+	return success == true
 end
 
-local function publishPlayerStatsForPeriod(dataService, player: Player, periodId: string, unixTime: number, boardIds)
+local function setOrderedStoreValue(store, userId: number, value: number, removeZeroValues: boolean?): boolean
+	if not store then
+		return false
+	end
+
+	if value <= 0 then
+		if removeZeroValues then
+			return removeOrderedStoreValue(store, userId)
+		end
+		return false
+	end
+
+	local success = runDataStoreCall(ORDERED_WRITE_REQUEST_TYPE, "Failed to publish ordered store value", function()
+		return store:SetAsync(tostring(userId), value)
+	end)
+	return success == true
+end
+
+local function publishPlayerStatsForPeriod(
+	dataService,
+	player: Player,
+	periodId: string,
+	unixTime: number,
+	boardIds,
+	removeZeroValues: boolean?
+): boolean
 	local periodKey = getPeriodKey(periodId, unixTime)
+	local published = false
 	for _, boardId in ipairs(boardIds or BOARD_ORDER) do
 		local value = getProfileValueForBoard(dataService, player, boardId, periodId, unixTime)
 		local store = getOrderedStore(boardId, periodId, periodKey)
-		setOrderedStoreValue(store, player.UserId, value)
+		if setOrderedStoreValue(store, player.UserId, value, removeZeroValues) then
+			published = true
+		end
 	end
+	return published
 end
 
-local function publishPlayerStats(dataService, player: Player, boardIds, periodIds, unixTime: number?)
-	if not (player and player.Parent == Players) then
-		return
+local function publishPlayerStats(dataService, player: Player, boardIds, periodIds, unixTime: number?, options): boolean
+	if not player then
+		return false
 	end
 
 	local publishTime = unixTime or getUnixTime()
+	local removeZeroValues = typeof(options) == "table" and options.removeZeroValues == true
+	local published = false
 	for _, periodId in ipairs(periodIds or PERIOD_ORDER) do
-		publishPlayerStatsForPeriod(dataService, player, periodId, publishTime, boardIds)
+		if publishPlayerStatsForPeriod(dataService, player, periodId, publishTime, boardIds, removeZeroValues) then
+			published = true
+		end
 	end
+	return published
 end
 
-local function publishCurrentPlayerStats(dataService, boardIds, periodIds, unixTime: number?)
+local function publishCurrentPlayerStats(dataService, boardIds, periodIds, unixTime: number?): boolean
+	local published = false
 	for _, player in ipairs(Players:GetPlayers()) do
-		publishPlayerStats(dataService, player, boardIds, periodIds, unixTime)
+		if publishPlayerStats(dataService, player, boardIds, periodIds, unixTime) then
+			published = true
+		end
 	end
+	return published
 end
 
 local function removePlayerFromCurrentStores(userId: number)
@@ -314,15 +436,14 @@ end
 local function getOrderedStoreEntries(boardId: string, periodId: string, periodKey: string)
 	local store = getOrderedStore(boardId, periodId, periodKey)
 	if not store then
-		return {}
+		return nil
 	end
 
-	local success, pages = pcall(function()
+	local success, pages = runDataStoreCall(ORDERED_READ_REQUEST_TYPE, "Failed to fetch ordered store", function()
 		return store:GetSortedAsync(false, MAX_ENTRIES)
 	end)
 	if not success or not pages then
-		warn("[Leaderboards] Failed to fetch ordered store:", pages)
-		return {}
+		return nil
 	end
 
 	local entries = {}
@@ -476,7 +597,62 @@ local function notifyLeaderboardUpdated(boardIds, periodIds, refreshTime: number
 	})
 end
 
-local Leaderboards = {}
+local function publishLeaderboardUpdate(boardIds, periodIds, refreshTime: number)
+	local payload = {
+		boards = copyArray(boardIds),
+		periods = copyArray(periodIds),
+		refreshedAt = refreshTime,
+		senderJobId = game.JobId,
+	}
+
+	local success, err = pcall(function()
+		MessagingService:PublishAsync(MESSAGING_TOPIC_NAME, payload)
+	end)
+	if not success then
+		warn("[Leaderboards] Failed to publish cross-server update:", err)
+	end
+end
+
+local function subscribeToLeaderboardUpdates(dataService)
+	local success, err = pcall(function()
+		MessagingService:SubscribeAsync(MESSAGING_TOPIC_NAME, function(message)
+			local payload = message.Data
+			if typeof(payload) ~= "table" then
+				return
+			end
+			if game.JobId ~= "" and payload.senderJobId == game.JobId then
+				return
+			end
+
+			local boardIds = normalizeBoardIds(payload.boards)
+			local periodIds = normalizePeriodIds(payload.periods)
+			local refreshTime = roundNonNegative(payload.refreshedAt)
+			if refreshTime <= 0 then
+				refreshTime = getUnixTime()
+			end
+
+			local key = table.concat({
+				tostring(payload.senderJobId or ""),
+				tostring(refreshTime),
+				table.concat(boardIds, ","),
+				table.concat(periodIds, ","),
+			}, "|")
+			if not rememberInboundRefresh(key) then
+				return
+			end
+
+			task.spawn(function()
+				task.wait(CROSS_SERVER_REFRESH_DELAY_SECONDS)
+				Leaderboards.refresh(dataService, false, boardIds, periodIds, refreshTime, {
+					broadcast = false,
+				})
+			end)
+		end)
+	end)
+	if not success then
+		warn("[Leaderboards] Failed to subscribe to cross-server updates:", err)
+	end
+end
 
 function Leaderboards.RecordRoundResults(dataService, results)
 	if typeof(results) ~= "table" or typeof(results.players) ~= "table" then
@@ -537,7 +713,9 @@ function Leaderboards.RecordRoundResults(dataService, results)
 		publishPlayerStats(dataService, player, touchedBoards, PERIOD_ORDER, unixTime)
 	end
 
-	Leaderboards.refresh(dataService, false, touchedBoards, PERIOD_ORDER, unixTime)
+	Leaderboards.refresh(dataService, false, touchedBoards, PERIOD_ORDER, unixTime, {
+		broadcast = true,
+	})
 end
 
 function Leaderboards.AdminAddStats(dataService, player: Player, rawIncrements): (boolean, string?)
@@ -555,31 +733,39 @@ function Leaderboards.AdminAddStats(dataService, player: Player, rawIncrements):
 
 	applyLeaderboardIncrements(dataService, player, increments, getUnixTime())
 	publishPlayerStats(dataService, player)
-	Leaderboards.refresh(dataService, false)
+	Leaderboards.refresh(dataService, false, nil, nil, nil, {
+		broadcast = true,
+	})
 
 	return true, formatAdminIncrementMessage(player, increments)
 end
 
-function Leaderboards.PublishPlayer(dataService, player: Player)
-	publishPlayerStats(dataService, player)
+function Leaderboards.PublishPlayer(dataService, player: Player, boardIds, periodIds, options): boolean
+	return publishPlayerStats(dataService, player, boardIds, periodIds, nil, options)
 end
 
 function Leaderboards.RemovePlayer(userId: number)
 	removePlayerFromCurrentStores(userId)
 end
 
-function Leaderboards.refresh(dataService, publishPlayers: boolean?, boardIds, periodIds, unixTime: number?)
+function Leaderboards.refresh(dataService, publishPlayers: boolean?, boardIds, periodIds, unixTime: number?, options)
 	local refreshTime = unixTime or getUnixTime()
 	local nextRefreshAt = refreshTime + REFRESH_TIME
+	local normalizedBoardIds = normalizeBoardIds(boardIds)
+	local normalizedPeriodIds = normalizePeriodIds(periodIds)
+	local updatedAnyCache = false
 
 	if publishPlayers ~= false then
-		publishCurrentPlayerStats(dataService, boardIds, periodIds, refreshTime)
+		publishCurrentPlayerStats(dataService, normalizedBoardIds, normalizedPeriodIds, refreshTime)
 	end
 
-	for _, boardId in ipairs(boardIds or BOARD_ORDER) do
-		for _, periodId in ipairs(periodIds or PERIOD_ORDER) do
+	for _, boardId in ipairs(normalizedBoardIds) do
+		for _, periodId in ipairs(normalizedPeriodIds) do
 			local periodKey = getPeriodKey(periodId, refreshTime)
 			local entries = getOrderedStoreEntries(boardId, periodId, periodKey)
+			if not entries then
+				continue
+			end
 
 			setCache(boardId, periodId, {
 				board = boardId,
@@ -590,10 +776,18 @@ function Leaderboards.refresh(dataService, publishPlayers: boolean?, boardIds, p
 				periodResetsAt = getPeriodResetsAt(periodId, refreshTime),
 				refreshedAt = refreshTime,
 			})
+			updatedAnyCache = true
 		end
 	end
 
-	notifyLeaderboardUpdated(boardIds, periodIds, refreshTime)
+	if updatedAnyCache then
+		notifyLeaderboardUpdated(normalizedBoardIds, normalizedPeriodIds, refreshTime)
+		if typeof(options) == "table" and options.broadcast == true then
+			publishLeaderboardUpdate(normalizedBoardIds, normalizedPeriodIds, refreshTime)
+		end
+	end
+
+	return updatedAnyCache
 end
 
 function Leaderboards.start(dataService)
@@ -669,6 +863,7 @@ function Leaderboards.start(dataService)
 		remoteRequestWindows[player] = nil
 	end)
 
+	subscribeToLeaderboardUpdates(dataService)
 	Leaderboards.refresh(dataService)
 	task.spawn(function()
 		while true do

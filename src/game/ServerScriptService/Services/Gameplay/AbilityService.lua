@@ -151,6 +151,20 @@ local function getPlayerRootPosition(player: Player): Vector3?
 	return if rootPart and rootPart:IsA("BasePart") then rootPart.Position else nil
 end
 
+local function getCurrentGameKey(): string?
+	local state = RoundService:GetState()
+	local roundId = if typeof(state) == "table" then tonumber(state.roundId) else nil
+	if not roundId or roundId <= 0 then
+		return nil
+	end
+
+	local jobId = game.JobId
+	if jobId == "" then
+		jobId = "Studio"
+	end
+	return ("%s:%d"):format(jobId, math.floor(roundId))
+end
+
 local function ensureRemotesFolder(): Folder
 	local existing = ReplicatedStorage:FindFirstChild(REMOTES_FOLDER_NAME)
 	if existing and existing:IsA("Folder") then
@@ -526,8 +540,9 @@ local function activate(player: Player, resolved: ResolvedAbilityRequest, curren
 		slot = resolved.slot,
 		abilityId = resolved.abilityId,
 	})
-	if type(DataService.RecordAbilityUsage) == "function" then
-		DataService:RecordAbilityUsage(player, resolved.abilityId)
+	local gameKey = getCurrentGameKey()
+	if gameKey and type(DataService.RecordAbilityGameUsed) == "function" then
+		DataService:RecordAbilityGameUsed(player, resolved.abilityId, gameKey)
 	end
 
 	if typeof(behaviorResult) == "table" and typeof(behaviorResult.effect) == "table" then

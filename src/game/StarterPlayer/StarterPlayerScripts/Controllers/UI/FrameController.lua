@@ -148,6 +148,25 @@ local function getBackdropZIndex(screenGui: ScreenGui, frame: GuiObject, backdro
 	return math.max(1, highestZIndex + 1)
 end
 
+local function containsScreenPosition(guiObject: GuiObject, screenPosition: Vector2): boolean
+	local absolutePosition = guiObject.AbsolutePosition
+	local absoluteSize = guiObject.AbsoluteSize
+
+	return screenPosition.X >= absolutePosition.X
+		and screenPosition.X <= absolutePosition.X + absoluteSize.X
+		and screenPosition.Y >= absolutePosition.Y
+		and screenPosition.Y <= absolutePosition.Y + absoluteSize.Y
+end
+
+local function getInputScreenPosition(inputObject: InputObject?): Vector2?
+	if not inputObject then
+		return nil
+	end
+
+	local position = inputObject.Position
+	return Vector2.new(position.X, position.Y)
+end
+
 function FrameController:_ensureState()
 	if self._stateReady then
 		return
@@ -278,6 +297,31 @@ function FrameController:_promoteFrameAboveBackdrop(record: FrameRecord, backdro
 	end
 end
 
+function FrameController:_isInputInsideCurrentFrame(inputObject: InputObject?): boolean
+	local currentFrameName = self._currentFrameName
+	if not currentFrameName then
+		return false
+	end
+
+	local record = self._frames[currentFrameName]
+	if not record or not record.frame.Parent or not record.frame.Visible then
+		return false
+	end
+
+	local screenPosition = getInputScreenPosition(inputObject)
+	if not screenPosition then
+		return false
+	end
+
+	for _, guiObject in ipairs(PlayerGui:GetGuiObjectsAtPosition(screenPosition.X, screenPosition.Y)) do
+		if guiObject == record.frame or guiObject:IsDescendantOf(record.frame) then
+			return true
+		end
+	end
+
+	return containsScreenPosition(record.frame, screenPosition)
+end
+
 function FrameController:_showBackdrop(screenGui: ScreenGui, record: FrameRecord)
 	self:_cancelBackdropTween()
 	configureFullscreenScreenGui(screenGui)
@@ -297,7 +341,11 @@ function FrameController:_showBackdrop(screenGui: ScreenGui, record: FrameRecord
 		backdrop.Visible = false
 		self._backdrop = backdrop
 
-		self._backdropConnection = backdrop.Activated:Connect(function()
+		self._backdropConnection = backdrop.Activated:Connect(function(inputObject)
+			if self:_isInputInsideCurrentFrame(inputObject) then
+				return
+			end
+
 			self:CloseCurrentFrame()
 		end)
 	end

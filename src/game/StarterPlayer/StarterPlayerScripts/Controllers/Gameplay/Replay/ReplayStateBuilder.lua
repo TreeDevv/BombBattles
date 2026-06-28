@@ -257,6 +257,7 @@ function ReplayStateBuilder.Build(client, payload, deps)
 		playerVisuals = {},
 		bombVisuals = {},
 		explodedBombs = {},
+		synthesizedBombs = {},
 		cameraController = nil,
 		renderConnection = nil,
 		renderBindingName = nil,
@@ -336,6 +337,18 @@ function ReplayStateBuilder.Build(client, payload, deps)
 
 	local bombVisualsToken = RuntimeProfiler.Begin("Client/Replay/Death/StateBuilder/CreateBombVisuals")
 	bombMeta = bombMeta or deps.collectBombMeta(frames)
+	local synthesizedBombs = {}
+	if deps.collectThrownBombMeta then
+		local thrownBombMeta = deps.collectThrownBombMeta(events)
+		for key, meta in pairs(thrownBombMeta) do
+			if bombMeta[key] == nil then
+				bombMeta[key] = meta
+				synthesizedBombs[key] = meta.throwEvent
+			elseif meta.throwEvent then
+				bombMeta[key].throwEvent = bombMeta[key].throwEvent or meta.throwEvent
+			end
+		end
+	end
 	local bombVisualEntries = buildBombVisualEntries(bombMeta, payload, eventPositionsBySourceId, deps)
 	for _, entry in ipairs(bombVisualEntries) do
 		local key = entry.key
@@ -344,6 +357,9 @@ function ReplayStateBuilder.Build(client, payload, deps)
 			break
 		end
 		state.bombVisuals[key] = deps.makeBombVisual(scene, key, meta.bombType, meta.bombSkinId)
+		if meta.throwEvent and synthesizedBombs[key] then
+			state.synthesizedBombs[key] = meta.throwEvent
+		end
 	end
 	RuntimeProfiler.End("Client/Replay/Death/StateBuilder/CreateBombVisuals", bombVisualsToken)
 

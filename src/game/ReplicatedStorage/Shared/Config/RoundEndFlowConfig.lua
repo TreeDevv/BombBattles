@@ -12,7 +12,8 @@ local RoundEndFlowConfig = {
 	POTGAttachmentName = "HighlightIntroPoint",
 	WinnerBeatSeconds = 1.5,
 	ResultsSeconds = 8,
-	POTGIntroMaxSeconds = 60,
+	POTGIntroLeadInSeconds = 2,
+	POTGIntroClientTimeoutSeconds = 6,
 }
 
 return table.freeze(RoundEndFlowConfig)

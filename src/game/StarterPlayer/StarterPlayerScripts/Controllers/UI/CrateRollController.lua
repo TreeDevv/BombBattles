@@ -1,4 +1,5 @@
 local ContentProvider = game:GetService("ContentProvider")
+local MarketplaceService = game:GetService("MarketplaceService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
@@ -9,6 +10,7 @@ local CrateRollConfig = require(ReplicatedStorage.Shared.Config.CrateRollConfig)
 local FinisherConfig = require(ReplicatedStorage.Shared.Config.FinisherConfig)
 local SpinWheelConfig = require(ReplicatedStorage.Shared.Config.SpinWheelConfig)
 local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
+local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -142,6 +144,8 @@ CrateRollController._skipConnection = nil :: RBXScriptConnection?
 CrateRollController._requestRemote = nil :: RemoteFunction?
 CrateRollController._resultRemote = nil :: RemoteEvent?
 CrateRollController._rng = Random.new()
+CrateRollController._pendingPromptPurchaseProductId = nil :: number?
+CrateRollController._pendingPromptPurchaseProductKey = nil :: string?
 
 CrateRollController._root = nil :: Frame?
 CrateRollController._scroller = nil :: ScrollingFrame?
@@ -543,6 +547,16 @@ local function playerHasInstantSpin(): boolean
 	end
 
 	return (tonumber(state.InstantSpinUntil) or 0) > (tonumber(state.Now) or os.time())
+end
+
+local function unpackPromptProductArgs(a, b, c): (number?, number?, boolean)
+	if typeof(a) == "number" and typeof(b) == "number" then
+		return a, b, c == true
+	elseif typeof(a) == "Instance" and a:IsA("Player") then
+		return a.UserId, tonumber(b), c == true
+	end
+
+	return LocalPlayer.UserId, tonumber(a), b == true or c == true
 end
 
 local function getTemplateIconImage(templateWrapper: GuiObject?): string?
@@ -1624,12 +1638,60 @@ function CrateRollController:_requestSkip()
 	end)
 end
 
+function CrateRollController:_clearPromptPurchase(productKey: string?)
+	if typeof(productKey) ~= "string" or productKey == "" then
+		return
+	end
+
+	local remote = self._requestRemote or getCrateRequestRemote()
+	if not remote then
+		return
+	end
+
+	self._requestRemote = remote
+	task.spawn(function()
+		pcall(function()
+			remote:InvokeServer({
+				action = CrateRollConfig.Actions.ClearPromptPurchase,
+				productKey = productKey,
+			})
+		end)
+	end)
+end
+
+function CrateRollController:_promptProductPurchase(responsePayload): boolean
+	local productPurchase = responsePayload.productPurchase
+	if typeof(productPurchase) ~= "table" then
+		Notify.Show(responsePayload.message or "This crate is unavailable.", { color = "Red" })
+		return false
+	end
+
+	local productId = math.floor(tonumber(productPurchase.productId) or 0)
+	local productKey = productPurchase.productKey
+	if productId <= 0 or typeof(productKey) ~= "string" or productKey == "" then
+		Notify.Show(responsePayload.message or "This crate is unavailable.", { color = "Red" })
+		return false
+	end
+
+	self._pendingPromptPurchaseProductId = productId
+	self._pendingPromptPurchaseProductKey = productKey
+	MarketplaceService:PromptProductPurchase(LocalPlayer, productId)
+	return true
+end
+
 function CrateRollController:_playRollResponse(responsePayload): boolean
 	if typeof(responsePayload) ~= "table" then
 		return false
 	end
 	if responsePayload.ok == false then
+		if responsePayload.code == "PurchaseRequired" then
+			return self:_promptProductPurchase(responsePayload)
+		end
+
 		warn("[CrateRollController] Crate roll rejected: " .. tostring(responsePayload.message or responsePayload.code))
+		if typeof(responsePayload.message) == "string" and responsePayload.message ~= "" then
+			Notify.Show(responsePayload.message, { color = "Red" })
+		end
 		return false
 	end
 
@@ -1783,6 +1845,19 @@ function CrateRollController:OnStart()
 		self:_bindUi()
 	end)
 	self:_bindBackendRemotes()
+	self:_trackConnection(MarketplaceService.PromptProductPurchaseFinished:Connect(function(a, b, c)
+		local userId, productId, wasPurchased = unpackPromptProductArgs(a, b, c)
+		if userId ~= LocalPlayer.UserId or productId ~= self._pendingPromptPurchaseProductId then
+			return
+		end
+
+		local productKey = self._pendingPromptPurchaseProductKey
+		self._pendingPromptPurchaseProductId = nil
+		self._pendingPromptPurchaseProductKey = nil
+		if not wasPurchased then
+			self:_clearPromptPurchase(productKey)
+		end
+	end))
 end
 
 return CrateRollController

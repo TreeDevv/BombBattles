@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
+local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -116,6 +117,30 @@ local function getLocalCameraSnapshot(sampleTime: number)
 	}
 end
 
+local function getLocalHeldBombSnapshot()
+	local attrs = BombConfig.Attributes
+	local bombCooking = LocalPlayer:GetAttribute(attrs.Cooking) == true
+	if not bombCooking then
+		return nil
+	end
+
+	local fuseStartedAt = getNumberAttribute(LocalPlayer, attrs.CookStartedAt)
+	local fuseEndsAt = if fuseStartedAt then fuseStartedAt + BombConfig.FuseSeconds else nil
+	local bombSkinId = BombSkinConfig.NormalizeSkinId(LocalPlayer:GetAttribute(BombSkinConfig.AttributeName))
+	if bombSkinId == "" then
+		bombSkinId = BombSkinConfig.DefaultSkinId
+	end
+
+	return {
+		bombType = BombConfig.RuntimeBombName,
+		bombSkinId = bombSkinId,
+		fuseStartedAt = fuseStartedAt,
+		fuseEndsAt = fuseEndsAt,
+		visualScale = BombConfig.HeldVisualScale,
+		sizeScale = BombConfig.HeldVisualScale,
+	}
+end
+
 local function getLocalHumanoidState(character: Model?, humanoid: Humanoid?, rootPart: BasePart?)
 	local sampleTime = workspace:GetServerTimeNow()
 	local linearVelocity = if rootPart then rootPart.AssemblyLinearVelocity else Vector3.zero
@@ -149,6 +174,11 @@ local function getLocalHumanoidState(character: Model?, humanoid: Humanoid?, roo
 		bombCooking = LocalPlayer:GetAttribute(attrs.Cooking) == true,
 		bombCookStartedAt = getNumberAttribute(LocalPlayer, attrs.CookStartedAt),
 	}
+
+	local heldBomb = getLocalHeldBombSnapshot()
+	if heldBomb then
+		state.heldBomb = heldBomb
+	end
 
 	if character then
 		local joints = collectLocalPoseJoints(character)

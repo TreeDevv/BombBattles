@@ -266,7 +266,7 @@ function RoundEndFlowController:_syncState()
 		self:_hideWinnerOverlay()
 		FrameController:CloseCurrentFrame(true)
 		ScreenEffects.FadeToBlack(0.25)
-	elseif stateName == RoundStates.Intermission or stateName == RoundStates.WaitingForPlayers then
+	elseif stateName == RoundStates.MapVoting or stateName == RoundStates.Intermission or stateName == RoundStates.WaitingForPlayers then
 		self._winnerRoundId = nil
 		self:_clearPOTGReplayUi(true)
 		self:_hideWinnerOverlay()

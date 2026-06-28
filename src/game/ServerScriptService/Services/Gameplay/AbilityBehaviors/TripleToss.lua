@@ -152,9 +152,10 @@ function TripleToss.OnActivate(context: ServerActivateContext): AbilityActivatio
 	local gravity = workspace.Gravity * gravityScale
 	local directions = getSpreadDirections(aimDirection, bombCount, spreadDegrees)
 	local projectileIds = {}
+	local clientProjectileId = AbilityBehaviorServices.GetClientProjectileId(context)
 
 	for index, direction in ipairs(directions) do
-		local projectileId = createProjectileId(context.player, index)
+		local projectileId = if index == 1 and clientProjectileId then clientProjectileId else createProjectileId(context.player, index)
 		local launched = projectileService:Launch({
 			owner = context.player,
 			projectileId = projectileId,

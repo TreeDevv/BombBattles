@@ -12,6 +12,7 @@ local Notify = require(ReplicatedStorage.Shared.UI.Notify)
 
 local BombSkinService = require(script.Parent.BombSkinService)
 local DataService = require(script.Parent.DataService)
+local EmoteService = require(script.Parent.EmoteService)
 
 local DAY_SECONDS = 24 * 60 * 60
 local CASH_KEY = Schema.Cash and Schema.Cash.key or "cash"
@@ -135,7 +136,11 @@ local function normalizeState(value: any, region: RegionRecord, dayInfo)
 		end
 	end
 
-	local completed = nextDay > DailyRewardConfig.MaxDay
+	if nextDay > DailyRewardConfig.MaxDay then
+		claimedDays = {}
+		nextDay = 1
+	end
+
 	return {
 		claimedDays = claimedDays,
 		nextDay = nextDay,
@@ -143,7 +148,7 @@ local function normalizeState(value: any, region: RegionRecord, dayInfo)
 		countryCode = region.countryCode,
 		utcOffsetMinutes = region.utcOffsetMinutes,
 		resetAtUnix = dayInfo.resetAtUnix,
-		completed = completed,
+		completed = false,
 	}
 end
 
@@ -202,7 +207,9 @@ local function validateRewards(dayDefinition): (boolean, string?)
 			if not BombSkinConfig.GetDefinition(reward.skinId) then
 				return false, "Unknown skin reward: " .. tostring(reward.skinId)
 			end
-		elseif reward.type ~= DailyRewardConfig.RewardTypes.Cash then
+		elseif reward.type ~= DailyRewardConfig.RewardTypes.Cash
+			and reward.type ~= DailyRewardConfig.RewardTypes.RandomEmote
+		then
 			return false, "Unknown daily reward type."
 		end
 	end
@@ -217,13 +224,27 @@ local function awardRewards(player: Player, dayDefinition): (boolean, string?)
 
 	for _, reward in ipairs(dayDefinition.rewards or {}) do
 		if reward.type == DailyRewardConfig.RewardTypes.Skin then
-			local ok, result = BombSkinService:GrantSkin(
+			local ownedSkins = BombSkinService:GetOwnedSkins(player)
+			local skinId = BombSkinConfig.NormalizeSkinId(reward.skinId)
+			if ownedSkins[skinId] == true and reward.duplicateFallbackCash ~= nil then
+				addCash(player, reward.duplicateFallbackCash)
+			else
+				local ok, result = BombSkinService:GrantSkin(
+					player,
+					reward.skinId,
+					("%s:%d"):format(DailyRewardConfig.RewardSource, dayDefinition.day)
+				)
+				if not ok then
+					return false, tostring(result or "Skin reward failed.")
+				end
+			end
+		elseif reward.type == DailyRewardConfig.RewardTypes.RandomEmote then
+			local ok, result = EmoteService:GrantRandomEmote(
 				player,
-				reward.skinId,
 				("%s:%d"):format(DailyRewardConfig.RewardSource, dayDefinition.day)
 			)
-			if not ok then
-				return false, tostring(result or "Skin reward failed.")
+			if not ok and tostring(result) ~= "All emotes are already owned" then
+				return false, tostring(result or "Emote reward failed.")
 			end
 		end
 	end
@@ -334,8 +355,14 @@ local function claimNextDay(player: Player)
 			local latestState = normalizeState(currentValue, region, dayInfo)
 			latestState.claimedDays[tostring(state.nextDay)] = true
 			latestState.lastClaimDayKey = dayInfo.dayKey
-			latestState.nextDay = math.min(DailyRewardConfig.MaxDay + 1, state.nextDay + 1)
-			latestState.completed = latestState.nextDay > DailyRewardConfig.MaxDay
+			if state.nextDay >= DailyRewardConfig.MaxDay then
+				latestState.claimedDays = {}
+				latestState.nextDay = 1
+				latestState.completed = false
+			else
+				latestState.nextDay = state.nextDay + 1
+				latestState.completed = false
+			end
 			return latestState
 		end)
 

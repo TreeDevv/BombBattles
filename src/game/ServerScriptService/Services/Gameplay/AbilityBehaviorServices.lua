@@ -38,4 +38,29 @@ function AbilityBehaviorServices.GetBombService(): any?
 	return AbilityBehaviorServices.GetService("BombService")
 end
 
+function AbilityBehaviorServices.GetClientProjectileId(context): string?
+	if typeof(context) ~= "table" or not context.player then
+		return nil
+	end
+	local payload = context.payload
+	if typeof(payload) ~= "table" then
+		return nil
+	end
+
+	local projectileId = payload.clientProjectileId
+	if typeof(projectileId) ~= "string" or #projectileId > 64 then
+		return nil
+	end
+
+	local expectedPrefix = "Client_" .. tostring(context.player.UserId) .. "_"
+	if string.sub(projectileId, 1, #expectedPrefix) ~= expectedPrefix then
+		return nil
+	end
+	if not string.match(projectileId, "^Client_%d+_%d+$") then
+		return nil
+	end
+
+	return projectileId
+end
+
 return table.freeze(AbilityBehaviorServices)

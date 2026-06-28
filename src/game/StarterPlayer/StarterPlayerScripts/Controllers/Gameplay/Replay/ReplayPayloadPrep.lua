@@ -266,6 +266,48 @@ function ReplayPayloadPrep.CollectReplayMeta(frames)
 	return playerMeta, bombMeta
 end
 
+function ReplayPayloadPrep.CollectThrownBombMeta(events)
+	local bombMeta = {}
+	if typeof(events) ~= "table" then
+		return bombMeta
+	end
+
+	for _, event in ipairs(events) do
+		if typeof(event) ~= "table" or event.eventType ~= "BombThrown" then
+			continue
+		end
+		local key = getBombKey(event.bombId) or getBombKey(event.projectileId) or getBombKey(event.sourceId)
+		if not key then
+			continue
+		end
+
+		local record = bombMeta[key]
+		if not record then
+			record = {
+				bombId = event.bombId or event.projectileId or event.sourceId,
+				bombType = event.bombType,
+				bombSkinId = event.bombSkinId,
+				ownerUserId = event.ownerUserId,
+				throwEvent = event,
+			}
+			bombMeta[key] = record
+		else
+			record.throwEvent = record.throwEvent or event
+			if record.bombType == nil and typeof(event.bombType) == "string" and event.bombType ~= "" then
+				record.bombType = event.bombType
+			end
+			if record.bombSkinId == nil and typeof(event.bombSkinId) == "string" and event.bombSkinId ~= "" then
+				record.bombSkinId = event.bombSkinId
+			end
+			if record.ownerUserId == nil and isFiniteNumber(event.ownerUserId) then
+				record.ownerUserId = event.ownerUserId
+			end
+		end
+	end
+
+	return bombMeta
+end
+
 function ReplayPayloadPrep.CollectPlayerMeta(frames)
 	local playerMeta = ReplayPayloadPrep.CollectReplayMeta(frames)
 	return playerMeta

@@ -1,8 +1,8 @@
 return table.freeze({
 	Tag = "Destructible",
-	MinVoxelSize = 10,
-	FinalVoxelSize = 10,
-	TerrainCellSize = 10,
+	MinVoxelSize = 4,
+	FinalVoxelSize = 4,
+	TerrainCellSize = 4,
 	TerrainCellHealth = 80,
 	TerrainHealthAttribute = "DestructionHealth",
 	TerrainDamageMultiplierAttribute = "DestructionDamageMultiplier",

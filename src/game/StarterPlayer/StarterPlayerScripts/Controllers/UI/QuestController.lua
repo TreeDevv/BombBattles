@@ -17,8 +17,31 @@ local SIDE_BUTTONS_NAME = "SideButtons"
 local QUESTS_LABEL_TEXT = "QUESTS"
 local QUESTS_KEY = Schema.Quests and Schema.Quests.key or "quests"
 local RUNTIME_ROW_ATTRIBUTE = "QuestControllerRuntimeRow"
+local SLIDER_EDGE_WIDTH = 0.002
+local UNAVAILABLE_CLAIM_BACKGROUND = Color3.fromRGB(190, 42, 58)
+local UNAVAILABLE_CLAIM_GRADIENT = ColorSequence.new({
+	ColorSequenceKeypoint.new(0, Color3.fromRGB(255, 84, 96)),
+	ColorSequenceKeypoint.new(1, Color3.fromRGB(138, 24, 40)),
+})
+local UNAVAILABLE_CLAIM_STROKE_COLOR = Color3.fromRGB(87, 7, 20)
 local PROGRESS_TWEEN = TweenInfo.new(0.32, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local BUTTON_TOGGLE_DEBOUNCE_SECONDS = 0.08
+
+type StrokeVisualRecord = {
+	instance: UIStroke,
+	color: Color3,
+	transparency: number,
+}
+
+type ClaimButtonVisual = {
+	backgroundColor: Color3,
+	backgroundTransparency: number,
+	imageTransparency: number,
+	gradient: UIGradient?,
+	gradientColor: ColorSequence?,
+	gradientTransparency: NumberSequence?,
+	strokes: { StrokeVisualRecord },
+}
 
 type RowRecord = {
 	root: Frame,
@@ -27,10 +50,17 @@ type RowRecord = {
 	timer: TextLabel?,
 	claimButton: ImageButton?,
 	claimLabel: TextLabel?,
+	claimVisual: ClaimButtonVisual?,
 	slider: UIGradient?,
 	progressValue: NumberValue,
 	tween: Tween?,
 	connections: { RBXScriptConnection },
+}
+
+type SliderGradientRecord = {
+	fillStart: Color3,
+	fillEnd: Color3,
+	track: Color3,
 }
 
 local QuestController = {}
@@ -51,6 +81,8 @@ QuestController._timerLoopStarted = false
 QuestController._rebindQueued = false
 QuestController._warnedMissingFrame = false
 QuestController._warnedMissingButton = false
+
+local sliderGradientRecords = setmetatable({}, { __mode = "k" }) :: { [UIGradient]: SliderGradientRecord }
 
 local function track(list: { RBXScriptConnection }, connection: RBXScriptConnection?)
 	if connection then
@@ -161,28 +193,75 @@ local function isClaimed(state, questId: string): boolean
 	return typeof(claimed) == "table" and claimed[questId] == true
 end
 
+local function getColorAt(sequence: ColorSequence, time: number): Color3
+	local keypoints = sequence.Keypoints
+	if #keypoints == 0 then
+		return Color3.new(1, 1, 1)
+	end
+
+	local clamped = math.clamp(time, 0, 1)
+	local first = keypoints[1]
+	if clamped <= first.Time then
+		return first.Value
+	end
+
+	for index = 2, #keypoints do
+		local previous = keypoints[index - 1]
+		local current = keypoints[index]
+		if clamped <= current.Time then
+			local span = current.Time - previous.Time
+			local alpha = if span > 0 then (clamped - previous.Time) / span else 0
+			return previous.Value:Lerp(current.Value, math.clamp(alpha, 0, 1))
+		end
+	end
+
+	return keypoints[#keypoints].Value
+end
+
+local function getSliderGradientRecord(slider: UIGradient): SliderGradientRecord
+	local existing = sliderGradientRecords[slider]
+	if existing then
+		return existing
+	end
+
+	local color = slider.Color
+	local record = {
+		fillStart = getColorAt(color, 0),
+		fillEnd = getColorAt(color, 0.5),
+		track = getColorAt(color, 1),
+	}
+	sliderGradientRecords[slider] = record
+	return record
+end
+
 local function setSliderProgress(slider: UIGradient?, ratio: number)
 	if not slider then
 		return
 	end
 
 	local clamped = math.clamp(ratio, 0, 1)
+	local colors = getSliderGradientRecord(slider)
+	slider.Transparency = NumberSequence.new(0)
+
 	if clamped <= 0 then
-		slider.Transparency = NumberSequence.new(1)
+		slider.Color = ColorSequence.new(colors.track)
 		return
 	end
 	if clamped >= 1 then
-		slider.Transparency = NumberSequence.new(0)
+		slider.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, colors.fillStart),
+			ColorSequenceKeypoint.new(1, colors.fillEnd),
+		})
 		return
 	end
 
 	local edge = math.clamp(clamped, 0.001, 0.999)
-	local fadeEdge = math.clamp(edge + 0.002, 0.001, 1)
-	slider.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0),
-		NumberSequenceKeypoint.new(edge, 0),
-		NumberSequenceKeypoint.new(fadeEdge, 1),
-		NumberSequenceKeypoint.new(1, 1),
+	local trackEdge = math.clamp(edge + SLIDER_EDGE_WIDTH, 0.001, 1)
+	slider.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, colors.fillStart),
+		ColorSequenceKeypoint.new(edge, colors.fillEnd),
+		ColorSequenceKeypoint.new(trackEdge, colors.track),
+		ColorSequenceKeypoint.new(1, colors.track),
 	})
 end
 
@@ -194,12 +273,86 @@ local function setButtonEnabled(button: ImageButton?, enabled: boolean)
 	button.Active = enabled
 	button.Selectable = enabled
 	button.AutoButtonColor = enabled
-	button.ImageTransparency = if enabled then 0 else 0.35
 end
 
 local function setLabelMuted(label: TextLabel?, muted: boolean)
 	if label then
 		label.TextTransparency = if muted then 0.32 else 0
+	end
+end
+
+local function captureClaimButtonVisual(button: ImageButton?): ClaimButtonVisual?
+	if not button then
+		return nil
+	end
+
+	local gradient = button:FindFirstChildWhichIsA("UIGradient")
+	local strokes = {}
+	for _, child in ipairs(button:GetChildren()) do
+		if child:IsA("UIStroke") then
+			table.insert(strokes, {
+				instance = child,
+				color = child.Color,
+				transparency = child.Transparency,
+			})
+		end
+	end
+
+	return {
+		backgroundColor = button.BackgroundColor3,
+		backgroundTransparency = button.BackgroundTransparency,
+		imageTransparency = button.ImageTransparency,
+		gradient = gradient,
+		gradientColor = if gradient then gradient.Color else nil,
+		gradientTransparency = if gradient then gradient.Transparency else nil,
+		strokes = strokes,
+	}
+end
+
+local function setClaimButtonVisual(button: ImageButton?, visual: ClaimButtonVisual?, claimable: boolean)
+	if not button then
+		return
+	end
+
+	if claimable then
+		if visual then
+			button.BackgroundColor3 = visual.backgroundColor
+			button.BackgroundTransparency = visual.backgroundTransparency
+			button.ImageTransparency = visual.imageTransparency
+			if visual.gradient and visual.gradient.Parent then
+				if visual.gradientColor then
+					visual.gradient.Color = visual.gradientColor
+				end
+				if visual.gradientTransparency then
+					visual.gradient.Transparency = visual.gradientTransparency
+				end
+			end
+			for _, strokeRecord in ipairs(visual.strokes) do
+				local stroke = strokeRecord.instance
+				if stroke and stroke.Parent then
+					stroke.Color = strokeRecord.color
+					stroke.Transparency = strokeRecord.transparency
+				end
+			end
+		end
+		return
+	end
+
+	button.BackgroundColor3 = UNAVAILABLE_CLAIM_BACKGROUND
+	button.BackgroundTransparency = if visual then visual.backgroundTransparency else 0
+	button.ImageTransparency = if visual then visual.imageTransparency else 0
+	local gradient = if visual then visual.gradient else button:FindFirstChildWhichIsA("UIGradient")
+	if gradient and gradient.Parent then
+		gradient.Color = UNAVAILABLE_CLAIM_GRADIENT
+		gradient.Transparency = if visual and visual.gradientTransparency then visual.gradientTransparency else NumberSequence.new(0)
+	end
+	local strokes = if visual then visual.strokes else {}
+	for _, strokeRecord in ipairs(strokes) do
+		local stroke = strokeRecord.instance
+		if stroke and stroke.Parent then
+			stroke.Color = UNAVAILABLE_CLAIM_STROKE_COLOR
+			stroke.Transparency = strokeRecord.transparency
+		end
 	end
 end
 
@@ -295,11 +448,13 @@ function QuestController:_destroyRows()
 end
 
 function QuestController:_setClaimState(row: RowRecord, complete: boolean, claimed: boolean)
-	setButtonEnabled(row.claimButton, complete and not claimed)
+	local claimable = complete and not claimed
+	setButtonEnabled(row.claimButton, claimable)
+	setClaimButtonVisual(row.claimButton, row.claimVisual, claimable)
 	if row.claimLabel then
 		row.claimLabel.Text = if claimed then "CLAIMED" else "CLAIM"
 	end
-	setLabelMuted(row.claimLabel, not complete or claimed)
+	setLabelMuted(row.claimLabel, not claimable)
 end
 
 function QuestController:_updateRow(row: RowRecord, state)
@@ -359,6 +514,7 @@ function QuestController:_buildRow(template: Frame, questId: string, layoutOrder
 		timer = findTextLabel(rowRoot, "Timer"),
 		claimButton = claimButton,
 		claimLabel = findTextLabel(claimButton, "Label"),
+		claimVisual = captureClaimButtonVisual(claimButton),
 		slider = if slider and slider:IsA("UIGradient") then slider else nil,
 		progressValue = progressValue,
 		tween = nil,

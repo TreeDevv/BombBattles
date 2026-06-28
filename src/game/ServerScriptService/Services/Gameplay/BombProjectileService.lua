@@ -9,9 +9,11 @@ local AbilityResult = require(ReplicatedStorage.Shared.Common.AbilityResult)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local CollisionGroupConfig = require(ReplicatedStorage.Shared.Config.CollisionGroupConfig)
 local BombSkinConfig = require(ReplicatedStorage.Shared.Config.BombSkinConfig)
+local BombLaunchClearance = require(ReplicatedStorage.Shared.Bombs.BombLaunchClearance)
 local BombProjectileConfig = require(ReplicatedStorage.Shared.Bombs.BombProjectileConfig)
 local DestructionConfig = require(ReplicatedStorage.Shared.Config.DestructionConfig)
 local ProjectilePhysics = require(ReplicatedStorage.Shared.Bombs.ProjectilePhysics)
+local BombThrowOrigin = require(ReplicatedStorage.Shared.Common.BombThrowOrigin)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
@@ -321,6 +323,36 @@ local function getOwnerVisualIdentity(owner: any): (number?, string?)
 		then ownerIdentity.teamName
 		else nil
 	return ownerUserId, ownerTeam
+end
+
+local function getOwnerCharacterAndRoot(owner: any): (Model?, BasePart?)
+	local character = owner.Character
+	if typeof(character) ~= "Instance" or not character:IsA("Model") then
+		return nil, nil
+	end
+
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	return character, if rootPart and rootPart:IsA("BasePart") then rootPart else nil
+end
+
+local function resolveLaunchOriginForThrow(owner: any, origin: Vector3, physics: ProjectilePhysics.PhysicsConfig, collision): Vector3
+	local character, rootPart = getOwnerCharacterAndRoot(owner)
+	if not rootPart then
+		return origin
+	end
+
+	local rawThrowOrigin = BombThrowOrigin.GetOrigin(rootPart)
+	if (origin - rawThrowOrigin).Magnitude > 0.25 then
+		return origin
+	end
+
+	return BombLaunchClearance.ResolveOrigin(rootPart, origin, {
+		character = character,
+		radius = physics.radius,
+		collisionGroup = BOMB_PROJECTILE_COLLISION_GROUP,
+		respectCanCollide = collision.respectCanCollide ~= false,
+		ignoreWater = collision.ignoreWater ~= false,
+	})
 end
 
 local function hasTaggedAncestor(instance: Instance, tagName: string): boolean
@@ -2117,6 +2149,7 @@ function BombProjectileService:Launch(request): boolean
 		requestedFuse = math.min(requestedFuse, readNumber(fuseConfig.seconds, requestedFuse, 0.05, 60))
 	end
 
+	origin = resolveLaunchOriginForThrow(owner, origin, physics, collision)
 	local initialVelocity = ProjectilePhysics.GetLaunchVelocity(aimDirection, physics)
 	local groundRollDirection = resolveGroundRollDirection(owner, aimDirection)
 	local state: ProjectileState = {
@@ -2205,9 +2238,17 @@ function BombProjectileService:Launch(request): boolean
 		abilityId = sourceId,
 		bombType = bombType,
 		bombSkinId = skinId,
+		origin = origin,
 		position = origin,
 		velocity = initialVelocity,
+		acceleration = getAcceleration(physics, false),
+		startedAt = launchTime,
+		fuseStartedAt = fuseStartedAt,
+		fuseEndsAt = fuseStartedAt + requestedFuse,
 		fuseDuration = requestedFuse,
+		radius = physics.radius,
+		visualScale = visuals.visualScale,
+		sizeScale = visuals.visualScale,
 	})
 	fireSnapshot(state, launchTime, true)
 	cancelSpawnProtectionForOwner(owner)

@@ -15,6 +15,15 @@ local UNSAFE_TAGS = {
 }
 
 local CURRENT_VOXELS_FOLDER_NAME = "CurrentVoxels"
+local BEDROCK_PART_NAME = "Bedrock"
+local REPLAY_DESTRUCTION_BOOLEAN_OPTION_FIELDS = table.freeze({
+	"forceSubtract",
+	"exactCullTargets",
+	"skipTerminalNoop",
+	"reuseTargetPart",
+	"prefilterTargets",
+	"prefilteredTargets",
+})
 
 local DestructionService = {}
 local replayService = nil
@@ -38,6 +47,7 @@ local unsafeRefreshQueued = false
 local bulkUpdateDepth = 0
 local targetCacheDirty = false
 local targetCacheDirtyReason: string? = nil
+local missingBedrockWarnedMap: Instance? = nil
 
 local function getReplayService()
 	if replayService then
@@ -58,7 +68,39 @@ local function getReplayService()
 	return nil
 end
 
-local function recordMapDestruction(position: Vector3, radius: number, sourceContext, debrisPayloads)
+local function isFiniteNumber(value): boolean
+	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
+end
+
+local function copyReplayDestructionOptions(source, target)
+	if typeof(source) ~= "table" or typeof(target) ~= "table" then
+		return
+	end
+
+	if source.terrainShape == "Ellipsoid" or source.terrainShape == "Sphere" then
+		target.terrainShape = source.terrainShape
+	end
+	if isFiniteNumber(source.terrainVerticalScale) then
+		target.terrainVerticalScale = math.clamp(source.terrainVerticalScale, 0.05, 1)
+	end
+	if isFiniteNumber(source.maxTargetsPerExplosion) then
+		local hardMax = if isFiniteNumber(DestructionConfig.HardMaxTargetsPerExplosion)
+				and DestructionConfig.HardMaxTargetsPerExplosion > 0
+			then DestructionConfig.HardMaxTargetsPerExplosion
+			else 128
+		target.maxTargetsPerExplosion = math.clamp(math.floor(source.maxTargetsPerExplosion), 1, hardMax)
+	end
+	if isFiniteNumber(source.transparentCollisionClearance) then
+		target.transparentCollisionClearance = math.clamp(source.transparentCollisionClearance, 0, 80)
+	end
+	for _, fieldName in ipairs(REPLAY_DESTRUCTION_BOOLEAN_OPTION_FIELDS) do
+		if typeof(source[fieldName]) == "boolean" then
+			target[fieldName] = source[fieldName]
+		end
+	end
+end
+
+local function recordMapDestruction(position: Vector3, radius: number, sourceContext, debrisPayloads, voxelOptions)
 	local service = getReplayService()
 	if not (service and type(service.RecordMapDestruction) == "function") then
 		return
@@ -78,6 +120,8 @@ local function recordMapDestruction(position: Vector3, radius: number, sourceCon
 	if typeof(debrisPayloads) == "table" then
 		payload.debrisPayloads = debrisPayloads
 	end
+	payload.storeReplayDebrisPayloads = true
+	copyReplayDestructionOptions(voxelOptions, payload)
 
 	pcall(function()
 		service.RecordMapDestruction(payload)
@@ -117,6 +161,31 @@ local function getCurrentVoxelsFolder(): Folder
 	folder.Name = CURRENT_VOXELS_FOLDER_NAME
 	folder.Parent = parent
 	return folder
+end
+
+local function getActiveMapBedrockTopY(): number?
+	local activeMap = getActiveMap()
+	if not activeMap then
+		return nil
+	end
+
+	local bedrock = activeMap:FindFirstChild(BEDROCK_PART_NAME)
+	if bedrock and bedrock:IsA("BasePart") then
+		missingBedrockWarnedMap = nil
+		return bedrock.Position.Y + bedrock.Size.Y * 0.5
+	end
+
+	if missingBedrockWarnedMap ~= activeMap then
+		missingBedrockWarnedMap = activeMap
+		RuntimeProfiler.Count("Server/Destruction/MissingBedrock")
+		warn(
+			("[DestructionService] Active map %s is missing a BasePart named %s; destruction will not clamp."):format(
+				activeMap:GetFullName(),
+				BEDROCK_PART_NAME
+			)
+		)
+	end
+	return nil
 end
 
 local function clearCurrentVoxelsFolder()
@@ -162,7 +231,11 @@ local function getSpatialGridCellSize(): number
 		return math.max(configured, DestructionConfig.FinalVoxelSize, 1)
 	end
 
-	return math.max(BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius or 16, DestructionConfig.FinalVoxelSize, 1)
+	return math.max(
+		BombConfig.TerrainDestructionRadius or BombConfig.OuterRadius or 16,
+		DestructionConfig.FinalVoxelSize,
+		1
+	)
 end
 
 local function getGridCellCoord(value: number, cellSize: number): number
@@ -325,7 +398,7 @@ local function registerLightweightTargetPart(part: BasePart)
 	if lightweightTargetPartConnections[part] then
 		return
 	end
-	if not part:IsDescendantOf(workspace) or hasUnsafeTaggedAncestor(part) then
+	if part.Name == BEDROCK_PART_NAME or not part:IsDescendantOf(workspace) or hasUnsafeTaggedAncestor(part) then
 		return
 	end
 
@@ -359,7 +432,7 @@ local function addRecordPart(record, part: BasePart)
 	if record.parts[part] then
 		return
 	end
-	if not part:IsDescendantOf(workspace) or hasUnsafeTaggedAncestor(part) then
+	if part.Name == BEDROCK_PART_NAME or not part:IsDescendantOf(workspace) or hasUnsafeTaggedAncestor(part) then
 		return
 	end
 
@@ -434,20 +507,32 @@ local function registerTaggedRoot(root: Instance)
 	taggedRootRecords[root] = record
 	cachedRootCount += 1
 
-	table.insert(record.connections, root.AncestryChanged:Connect(function()
-		refreshRootRecord(record)
-	end))
-	table.insert(record.connections, root.Destroying:Connect(function()
-		unregisterTaggedRoot(root)
-	end))
+	table.insert(
+		record.connections,
+		root.AncestryChanged:Connect(function()
+			refreshRootRecord(record)
+		end)
+	)
+	table.insert(
+		record.connections,
+		root.Destroying:Connect(function()
+			unregisterTaggedRoot(root)
+		end)
+	)
 
 	if not root:IsA("BasePart") then
-		table.insert(record.connections, root.DescendantAdded:Connect(function(descendant)
-			addRecordInstance(record, descendant)
-		end))
-		table.insert(record.connections, root.DescendantRemoving:Connect(function(descendant)
-			removeRecordInstance(record, descendant)
-		end))
+		table.insert(
+			record.connections,
+			root.DescendantAdded:Connect(function(descendant)
+				addRecordInstance(record, descendant)
+			end)
+		)
+		table.insert(
+			record.connections,
+			root.DescendantRemoving:Connect(function(descendant)
+				removeRecordInstance(record, descendant)
+			end)
+		)
 	end
 
 	refreshRootRecord(record)
@@ -581,12 +666,20 @@ local function startTargetCache(deferInitialRebuild: boolean?)
 	end
 	targetCacheStarted = true
 
-	destructibleAddedConnection = CollectionService:GetInstanceAddedSignal(DestructionConfig.Tag):Connect(handleTaggedRootAdded)
-	destructibleRemovedConnection = CollectionService:GetInstanceRemovedSignal(DestructionConfig.Tag):Connect(handleTaggedRootRemoved)
+	destructibleAddedConnection = CollectionService:GetInstanceAddedSignal(DestructionConfig.Tag)
+		:Connect(handleTaggedRootAdded)
+	destructibleRemovedConnection = CollectionService:GetInstanceRemovedSignal(DestructionConfig.Tag)
+		:Connect(handleTaggedRootRemoved)
 
 	for _, tagName in ipairs(UNSAFE_TAGS) do
-		table.insert(unsafeTagConnections, CollectionService:GetInstanceAddedSignal(tagName):Connect(queueUnsafeRefresh))
-		table.insert(unsafeTagConnections, CollectionService:GetInstanceRemovedSignal(tagName):Connect(queueUnsafeRefresh))
+		table.insert(
+			unsafeTagConnections,
+			CollectionService:GetInstanceAddedSignal(tagName):Connect(queueUnsafeRefresh)
+		)
+		table.insert(
+			unsafeTagConnections,
+			CollectionService:GetInstanceRemovedSignal(tagName):Connect(queueUnsafeRefresh)
+		)
 	end
 
 	if deferInitialRebuild then
@@ -699,7 +792,11 @@ local function getCandidateTargets(position: Vector3, radius: number, targets: {
 					end
 					seen[part] = true
 
-					if part.CanQuery and part:IsDescendantOf(workspace) and isPartCandidate(part, position, queryRadius) then
+					if
+						part.CanQuery
+						and part:IsDescendantOf(workspace)
+						and isPartCandidate(part, position, queryRadius)
+					then
 						table.insert(candidates, part)
 					end
 				end
@@ -745,7 +842,11 @@ local function getCandidateDistanceSquared(part: BasePart, position: Vector3): n
 	return getPartBoundsDistanceSquared(part, position)
 end
 
-local function selectNearestCandidateTargets(position: Vector3, candidates: { BasePart }, maxTargets: number): { BasePart }
+local function selectNearestCandidateTargets(
+	position: Vector3,
+	candidates: { BasePart },
+	maxTargets: number
+): { BasePart }
 	local selected = {}
 	local distances = {}
 	local selectedCount = 0
@@ -900,14 +1001,19 @@ local function batchDebrisPayloads(payloads, options)
 		end
 
 		if payload.compact == true then
-			local sourceBlockCount = math.max(if typeof(payload.sourceBlockCount) == "number" then payload.sourceBlockCount else 0, 0)
+			local sourceBlockCount =
+				math.max(if typeof(payload.sourceBlockCount) == "number" then payload.sourceBlockCount else 0, 0)
 			local sampleCount = math.max(if typeof(payload.sampleCount) == "number" then payload.sampleCount else 0, 0)
-			local previousSourceBlockCount = math.max(if typeof(batch.sourceBlockCount) == "number" then batch.sourceBlockCount else 0, 0)
-			local previousAverageSize = if typeof(batch.averageSize) == "Vector3" then batch.averageSize else Vector3.zero
+			local previousSourceBlockCount =
+				math.max(if typeof(batch.sourceBlockCount) == "number" then batch.sourceBlockCount else 0, 0)
+			local previousAverageSize = if typeof(batch.averageSize) == "Vector3"
+				then batch.averageSize
+				else Vector3.zero
 			local nextSourceBlockCount = previousSourceBlockCount + sourceBlockCount
 			if nextSourceBlockCount > 0 and typeof(payload.averageSize) == "Vector3" then
-				batch.averageSize = (previousAverageSize * previousSourceBlockCount + payload.averageSize * sourceBlockCount)
-					/ nextSourceBlockCount
+				batch.averageSize = (
+					previousAverageSize * previousSourceBlockCount + payload.averageSize * sourceBlockCount
+				) / nextSourceBlockCount
 			end
 			batch.sourceBlockCount = nextSourceBlockCount
 			batch.sampleCount = (batch.sampleCount or 0) + sampleCount
@@ -949,7 +1055,8 @@ local function batchDebrisPayloads(payloads, options)
 	local compactSamples = 0
 	for _, batch in ipairs(batches) do
 		if batch.compact == true then
-			local requested = math.max(if typeof(batch.sampleCount) == "number" then math.floor(batch.sampleCount) else 0, 0)
+			local requested =
+				math.max(if typeof(batch.sampleCount) == "number" then math.floor(batch.sampleCount) else 0, 0)
 			local allowed = math.max(maxCompactSamples - compactSamples, 0)
 			batch.sampleCount = math.min(requested, allowed)
 			compactSamples += batch.sampleCount
@@ -1072,9 +1179,11 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 	end
 
 	local debrisPayloads = {}
+	local voxelOptions = buildVoxelOptions(options)
+	voxelOptions.maxTargetsPerExplosion = getMaxTargetsPerExplosion(voxelOptions)
+	voxelOptions.bedrockTopY = getActiveMapBedrockTopY()
 	local voxelToken = RuntimeProfiler.Begin("Server/Destruction/VoxelizePosition")
 	local ok, err = pcall(function()
-		local voxelOptions = buildVoxelOptions(options)
 		local candidateTargets = getCandidateTargets(position, destructionRadius, targets, voxelOptions)
 		candidateTargets = capCandidateTargets(position, candidateTargets, voxelOptions)
 		if candidateTargets ~= targets then
@@ -1109,7 +1218,6 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 		return {}
 	end
 
-	local voxelOptions = buildVoxelOptions(options)
 	debrisPayloads = batchDebrisPayloads(debrisPayloads, voxelOptions)
 
 	local targetsHit = if typeof(debrisPayloads) == "table" and typeof(debrisPayloads.targetsHit) == "number"
@@ -1117,7 +1225,7 @@ function DestructionService:DestroySphere(position: Vector3, radius: number?, so
 		else #debrisPayloads
 	if targetsHit > 0 then
 		recordDestructionScore(sourceContext, targetsHit, position)
-		recordMapDestruction(position, destructionRadius, sourceContext, debrisPayloads)
+		recordMapDestruction(position, destructionRadius, sourceContext, debrisPayloads, voxelOptions)
 		notifyDestruction({
 			position = position,
 			radius = destructionRadius,
@@ -1147,7 +1255,13 @@ local function appendDebrisPayloads(combined, payloads)
 	combined.targetsHit = (combined.targetsHit or 0) + targetsHit
 end
 
-function DestructionService:DestroyCylinderDown(position: Vector3, radius: number?, depth: number?, step: number?, sourceContext)
+function DestructionService:DestroyCylinderDown(
+	position: Vector3,
+	radius: number?,
+	depth: number?,
+	step: number?,
+	sourceContext
+)
 	local token = RuntimeProfiler.Begin("Server/Destruction/DestroyCylinderDown")
 	if typeof(position) ~= "Vector3" then
 		RuntimeProfiler.End("Server/Destruction/DestroyCylinderDown", token)
@@ -1164,12 +1278,18 @@ function DestructionService:DestroyCylinderDown(position: Vector3, radius: numbe
 	local combined = { targetsHit = 0 }
 	local offset = 0
 	while offset <= destructionDepth do
-		appendDebrisPayloads(combined, self:DestroySphere(position - Vector3.yAxis * offset, destructionRadius, sourceContext))
+		appendDebrisPayloads(
+			combined,
+			self:DestroySphere(position - Vector3.yAxis * offset, destructionRadius, sourceContext)
+		)
 		offset += stepDistance
 	end
 
 	if offset - stepDistance < destructionDepth then
-		appendDebrisPayloads(combined, self:DestroySphere(position - Vector3.yAxis * destructionDepth, destructionRadius, sourceContext))
+		appendDebrisPayloads(
+			combined,
+			self:DestroySphere(position - Vector3.yAxis * destructionDepth, destructionRadius, sourceContext)
+		)
 	end
 
 	RuntimeProfiler.Count("Server/Destruction/DestroyCylinderDownCalls")

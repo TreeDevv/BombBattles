@@ -1,12 +1,14 @@
 local CollectionService = game:GetService("CollectionService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 local TweenService = game:GetService("TweenService")
 
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
 local PlacementSurfaceUtil = require(ReplicatedStorage.Shared.Common.PlacementSurfaceUtil)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local CombatMotionService = require(ServerScriptService.Services.CombatMotionService)
 
 type AbilityActivationResult = AbilityTypes.AbilityActivationResult
 type AbilityDefinition = AbilityTypes.AbilityDefinition
@@ -486,9 +488,18 @@ local function launchCharacter(record: JumpPadRecord, character: Model, humanoid
 	local horizontalVelocity = Vector3.new(velocity.X, 0, velocity.Z)
 	local forwardSpeed = horizontalVelocity:Dot(direction)
 	local horizontalDelta = math.max(horizontalTarget - forwardSpeed, 0)
-	local impulse = Vector3.yAxis * verticalDelta * mass + direction * horizontalDelta * mass
-	if impulse.Magnitude > 0 then
-		rootPart:ApplyImpulse(impulse)
+	local velocityDelta = Vector3.yAxis * verticalDelta + direction * horizontalDelta
+	local launchedPlayer = Players:GetPlayerFromCharacter(character)
+	if velocityDelta.Magnitude > 0 then
+		if launchedPlayer then
+			CombatMotionService.SendImpulse(launchedPlayer, character, velocityDelta, {
+				sourceType = "Ability",
+				sourceId = "JumpPad",
+				movementSuppressSeconds = 0.2,
+			})
+		else
+			rootPart:ApplyImpulse(velocityDelta * mass)
+		end
 	end
 
 	humanoid.Jump = true
@@ -496,7 +507,6 @@ local function launchCharacter(record: JumpPadRecord, character: Model, humanoid
 		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
 	end)
 
-	local launchedPlayer = Players:GetPlayerFromCharacter(character)
 	fireEffect("JumpPadTriggered", record.owner, {
 		padId = record.id,
 		position = record.spring.Position,

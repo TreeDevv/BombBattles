@@ -1,7 +1,7 @@
 local ReplayConstants = {}
 
 ReplayConstants.BUFFER_SECONDS = 12
-ReplayConstants.SAMPLE_RATE = 15
+ReplayConstants.SAMPLE_RATE = 30
 ReplayConstants.SAMPLE_INTERVAL = 1 / ReplayConstants.SAMPLE_RATE
 
 ReplayConstants.KILL_REPLAY_PRE_SECONDS = 4

@@ -72,6 +72,7 @@ ScoreboardController._scale = nil :: UIScale?
 ScoreboardController._visibilityTween = nil :: Tween?
 ScoreboardController._framesChildConnection = nil :: RBXScriptConnection?
 ScoreboardController._tabHeld = false
+ScoreboardController._mobileHeld = false
 ScoreboardController._reportRemote = nil :: RemoteEvent?
 ScoreboardController._currentPlatform = nil :: string?
 ScoreboardController._lastReportedPlatform = nil :: string?
@@ -569,7 +570,7 @@ function ScoreboardController:_bindScoreboard(scoreboard: Instance?)
 	self._teamViews.EnemyTeam = self:_buildTeamView(scoreboard:FindFirstChild("EnemyTeam"))
 	self:_syncRows()
 
-	if self._tabHeld then
+	if self._tabHeld or self._mobileHeld then
 		self:_setVisible(true, true)
 	end
 end
@@ -647,7 +648,20 @@ function ScoreboardController:_handleInputEnded(input: InputObject)
 	end
 
 	self._tabHeld = false
-	self:_setVisible(false)
+	self:_setVisible(self._mobileHeld)
+end
+
+function ScoreboardController:SetMobileHeld(held: boolean)
+	local nextHeld = held == true
+	if self._mobileHeld == nextHeld then
+		return
+	end
+
+	self._mobileHeld = nextHeld
+	if nextHeld then
+		self:_syncRows()
+	end
+	self:_setVisible(self._tabHeld or self._mobileHeld)
 end
 
 function ScoreboardController:OnStart()
@@ -657,6 +671,7 @@ function ScoreboardController:OnStart()
 	self._lastReportedPlatform = nil
 	self._reportRemote = nil
 	self._tabHeld = false
+	self._mobileHeld = false
 
 	for _, player in ipairs(Players:GetPlayers()) do
 		self:_trackPlayer(player)

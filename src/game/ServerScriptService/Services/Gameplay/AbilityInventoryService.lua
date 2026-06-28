@@ -2,6 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
+local DebugEconomyConfig = require(ReplicatedStorage.Shared.Config.DebugEconomyConfig)
 local Globals = require(ReplicatedStorage.Shared.Config.Lists.Globals)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local Schema = require(ReplicatedStorage.Shared.Config.Lists.Schema)
@@ -303,20 +304,24 @@ local function buyAbility(player: Player, request)
 	end
 
 	local spent = false
-	local cash = tonumber(DataService:Get(player, CASH_KEY)) or 0
+	local cash = DebugEconomyConfig.GetEffectiveCash(player, DataService:Get(player, CASH_KEY))
 	if cash < price then
 		fail(player, request, "InsufficientCash", "Not enough cash.")
 		return
 	end
 
-	DataService:Set(player, CASH_KEY, function(currentValue)
-		local currentCash = tonumber(currentValue) or 0
-		if currentCash < price then
-			return currentCash
-		end
+	if DebugEconomyConfig.ShouldBypassCashSpend(player) then
 		spent = true
-		return currentCash - price
-	end)
+	else
+		DataService:Set(player, CASH_KEY, function(currentValue)
+			local currentCash = tonumber(currentValue) or 0
+			if currentCash < price then
+				return currentCash
+			end
+			spent = true
+			return currentCash - price
+		end)
+	end
 
 	if not spent then
 		fail(player, request, "InsufficientCash", "Not enough cash.")

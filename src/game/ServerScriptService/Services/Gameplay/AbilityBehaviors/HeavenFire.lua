@@ -10,6 +10,7 @@ local CombatEligibility = require(ReplicatedStorage.Shared.Common.CombatEligibil
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local BombConfig = require(ReplicatedStorage.Shared.Config.BombConfig)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local CombatMotionService = require(ServerScriptService.Services.CombatMotionService)
 local DestructionService = require(ServerScriptService.Services.DestructionService)
 local RoundService = require(ServerScriptService.Services.RoundService)
 
@@ -365,6 +366,7 @@ local function markCharacterKnockback(character: Model?, suppressSeconds: number
 end
 
 local function applyImpactKnockback(
+	targetPlayer: Player?,
 	character: Model?,
 	rootPart: BasePart,
 	origin: Vector3,
@@ -399,16 +401,32 @@ local function applyImpactKnockback(
 	)
 	velocityDelta = clampKnockbackVelocityDelta(rootPart, velocityDelta, knockbackConfig)
 	if velocityDelta.Magnitude > 0.001 then
-		rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
-		local maxAngularSpeed = readOptionalPositiveNumber(
-			knockbackConfig.maxKnockbackAngularSpeed,
-			BombConfig.KnockbackMaxAngularSpeed
-		)
-		if maxAngularSpeed then
-			rootPart.AssemblyAngularVelocity = clampMagnitude(rootPart.AssemblyAngularVelocity, maxAngularSpeed)
+		local maxAngularSpeed = readOptionalPositiveNumber(knockbackConfig.maxKnockbackAngularSpeed, BombConfig.KnockbackMaxAngularSpeed)
+		if targetPlayer then
+			CombatMotionService.SendImpulse(targetPlayer, character, velocityDelta, {
+				sourceType = "Ability",
+				sourceId = ABILITY_ID,
+				movementSuppressSeconds = readNonNegativeNumber(
+					knockbackConfig.movementSuppressSeconds,
+					BombConfig.KnockbackMovementSuppressSeconds
+				),
+				maxAngularSpeed = maxAngularSpeed,
+				maxHorizontalSpeed = knockbackConfig.maxKnockbackHorizontalSpeed,
+				maxVerticalSpeed = knockbackConfig.maxKnockbackVerticalSpeed,
+			})
+		else
+			rootPart:ApplyImpulse(velocityDelta * rootPart.AssemblyMass)
+			if maxAngularSpeed then
+				rootPart.AssemblyAngularVelocity = clampMagnitude(rootPart.AssemblyAngularVelocity, maxAngularSpeed)
+			end
+			markCharacterKnockback(
+				character,
+				readNonNegativeNumber(knockbackConfig.movementSuppressSeconds, BombConfig.KnockbackMovementSuppressSeconds)
+			)
 		end
+	else
+		markCharacterKnockback(character, readNonNegativeNumber(knockbackConfig.movementSuppressSeconds, BombConfig.KnockbackMovementSuppressSeconds))
 	end
-	markCharacterKnockback(character, readNonNegativeNumber(knockbackConfig.movementSuppressSeconds, BombConfig.KnockbackMovementSuppressSeconds))
 end
 
 local function getDamageTargets(owner: Player, zone: BasePart, overlapParams: OverlapParams): { [Player]: { humanoid: Humanoid, rootPart: BasePart, character: Model } }
@@ -518,6 +536,7 @@ local function damagePlayers(
 				then math.max(hookResult.knockbackMultiplier, 0)
 				else 1
 			applyImpactKnockback(
+				target,
 				targetInfo.character,
 				targetInfo.rootPart,
 				origin,

@@ -7,6 +7,7 @@ local ReplicaController = require(ReplicatedStorage.Packages.ReplicaController)
 local REMOTES_FOLDER_NAME = "Remotes"
 local SUBMIT_MAP_VOTE_REMOTE_NAME = "SubmitMapVote"
 local SET_AFK_REMOTE_NAME = "SetAFK"
+local ROUND_REPLICA_WARNING_DELAY_SECONDS = 2
 
 local RoundController = {}
 
@@ -18,6 +19,8 @@ RoundController.Loaded = false
 local data = nil
 local submitMapVoteRemote: RemoteEvent? = nil
 local setAFKRemote: RemoteEvent? = nil
+local boundReplica = nil
+local warnedMissingRoundReplica = false
 local warnedMissingSetAFKRemote = false
 
 local function getSubmitMapVoteRemote(): RemoteEvent?
@@ -70,6 +73,11 @@ local function bindSetAFKRemote()
 end
 
 local function bindReplica(replica)
+	if boundReplica == replica then
+		return
+	end
+
+	boundReplica = replica
 	data = replica.Data
 	RoundController.Loaded = true
 	RoundController.StateReceived:Fire(data)
@@ -91,8 +99,52 @@ local function bindReplica(replica)
 	end)
 end
 
+local function bindExistingReplica()
+	for _, replica in pairs(ReplicaController._replicas) do
+		if replica.Class == RoundConfig.Scope then
+			bindReplica(replica)
+			return true
+		end
+	end
+
+	return false
+end
+
+local function warnIfRoundReplicaMissing()
+	if warnedMissingRoundReplica then
+		return
+	end
+
+	warnedMissingRoundReplica = true
+	warn(
+		("[RoundController] Round replica %q was not received; round-state HUD will remain unavailable."):format(
+			RoundConfig.Scope
+		)
+	)
+end
+
 function RoundController:OnStart()
 	ReplicaController.ReplicaOfClassCreated(RoundConfig.Scope, bindReplica)
+	bindExistingReplica()
+	if ReplicaController.InitialDataReceived then
+		task.delay(ROUND_REPLICA_WARNING_DELAY_SECONDS, function()
+			if not RoundController.Loaded then
+				warnIfRoundReplicaMissing()
+			end
+		end)
+	else
+		ReplicaController.InitialDataReceivedSignal:Connect(function()
+			task.delay(ROUND_REPLICA_WARNING_DELAY_SECONDS, function()
+				if not RoundController.Loaded then
+					bindExistingReplica()
+				end
+				if not RoundController.Loaded then
+					warnIfRoundReplicaMissing()
+				end
+			end)
+		end)
+	end
+
 	task.spawn(getSubmitMapVoteRemote)
 	task.spawn(bindSetAFKRemote)
 end

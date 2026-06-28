@@ -324,6 +324,33 @@ function HighlightIntroService:GetOwnedHighlightIntros(player: Player): { [strin
 	return ownedIntros
 end
 
+function HighlightIntroService:GrantHighlightIntro(player: Player, rawIntroId: any, source: string?): (boolean, any)
+	if not (player and player.Parent == Players) then
+		return false, "Target player is not in this server"
+	end
+
+	local introId = HighlightIntroConfig.NormalizeHighlightIntroId(rawIntroId)
+	local definition = HighlightIntroConfig.GetDefinition(introId)
+	if not definition then
+		return false, "Unknown highlight intro: " .. tostring(rawIntroId)
+	end
+
+	local ownedBefore = self:GetOwnedHighlightIntros(player)
+	local wasOwned = ownedBefore[introId] == true
+	DataService:Set(player, OWNED_KEY, function(currentValue)
+		local owned = normalizeOwnedHighlightIntros(currentValue)
+		owned[introId] = true
+		return owned
+	end)
+
+	return true, {
+		highlightIntroId = introId,
+		definition = definition,
+		source = source,
+		isNew = not wasOwned,
+	}
+end
+
 function HighlightIntroService:EquipHighlightIntro(player: Player, rawIntroId: any): (boolean, string?, any?)
 	if not (player and player.Parent == Players) then
 		return false, "Target player is not in this server", nil

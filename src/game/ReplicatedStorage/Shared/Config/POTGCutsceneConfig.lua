@@ -58,6 +58,7 @@ POTGCutsceneConfig.Cutscenes = table.freeze({
 			}),
 		}),
 		events = table.freeze({
+			table.freeze({ time = 0, type = "Sound", soundName = "Default" }),
 			table.freeze({ time = 0, type = "Emit", effectName = "Explosion" }),
 			table.freeze({ time = 67 / 60, type = "Emit", effectName = "Explosion2" }),
 		}),
@@ -90,6 +91,7 @@ POTGCutsceneConfig.Cutscenes = table.freeze({
 			enabled = false,
 		}),
 		events = table.freeze({
+			table.freeze({ time = 0, type = "Sound", soundName = "HollowPurple" }),
 			table.freeze({
 				time = 58 / 60,
 				type = "Code",
@@ -258,6 +260,7 @@ EmitModule:Emit(workspace.HighlightIntros["Hollow Purple"].Burst)
 			enabled = false,
 		}),
 		events = table.freeze({
+			table.freeze({ time = 0, type = "Sound", soundName = "TooFast" }),
 			table.freeze({
 				time = 7 / 60,
 				type = "Code",
@@ -365,6 +368,7 @@ EmitModule:Emit(workspace.HighlightIntros["Too Fast"].Explosion4)
 			enabled = false,
 		}),
 		events = table.freeze({
+			table.freeze({ time = 0, type = "Sound", soundName = "HeroLanding" }),
 			table.freeze({ time = 33 / 60, type = "Emit", effectName = "JumpExplosion" }),
 			table.freeze({ time = 54 / 60, type = "Emit", effectName = "Left Leg" }),
 			table.freeze({ time = 109 / 60, type = "Emit", effectName = "LandingExplosion" }),

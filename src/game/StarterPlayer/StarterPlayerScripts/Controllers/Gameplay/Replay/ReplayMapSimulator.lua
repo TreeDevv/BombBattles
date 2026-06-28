@@ -14,18 +14,19 @@ local ReplayMapSimulator = {}
 local MAP_FOLDER_NAME = "ReplayMap"
 local CURRENT_VOXELS_FOLDER_NAME = "ReplayCurrentVoxels"
 local DEBRIS_FOLDER_NAME = "ReplayDebris"
+local BEDROCK_PART_NAME = "Bedrock"
 local SCENE_NAME = "_LocalReplayScene"
 local PREPARED_SCENE_NAME_PREFIX = "_LocalReplayPreparedScene"
 local LOCAL_REPLAY_ATTR = "BombBattlesLocalReplay"
 local REPLAY_ZONE_PIVOT = CFrame.new(30000, 8000, 30000)
-local MAX_KILL_REPLAY_DESTRUCTION_EVENTS = 32
-local MAX_POTG_REPLAY_DESTRUCTION_EVENTS = 32
+local MAX_KILL_REPLAY_DESTRUCTION_EVENTS = 128
+local MAX_POTG_REPLAY_DESTRUCTION_EVENTS = 192
 local MAX_DESTRUCTION_EVENTS = MAX_POTG_REPLAY_DESTRUCTION_EVENTS
-local MAX_DESTRUCTION_EVENTS_PER_STEP = 1
-local DESTRUCTION_LEAD_SECONDS = 0.75
-local MAX_TARGETS_PER_DESTRUCTION_EVENT = 24
-local MAX_DEBRIS_PARTS_PER_EVENT = 36
-local MAX_DEBRIS_PARTS_PER_REPLAY = 180
+local MAX_DESTRUCTION_EVENTS_PER_STEP = 3
+local DEFAULT_TARGETS_PER_DESTRUCTION_EVENT = 72
+local HARD_MAX_TARGETS_PER_DESTRUCTION_EVENT = 128
+local MAX_DEBRIS_PARTS_PER_EVENT = 72
+local MAX_DEBRIS_PARTS_PER_REPLAY = 360
 local MAX_PREPARED_MAP_TEMPLATES = 1
 local MAX_PREPARED_REUSABLE_SCENES = 1
 local PREWARM_TARGET_COLLECTION_BUDGET_SECONDS = 0.002
@@ -50,6 +51,14 @@ local prewarmRequested = false
 
 local PRIORITY_ACTIVE = "Active"
 local PRIORITY_BACKGROUND = "Background"
+local REPLAY_DESTRUCTION_BOOLEAN_OPTION_FIELDS = table.freeze({
+	"forceSubtract",
+	"exactCullTargets",
+	"skipTerminalNoop",
+	"reuseTargetPart",
+	"prefilterTargets",
+	"prefilteredTargets",
+})
 
 local function isFiniteNumber(value: any): boolean
 	return typeof(value) == "number" and value == value and math.abs(value) < math.huge
@@ -120,6 +129,50 @@ local function getReplayDestructionEventLimit(context): number
 		return MAX_POTG_REPLAY_DESTRUCTION_EVENTS
 	end
 	return MAX_DESTRUCTION_EVENTS
+end
+
+local function getReplayDestructionTargetLimit(event): number
+	local maxTargets = DEFAULT_TARGETS_PER_DESTRUCTION_EVENT
+	if typeof(event) == "table" and isFiniteNumber(event.maxTargetsPerExplosion) then
+		maxTargets = event.maxTargetsPerExplosion
+	end
+	return math.clamp(math.floor(maxTargets), 1, HARD_MAX_TARGETS_PER_DESTRUCTION_EVENT)
+end
+
+local function getBedrockTopY(mapRoot: Instance?): number?
+	if not mapRoot then
+		return nil
+	end
+
+	local bedrock = mapRoot:FindFirstChild(BEDROCK_PART_NAME)
+	if bedrock and bedrock:IsA("BasePart") then
+		return bedrock.Position.Y + bedrock.Size.Y * 0.5
+	end
+	return nil
+end
+
+local function copyReplayDestructionOptions(source, target)
+	if typeof(source) ~= "table" or typeof(target) ~= "table" then
+		return
+	end
+
+	if source.terrainShape == "Ellipsoid" or source.terrainShape == "Sphere" then
+		target.terrainShape = source.terrainShape
+	end
+	if isFiniteNumber(source.terrainVerticalScale) then
+		target.terrainVerticalScale = math.clamp(source.terrainVerticalScale, 0.05, 1)
+	end
+	if isFiniteNumber(source.maxTargetsPerExplosion) then
+		target.maxTargetsPerExplosion = getReplayDestructionTargetLimit(source)
+	end
+	if isFiniteNumber(source.transparentCollisionClearance) then
+		target.transparentCollisionClearance = math.clamp(source.transparentCollisionClearance, 0, 80)
+	end
+	for _, fieldName in ipairs(REPLAY_DESTRUCTION_BOOLEAN_OPTION_FIELDS) do
+		if typeof(source[fieldName]) == "boolean" then
+			target[fieldName] = source[fieldName]
+		end
+	end
 end
 
 local function getPayloadMapId(payload: any): string?
@@ -213,7 +266,10 @@ function ReplayMapSimulator.ScheduleDestroyScene(root: Instance?, reason: string
 					end
 				end
 
-				if batchDestroyed >= DESTROY_INSTANCES_PER_STEP or os.clock() - batchStartedAt >= DESTROY_BUDGET_SECONDS then
+				if
+					batchDestroyed >= DESTROY_INSTANCES_PER_STEP
+					or os.clock() - batchStartedAt >= DESTROY_BUDGET_SECONDS
+				then
 					RuntimeProfiler.Count("Client/Replay/MapSimulator/DestroySceneYields")
 					task.wait()
 					batchDestroyed = 0
@@ -507,6 +563,9 @@ local function isReplayMapPart(part: BasePart, mapRoot: Instance): boolean
 	if part.Name == "VoxManagerHitbox" then
 		return false
 	end
+	if part.Name == BEDROCK_PART_NAME then
+		return false
+	end
 	if part ~= mapRoot and part:IsDescendantOf(mapRoot) ~= true then
 		return false
 	end
@@ -571,7 +630,10 @@ local function buildStaticDestructibleTargets(context): ({ BasePart }, boolean)
 	return targets, usedFallbackTargets
 end
 
-local function buildStaticDestructibleTargetsBudgeted(context, budgetSeconds: number): ({ BasePart }, boolean, number, number)
+local function buildStaticDestructibleTargetsBudgeted(
+	context,
+	budgetSeconds: number
+): ({ BasePart }, boolean, number, number)
 	return scanStaticDestructibleTargets(context, budgetSeconds)
 end
 
@@ -647,6 +709,45 @@ local function getDistanceSquared(part: BasePart, position: Vector3): number
 	return dx * dx + dy * dy + dz * dz
 end
 
+local function getReplayQueryRadius(event): number?
+	if typeof(event) ~= "table" or not (isFiniteNumber(event.radius) and event.radius > 0) then
+		return nil
+	end
+
+	local radius = event.radius
+	if event.forceSubtract == true and isFiniteNumber(event.transparentCollisionClearance) then
+		radius += math.max(event.transparentCollisionClearance, 0)
+	end
+	return radius
+end
+
+local function prefilterReplayDestructionTargets(context, targets: { BasePart }, event): { BasePart }
+	if typeof(event) ~= "table" or event.prefilterTargets == false or typeof(event.position) ~= "Vector3" then
+		return targets
+	end
+
+	local queryRadius = getReplayQueryRadius(event)
+	if not queryRadius then
+		return targets
+	end
+
+	local radiusSquared = queryRadius * queryRadius
+	local candidates = {}
+	for _, part in ipairs(targets) do
+		if getDistanceSquared(part, event.position) < radiusSquared then
+			table.insert(candidates, part)
+		end
+	end
+
+	local skipped = #targets - #candidates
+	if skipped > 0 then
+		context.replayTargetsSkippedByPrefilter = (context.replayTargetsSkippedByPrefilter or 0) + skipped
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/TargetsSkippedByPrefilter", skipped)
+	end
+	RuntimeProfiler.Gauge("Client/Replay/MapSimulator/LastPrefilteredTargets", #candidates)
+	return candidates
+end
+
 local function selectNearestReplayTargets(targets: { BasePart }, position: Vector3, maxTargets: number): { BasePart }
 	local selected = {}
 	local distances = {}
@@ -682,12 +783,13 @@ local function selectNearestReplayTargets(targets: { BasePart }, position: Vecto
 	return selected
 end
 
-local function capReplayDestructionTargets(context, targets: { BasePart }, position: Vector3): { BasePart }
-	if #targets <= MAX_TARGETS_PER_DESTRUCTION_EVENT then
+local function capReplayDestructionTargets(context, targets: { BasePart }, position: Vector3, event): { BasePart }
+	local maxTargets = getReplayDestructionTargetLimit(event)
+	if #targets <= maxTargets then
 		return targets
 	end
 
-	local capped = selectNearestReplayTargets(targets, position, MAX_TARGETS_PER_DESTRUCTION_EVENT)
+	local capped = selectNearestReplayTargets(targets, position, maxTargets)
 
 	local skipped = #targets - #capped
 	context.replayTargetsSkippedByCap = (context.replayTargetsSkippedByCap or 0) + skipped
@@ -853,7 +955,6 @@ local function transformSnapshot(context, snapshot)
 			camera.focus = ReplayMapSimulator.TransformCFrame(context, camera.focus)
 		end
 	end
-
 end
 
 function ReplayMapSimulator.TransformFrames(context, frames)
@@ -911,7 +1012,12 @@ function ReplayMapSimulator.TransformEvents(context, events)
 	return events
 end
 
-function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, startTimeOrEndTime: number, maybeEndTime: number?)
+function ReplayMapSimulator.NormalizeDestructionEvents(
+	context,
+	rawEvents,
+	startTimeOrEndTime: number,
+	maybeEndTime: number?
+)
 	local events = {}
 	if typeof(rawEvents) ~= "table" then
 		if context then
@@ -921,7 +1027,6 @@ function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, start
 	end
 	local startTime = if isFiniteNumber(maybeEndTime) then startTimeOrEndTime else nil
 	local endTime = if isFiniteNumber(maybeEndTime) then maybeEndTime else startTimeOrEndTime
-	local minTime = if isFiniteNumber(startTime) then startTime - DESTRUCTION_LEAD_SECONDS else nil
 	local skippedBeforeWindow = 0
 	local skippedAfterWindow = 0
 
@@ -933,29 +1038,26 @@ function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, start
 			skippedAfterWindow += 1
 			continue
 		end
-		if isFiniteNumber(minTime) and event.timestamp < minTime then
-			skippedBeforeWindow += 1
-			continue
-		end
 
 		local position = if typeof(event.position) == "Vector3"
 			then event.position
-			elseif isFiniteCFrame(event.cframe)
-			then event.cframe.Position
+			elseif isFiniteCFrame(event.cframe) then event.cframe.Position
 			else nil
 		local radius = event.radius
 		if typeof(position) ~= "Vector3" or not (isFiniteNumber(radius) and radius > 0) then
 			continue
 		end
 
-		table.insert(events, {
+		local normalizedEvent = {
 			timestamp = event.timestamp,
 			sequence = if isFiniteNumber(event.sequence) then math.floor(event.sequence) else #events + 1,
 			position = ReplayMapSimulator.TransformPoint(context, position),
 			radius = math.clamp(radius, 1, 80),
 			sourceId = event.sourceId,
 			debrisPayloads = transformDebrisPayloads(context, event.debrisPayloads),
-		})
+		}
+		copyReplayDestructionOptions(event, normalizedEvent)
+		table.insert(events, normalizedEvent)
 	end
 
 	table.sort(events, function(left, right)
@@ -966,15 +1068,32 @@ function ReplayMapSimulator.NormalizeDestructionEvents(context, rawEvents, start
 	end)
 	local maxDestructionEvents = getReplayDestructionEventLimit(context)
 	while #events > maxDestructionEvents do
-		table.remove(events, 1)
-		skippedBeforeWindow += 1
+		local removed = table.remove(events, 1)
+		if
+			typeof(removed) == "table"
+			and isFiniteNumber(startTime)
+			and isFiniteNumber(removed.timestamp)
+			and removed.timestamp < startTime
+		then
+			skippedBeforeWindow += 1
+		end
+	end
+	local baselineEvents = 0
+	if isFiniteNumber(startTime) then
+		for _, event in ipairs(events) do
+			if typeof(event) == "table" and isFiniteNumber(event.timestamp) and event.timestamp < startTime then
+				baselineEvents += 1
+			end
+		end
 	end
 	if context then
 		context.normalizedDestructionEvents = #events
+		context.baselineDestructionEvents = baselineEvents
 		context.skippedDestructionEventsBeforeWindow = skippedBeforeWindow
 		context.skippedDestructionEventsAfterWindow = skippedAfterWindow
 	end
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/NormalizedDestructionEvents", #events)
+	RuntimeProfiler.Count("Client/Replay/MapSimulator/BaselineDestructionEvents", baselineEvents)
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/SkippedDestructionEventsBeforeWindow", skippedBeforeWindow)
 	RuntimeProfiler.Count("Client/Replay/MapSimulator/SkippedDestructionEventsAfterWindow", skippedAfterWindow)
 	return events
@@ -999,8 +1118,7 @@ local function spawnRecordedDebrisPayloads(context, payloads, maxParts: number):
 
 		payloadBlocks += if typeof(payload.blocks) == "table"
 			then #payload.blocks
-			elseif typeof(payload.sourceBlockCount) == "number"
-			then payload.sourceBlockCount
+			elseif typeof(payload.sourceBlockCount) == "number" then payload.sourceBlockCount
 			else 0
 		local spawned, attempts = VoxelDebris.spawnPayload(payload, {
 			parentFolder = context.debrisFolder,
@@ -1039,7 +1157,13 @@ function ReplayMapSimulator.ApplyDestructionEvent(context, event, options): bool
 		return false
 	end
 
-	local replayDebrisOptions = nil
+	local replayVoxelOptions = {
+		maxTargetsPerExplosion = getReplayDestructionTargetLimit(event),
+	}
+	if isFiniteNumber(context.bedrockTopY) then
+		replayVoxelOptions.bedrockTopY = context.bedrockTopY
+	end
+	copyReplayDestructionOptions(event, replayVoxelOptions)
 	local recordedDebrisPayloads = nil
 	local recordedDebrisMaxParts = 0
 	local spawnDebris = false
@@ -1052,18 +1176,16 @@ function ReplayMapSimulator.ApplyDestructionEvent(context, event, options): bool
 				recordedDebrisMaxParts = eventMaxParts
 			else
 				spawnDebris = true
-				replayDebrisOptions = {
-					forceSpawnDebris = true,
-					debrisFolder = context.debrisFolder,
-					maxDebrisParts = eventMaxParts,
-					debrisLifetimeScale = DEBRIS_LIFETIME_SCALE,
-					useGraphicsQualitySampling = false,
-					forceVisible = true,
-					minimumParts = math.min(6, eventMaxParts),
-					spawnedDebrisParts = 0,
-					debrisPayloadBlocks = 0,
-					debrisSpawnAttempts = 0,
-				}
+				replayVoxelOptions.forceSpawnDebris = true
+				replayVoxelOptions.debrisFolder = context.debrisFolder
+				replayVoxelOptions.maxDebrisParts = eventMaxParts
+				replayVoxelOptions.debrisLifetimeScale = DEBRIS_LIFETIME_SCALE
+				replayVoxelOptions.useGraphicsQualitySampling = false
+				replayVoxelOptions.forceVisible = true
+				replayVoxelOptions.minimumParts = math.min(6, eventMaxParts)
+				replayVoxelOptions.spawnedDebrisParts = 0
+				replayVoxelOptions.debrisPayloadBlocks = 0
+				replayVoxelOptions.debrisSpawnAttempts = 0
 			end
 		end
 	end
@@ -1073,7 +1195,8 @@ function ReplayMapSimulator.ApplyDestructionEvent(context, event, options): bool
 	if #targets == 0 then
 		context.targetFailures = (context.targetFailures or 0) + 1
 		if recordedDebrisPayloads and recordedDebrisMaxParts > 0 then
-			local spawned, attempts, blocks = spawnRecordedDebrisPayloads(context, recordedDebrisPayloads, recordedDebrisMaxParts)
+			local spawned, attempts, blocks =
+				spawnRecordedDebrisPayloads(context, recordedDebrisPayloads, recordedDebrisMaxParts)
 			addDebrisDebugCounts(context, spawned, attempts, blocks)
 			return spawned > 0 or attempts > 0
 		end
@@ -1082,7 +1205,9 @@ function ReplayMapSimulator.ApplyDestructionEvent(context, event, options): bool
 	if usedFallbackTargets then
 		context.fallbackTargetUses = (context.fallbackTargetUses or 0) + 1
 	end
-	targets = capReplayDestructionTargets(context, targets, event.position)
+	targets = prefilterReplayDestructionTargets(context, targets, event)
+	context.lastPrefilteredTargetCount = #targets
+	targets = capReplayDestructionTargets(context, targets, event.position, event)
 	context.lastCappedTargetCount = #targets
 
 	local voxelizeResult = nil
@@ -1098,7 +1223,7 @@ function ReplayMapSimulator.ApplyDestructionEvent(context, event, options): bool
 			{},
 			targets,
 			context.outputFolder,
-			replayDebrisOptions
+			replayVoxelOptions
 		) or {}
 	end)
 	if not ok then
@@ -1112,21 +1237,22 @@ function ReplayMapSimulator.ApplyDestructionEvent(context, event, options): bool
 	end
 	if typeof(voxelizeResult) == "table" and typeof(voxelizeResult.debrisPayloadBlocks) == "number" then
 		context.debrisPayloadBlocks = (context.debrisPayloadBlocks or 0) + voxelizeResult.debrisPayloadBlocks
-	elseif replayDebrisOptions and typeof(replayDebrisOptions.debrisPayloadBlocks) == "number" then
-		context.debrisPayloadBlocks = (context.debrisPayloadBlocks or 0) + replayDebrisOptions.debrisPayloadBlocks
+	elseif typeof(replayVoxelOptions.debrisPayloadBlocks) == "number" then
+		context.debrisPayloadBlocks = (context.debrisPayloadBlocks or 0) + replayVoxelOptions.debrisPayloadBlocks
 	end
 	if typeof(voxelizeResult) == "table" and typeof(voxelizeResult.debrisSpawnAttempts) == "number" then
 		context.debrisSpawnAttempts = (context.debrisSpawnAttempts or 0) + voxelizeResult.debrisSpawnAttempts
-	elseif replayDebrisOptions and typeof(replayDebrisOptions.debrisSpawnAttempts) == "number" then
-		context.debrisSpawnAttempts = (context.debrisSpawnAttempts or 0) + replayDebrisOptions.debrisSpawnAttempts
+	elseif typeof(replayVoxelOptions.debrisSpawnAttempts) == "number" then
+		context.debrisSpawnAttempts = (context.debrisSpawnAttempts or 0) + replayVoxelOptions.debrisSpawnAttempts
 	end
 	if typeof(voxelizeResult) == "table" and typeof(voxelizeResult.debrisPartsSpawned) == "number" then
 		context.debrisPartCount = (context.debrisPartCount or 0) + voxelizeResult.debrisPartsSpawned
-	elseif replayDebrisOptions and typeof(replayDebrisOptions.spawnedDebrisParts) == "number" then
-		context.debrisPartCount = (context.debrisPartCount or 0) + replayDebrisOptions.spawnedDebrisParts
+	elseif typeof(replayVoxelOptions.spawnedDebrisParts) == "number" then
+		context.debrisPartCount = (context.debrisPartCount or 0) + replayVoxelOptions.spawnedDebrisParts
 	end
 	if recordedDebrisPayloads and recordedDebrisMaxParts > 0 then
-		local spawned, attempts, blocks = spawnRecordedDebrisPayloads(context, recordedDebrisPayloads, recordedDebrisMaxParts)
+		local spawned, attempts, blocks =
+			spawnRecordedDebrisPayloads(context, recordedDebrisPayloads, recordedDebrisMaxParts)
 		addDebrisDebugCounts(context, spawned, attempts, blocks)
 	end
 	context.appliedDestructionEvents = (context.appliedDestructionEvents or 0) + 1
@@ -1173,7 +1299,9 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 
 	local payloadMapId = getPayloadMapId(payload)
 	local payloadRoundId = getPayloadRoundId(payload)
-	local livePivot = if typeof(payload) == "table" and isFiniteCFrame(payload.mapPivot) then payload.mapPivot else CFrame.new()
+	local livePivot = if typeof(payload) == "table" and isFiniteCFrame(payload.mapPivot)
+		then payload.mapPivot
+		else CFrame.new()
 	local context = {
 		scene = scene,
 		livePivot = livePivot,
@@ -1188,12 +1316,16 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 		debrisPayloadBlocks = 0,
 		debrisSpawnAttempts = 0,
 		normalizedDestructionEvents = 0,
+		baselineDestructionEvents = 0,
 		appliedDestructionEvents = 0,
 		targetFailures = 0,
 		applyFailures = 0,
 		fallbackTargetUses = 0,
 		targetsHit = 0,
 		lastTargetCount = 0,
+		lastPrefilteredTargetCount = 0,
+		replayTargetsSkippedByPrefilter = 0,
+		bedrockTopY = nil,
 	}
 	setReplayIdentityAttributes(scene, payloadMapId, payloadRoundId)
 
@@ -1227,6 +1359,16 @@ function ReplayMapSimulator.Create(scene: Instance, payload)
 	clone.Parent = mapFolder
 	RuntimeProfiler.End("Client/Replay/MapSimulator/ParentMapClone", parentToken)
 	context.staticMapRoot = clone
+	context.bedrockTopY = getBedrockTopY(clone)
+	if not isFiniteNumber(context.bedrockTopY) then
+		RuntimeProfiler.Count("Client/Replay/MapSimulator/MissingBedrock")
+		warn(
+			("[ReplayMapSimulator] Replay map %s is missing a BasePart named %s; destruction will not clamp."):format(
+				tostring(payloadMapId),
+				BEDROCK_PART_NAME
+			)
+		)
+	end
 
 	local outputFolder = Instance.new("Folder")
 	outputFolder.Name = CURRENT_VOXELS_FOLDER_NAME
@@ -1555,7 +1697,9 @@ function ReplayMapSimulator.TakePreparedScene(payload): (Folder?, any?)
 		then payload.mapPivot
 		else CFrame.new()
 	entry.mapContext.scene = entry.scene
-	entry.mapContext.replayType = if typeof(payload) == "table" and typeof(payload.type) == "string" then payload.type else nil
+	entry.mapContext.replayType = if typeof(payload) == "table" and typeof(payload.type) == "string"
+		then payload.type
+		else nil
 	entry.mapContext.mapId = mapId
 	entry.mapContext.roundId = roundId
 	if entry.mapContext.mapFolder then
@@ -1590,6 +1734,7 @@ function ReplayMapSimulator.GetDebugInfo(context)
 		mapId = context.mapId,
 		replayType = context.replayType,
 		normalizedDestructionEvents = context.normalizedDestructionEvents or 0,
+		baselineDestructionEvents = context.baselineDestructionEvents or 0,
 		skippedDestructionEventsBeforeWindow = context.skippedDestructionEventsBeforeWindow or 0,
 		skippedDestructionEventsAfterWindow = context.skippedDestructionEventsAfterWindow or 0,
 		appliedDestructionEvents = context.appliedDestructionEvents or 0,
@@ -1598,7 +1743,9 @@ function ReplayMapSimulator.GetDebugInfo(context)
 		fallbackTargetUses = context.fallbackTargetUses or 0,
 		targetsHit = context.targetsHit or 0,
 		lastTargetCount = context.lastTargetCount or 0,
+		lastPrefilteredTargetCount = context.lastPrefilteredTargetCount or 0,
 		lastCappedTargetCount = context.lastCappedTargetCount or 0,
+		replayTargetsSkippedByPrefilter = context.replayTargetsSkippedByPrefilter or 0,
 		replayTargetsSkippedByCap = context.replayTargetsSkippedByCap or 0,
 		debrisPartCount = context.debrisPartCount or 0,
 		debrisPayloadBlocks = context.debrisPayloadBlocks or 0,

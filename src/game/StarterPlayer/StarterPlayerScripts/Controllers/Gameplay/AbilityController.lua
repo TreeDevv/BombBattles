@@ -18,6 +18,8 @@ local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local BombController = require(script.Parent:WaitForChild("BombController"))
+local CameraController = require(script.Parent:WaitForChild("CameraController"))
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local REMOTES_FOLDER_NAME = AbilityConfig.RemotesFolderName
@@ -100,6 +102,8 @@ AbilityController._effectRemote = nil :: RemoteEvent?
 AbilityController._effectConnection = nil :: RBXScriptConnection?
 AbilityController._replicaConnection = nil :: RBXScriptConnection?
 AbilityController._settingsConnection = nil :: RBXScriptConnection?
+AbilityController._bombHoldStartedConnection = nil :: RBXScriptConnection?
+AbilityController._bombHoldReleasedConnection = nil :: RBXScriptConnection?
 AbilityController._hudConnections = {} :: { RBXScriptConnection }
 AbilityController._buttons = {} :: { [string]: ImageButton }
 AbilityController._buttonVisuals = {} :: { [string]: ButtonVisual }
@@ -108,6 +112,12 @@ AbilityController._data = nil :: AbilityState?
 AbilityController._clientSequence = 0
 AbilityController._behaviors = {} :: { [string]: ClientBehavior }
 AbilityController._predictedCooldowns = {} :: { [string]: PredictedCooldown }
+AbilityController._touchAimSlot = nil :: string?
+AbilityController._touchAimInputObject = nil :: InputObject?
+AbilityController._touchAimLastPosition = nil :: Vector2?
+AbilityController._touchAimEndConnection = nil :: RBXScriptConnection?
+AbilityController._touchAimCameraActive = false
+AbilityController._touchAimAwaitingHold = false
 
 local function getRemote(name: string): RemoteEvent?
 	local remotes = ReplicatedStorage:WaitForChild(REMOTES_FOLDER_NAME, 10)
@@ -616,7 +626,160 @@ local function publishDebugState()
 	end
 end
 
+function AbilityController:_clearTouchAim(endCamera: boolean)
+	if self._touchAimEndConnection then
+		self._touchAimEndConnection:Disconnect()
+		self._touchAimEndConnection = nil
+	end
+
+	local slot = self._touchAimSlot
+	self._touchAimSlot = nil
+	self._touchAimInputObject = nil
+	self._touchAimLastPosition = nil
+	self._touchAimAwaitingHold = false
+	if slot then
+		self:_setSlotHeld(slot, false)
+	end
+	if endCamera and self._touchAimCameraActive then
+		CameraController:EndTouchAim()
+		self._touchAimCameraActive = false
+	elseif not endCamera then
+		self._touchAimCameraActive = false
+	end
+end
+
+function AbilityController:_endTouchAimAfterThrow()
+	if self._touchAimEndConnection then
+		self._touchAimEndConnection:Disconnect()
+		self._touchAimEndConnection = nil
+	end
+
+	local connection: RBXScriptConnection?
+	connection = BombController.ThrowReleased:Connect(function()
+		if self._touchAimEndConnection ~= connection then
+			return
+		end
+		self._touchAimEndConnection = nil
+		if connection then
+			connection:Disconnect()
+		end
+		if self._touchAimCameraActive then
+			CameraController:EndTouchAim()
+			self._touchAimCameraActive = false
+		end
+	end)
+	self._touchAimEndConnection = connection
+
+	task.delay(0.8, function()
+		if self._touchAimEndConnection ~= connection then
+			return
+		end
+		self._touchAimEndConnection = nil
+		if connection then
+			connection:Disconnect()
+		end
+		if self._touchAimCameraActive then
+			CameraController:EndTouchAim()
+			self._touchAimCameraActive = false
+		end
+	end)
+end
+
+function AbilityController:_handleBombHoldStartedForTouchAim()
+	if not self._touchAimInputObject or not self._touchAimAwaitingHold or self._touchAimCameraActive then
+		return
+	end
+
+	self._touchAimAwaitingHold = false
+	self._touchAimCameraActive = CameraController:BeginTouchAim()
+	if not self._touchAimCameraActive then
+		self:_clearTouchAim(false)
+		BombController:CancelAbilityThrowHold()
+	end
+end
+
+function AbilityController:_handleBombHoldReleasedForTouchAim()
+	if not self._touchAimInputObject then
+		return
+	end
+
+	self:_clearTouchAim(true)
+end
+
+function AbilityController:_beginTouchAimForSlot(slot: string, inputObject: InputObject)
+	if inputObject.UserInputType ~= Enum.UserInputType.Touch or self._touchAimInputObject ~= nil then
+		return
+	end
+
+	local position = inputObject.Position
+	self._touchAimSlot = slot
+	self._touchAimInputObject = inputObject
+	self._touchAimLastPosition = Vector2.new(position.X, position.Y)
+	self._touchAimCameraActive = false
+	self._touchAimAwaitingHold = true
+
+	self:_setSlotHeld(slot, true)
+	local handled = self:ActivateSlot(slot, Enum.UserInputState.Begin, inputObject)
+	self._touchAimAwaitingHold = false
+	if not handled and not self._touchAimCameraActive then
+		self:_clearTouchAim(false)
+	end
+end
+
+function AbilityController:_updateTouchAim(inputObject: InputObject)
+	if
+		inputObject ~= self._touchAimInputObject
+		or inputObject.UserInputType ~= Enum.UserInputType.Touch
+		or not self._touchAimCameraActive
+	then
+		return
+	end
+
+	local position = inputObject.Position
+	local currentPosition = Vector2.new(position.X, position.Y)
+	local previousPosition = self._touchAimLastPosition or currentPosition
+	self._touchAimLastPosition = currentPosition
+
+	local delta = currentPosition - previousPosition
+	if delta.Magnitude > 0 then
+		CameraController:ApplyTouchAimDelta(delta)
+	end
+end
+
+function AbilityController:_endTouchAimForSlot(inputObject: InputObject?)
+	if inputObject and inputObject ~= self._touchAimInputObject then
+		return
+	end
+
+	local slot = self._touchAimSlot
+	if not (slot and self._touchAimInputObject) then
+		return
+	end
+
+	self._touchAimInputObject = nil
+	self._touchAimLastPosition = nil
+	self:_setSlotHeld(slot, false)
+	local handled = self:ActivateSlot(slot, Enum.UserInputState.End, inputObject)
+	self._touchAimSlot = nil
+	if handled and self._touchAimCameraActive then
+		self:_endTouchAimAfterThrow()
+	elseif self._touchAimCameraActive then
+		CameraController:EndTouchAim()
+		self._touchAimCameraActive = false
+	end
+end
+
+function AbilityController:_bindTouchAimInputSignals()
+	table.insert(self._buttonConnections, UserInputService.InputChanged:Connect(function(inputObject: InputObject)
+		self:_updateTouchAim(inputObject)
+	end))
+	table.insert(self._buttonConnections, UserInputService.InputEnded:Connect(function(inputObject: InputObject)
+		self:_endTouchAimForSlot(inputObject)
+	end))
+end
+
 function AbilityController:_disconnectButtons()
+	self:_clearTouchAim(true)
 	for _, visual in pairs(self._buttonVisuals) do
 		stopHeldVisual(visual)
 	end
@@ -664,21 +827,17 @@ function AbilityController:_bindButton(slot: string, button: ImageButton)
 		end
 	end))
 	table.insert(self._buttonConnections, button.InputBegan:Connect(function(inputObject: InputObject)
-		if
-			inputObject.UserInputType == Enum.UserInputType.MouseButton1
-			or inputObject.UserInputType == Enum.UserInputType.Touch
-			or inputObject.KeyCode == Enum.KeyCode.ButtonA
-		then
+		if inputObject.UserInputType == Enum.UserInputType.Touch then
+			self:_beginTouchAimForSlot(slot, inputObject)
+		elseif inputObject.UserInputType == Enum.UserInputType.MouseButton1 or inputObject.KeyCode == Enum.KeyCode.ButtonA then
 			self:_setSlotHeld(slot, true)
 			self:ActivateSlot(slot, Enum.UserInputState.Begin, inputObject)
 		end
 	end))
 	table.insert(self._buttonConnections, button.InputEnded:Connect(function(inputObject: InputObject)
-		if
-			inputObject.UserInputType == Enum.UserInputType.MouseButton1
-			or inputObject.UserInputType == Enum.UserInputType.Touch
-			or inputObject.KeyCode == Enum.KeyCode.ButtonA
-		then
+		if inputObject.UserInputType == Enum.UserInputType.Touch then
+			return
+		elseif inputObject.UserInputType == Enum.UserInputType.MouseButton1 or inputObject.KeyCode == Enum.KeyCode.ButtonA then
 			self:_setSlotHeld(slot, false)
 			self:ActivateSlot(slot, Enum.UserInputState.End, inputObject)
 		end
@@ -702,6 +861,7 @@ function AbilityController:_bindHud(hud: Instance?)
 			self:_bindButton(slot, button)
 		end
 	end
+	self:_bindTouchAimInputSignals()
 
 	self:_updateButtons()
 end
@@ -857,12 +1017,17 @@ function AbilityController:SendMessage(slot: string, messageType: string, payloa
 		return false
 	end
 
+	local outgoingPayload = payload
+	if messageType == ACTIVATE_MESSAGE then
+		outgoingPayload = BombController:AugmentAbilityActivationPayload(payload)
+	end
+
 	self._clientSequence += 1
 	remote:FireServer({
 		slot = slot,
 		abilityId = abilityId,
 		messageType = messageType,
-		payload = payload,
+		payload = outgoingPayload,
 		clientSequence = self._clientSequence,
 	})
 	if messageType == ACTIVATE_MESSAGE then
@@ -978,6 +1143,18 @@ function AbilityController:OnStart()
 		if id == "offensiveAbilityKey" or id == "defensiveAbilityKey" then
 			self:_bindInputs()
 		end
+	end)
+	if self._bombHoldStartedConnection then
+		self._bombHoldStartedConnection:Disconnect()
+	end
+	self._bombHoldStartedConnection = BombController.HoldStarted:Connect(function()
+		self:_handleBombHoldStartedForTouchAim()
+	end)
+	if self._bombHoldReleasedConnection then
+		self._bombHoldReleasedConnection:Disconnect()
+	end
+	self._bombHoldReleasedConnection = BombController.HoldReleased:Connect(function()
+		self:_handleBombHoldReleasedForTouchAim()
 	end)
 
 	table.insert(self._hudConnections, PlayerGui.ChildAdded:Connect(function(child)

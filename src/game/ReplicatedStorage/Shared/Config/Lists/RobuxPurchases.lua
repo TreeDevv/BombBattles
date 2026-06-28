@@ -26,16 +26,17 @@ local function addCash(player, amount)
 	end)
 end
 
-local function addPremiumCrateTokens(player, amount)
+local function addCrateTokens(player, crateId, amount)
 	local DataService = require(getServices():WaitForChild("DataService"))
+	local normalizedCrateId = tostring(crateId or "")
 	local tokenAmount = roundNonNegative(amount)
-	if tokenAmount <= 0 then
+	if normalizedCrateId == "" or tokenAmount <= 0 then
 		return
 	end
 
 	DataService:Set(player, CRATE_TOKENS_KEY, function(currentValue)
 		local tokens = if typeof(currentValue) == "table" then table.clone(currentValue) else {}
-		tokens.Premium = roundNonNegative(tokens.Premium) + tokenAmount
+		tokens[normalizedCrateId] = roundNonNegative(tokens[normalizedCrateId]) + tokenAmount
 		return tokens
 	end)
 end
@@ -43,10 +44,28 @@ end
 local function grantInfinityBundle(player)
 	local services = getServices()
 	local AbilityInventoryService = require(services:WaitForChild("AbilityInventoryService"))
+	local BombSkinService = require(services:WaitForChild("BombSkinService"))
+	local EmoteService = require(services:WaitForChild("EmoteService"))
+	local HighlightIntroService = require(services:WaitForChild("HighlightIntroService"))
 
 	local abilityOk, abilityResult = AbilityInventoryService:GrantAbility(player, "Infinity", "InfinityBundle")
 	if not abilityOk then
 		warn("[RobuxPurchases] InfinityBundle failed to grant Infinity: " .. tostring(abilityResult))
+	end
+
+	local skinOk, skinResult = BombSkinService:GrantSkin(player, "HollowPurple", "InfinityBundle")
+	if not skinOk then
+		warn("[RobuxPurchases] InfinityBundle failed to grant HollowPurple skin: " .. tostring(skinResult))
+	end
+
+	local introOk, introResult = HighlightIntroService:GrantHighlightIntro(player, "HollowPurple", "InfinityBundle")
+	if not introOk then
+		warn("[RobuxPurchases] InfinityBundle failed to grant HollowPurple intro: " .. tostring(introResult))
+	end
+
+	local emoteOk, emoteResult = EmoteService:GrantEmote(player, "Honored One", "InfinityBundle")
+	if not emoteOk then
+		warn("[RobuxPurchases] InfinityBundle failed to grant Honored One: " .. tostring(emoteResult))
 	end
 end
 
@@ -198,7 +217,7 @@ local Purchases = {
 			crateId = "Premium",
 			crateTokens = 1,
 			onProcessed = function(player)
-				addPremiumCrateTokens(player, 1)
+				addCrateTokens(player, "Premium", 1)
 			end,
 		},
 		PremiumCrateRollGift = {
@@ -214,7 +233,7 @@ local Purchases = {
 			crateId = "Premium",
 			crateTokens = 5,
 			onProcessed = function(player)
-				addPremiumCrateTokens(player, 5)
+				addCrateTokens(player, "Premium", 5)
 			end,
 		},
 		PremiumCrateRoll5Gift = {
@@ -230,7 +249,7 @@ local Purchases = {
 			crateId = "Premium",
 			crateTokens = 10,
 			onProcessed = function(player)
-				addPremiumCrateTokens(player, 10)
+				addCrateTokens(player, "Premium", 10)
 			end,
 		},
 		PremiumCrateRoll10Gift = {
@@ -244,6 +263,10 @@ local Purchases = {
 			price = 99,
 			id = 0,
 			crateId = "FinisherPremium",
+			crateTokens = 1,
+			onProcessed = function(player)
+				addCrateTokens(player, "FinisherPremium", 1)
+			end,
 		},
 		SpinWheel1 = {
 			displayName = "1 Wheel Spin",

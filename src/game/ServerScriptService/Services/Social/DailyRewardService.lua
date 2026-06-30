@@ -30,6 +30,13 @@ type RequestWindow = {
 	count: number,
 }
 
+type ConsecutiveRewardRecord = {
+	id: string,
+	cycleDay: number,
+	streakDay: number,
+	dayKey: string,
+}
+
 local DailyRewardService = {}
 
 local requestRemote: RemoteFunction? = nil
@@ -125,6 +132,61 @@ local function normalizeCrateTokens(value: any): { [string]: number }
 	return tokens
 end
 
+local function getConsecutiveCycleDay(streakDay: any): number
+	local normalized = math.max(1, roundNonNegative(streakDay))
+	return ((normalized - 1) % DailyRewardConfig.ConsecutiveCycleLength) + 1
+end
+
+local function normalizeConsecutiveRewards(value: any): { ConsecutiveRewardRecord }
+	local rewards = {}
+	if typeof(value) ~= "table" then
+		return rewards
+	end
+
+	for _, reward in ipairs(value) do
+		if typeof(reward) ~= "table" then
+			continue
+		end
+
+		local cycleDay = math.floor(tonumber(reward.cycleDay) or 0)
+		if cycleDay < 1 or cycleDay > DailyRewardConfig.ConsecutiveCycleLength then
+			continue
+		end
+
+		local id = if typeof(reward.id) == "string" and reward.id ~= ""
+			then reward.id
+			else ("%s:%d:%d"):format(tostring(reward.dayKey or ""), roundNonNegative(reward.streakDay), cycleDay)
+
+		table.insert(rewards, {
+			id = id,
+			cycleDay = cycleDay,
+			streakDay = math.max(1, roundNonNegative(reward.streakDay)),
+			dayKey = if typeof(reward.dayKey) == "string" then reward.dayKey else "",
+		})
+	end
+
+	while #rewards > DailyRewardConfig.ConsecutiveBacklogLimit do
+		table.remove(rewards, 1)
+	end
+
+	return rewards
+end
+
+local function normalizeConsecutiveState(value: any)
+	local raw = if typeof(value) == "table" then value else {}
+	local currentStreak = roundNonNegative(raw.currentStreak)
+	local bestStreak = math.max(roundNonNegative(raw.bestStreak), currentStreak)
+	local lastLoginDayIndex = math.floor(tonumber(raw.lastLoginDayIndex) or 0)
+
+	return {
+		currentStreak = currentStreak,
+		bestStreak = bestStreak,
+		lastLoginDayKey = if typeof(raw.lastLoginDayKey) == "string" then raw.lastLoginDayKey else "",
+		lastLoginDayIndex = lastLoginDayIndex,
+		unclaimedRewards = normalizeConsecutiveRewards(raw.unclaimedRewards),
+	}
+end
+
 local function normalizeState(value: any, region: RegionRecord, dayInfo)
 	local raw = if typeof(value) == "table" then value else {}
 	local claimedDays = normalizeClaimedDays(raw.claimedDays)
@@ -149,6 +211,7 @@ local function normalizeState(value: any, region: RegionRecord, dayInfo)
 		utcOffsetMinutes = region.utcOffsetMinutes,
 		resetAtUnix = dayInfo.resetAtUnix,
 		completed = false,
+		consecutive = normalizeConsecutiveState(raw.consecutive),
 	}
 end
 
@@ -216,10 +279,15 @@ local function validateRewards(dayDefinition): (boolean, string?)
 	return true, nil
 end
 
-local function awardRewards(player: Player, dayDefinition): (boolean, string?)
+local function awardRewards(player: Player, dayDefinition, sourceSuffix: string?): (boolean, string?)
 	local valid, validationError = validateRewards(dayDefinition)
 	if not valid then
 		return false, validationError
+	end
+
+	local source = DailyRewardConfig.RewardSource
+	if typeof(sourceSuffix) == "string" and sourceSuffix ~= "" then
+		source ..= ":" .. sourceSuffix
 	end
 
 	for _, reward in ipairs(dayDefinition.rewards or {}) do
@@ -232,7 +300,7 @@ local function awardRewards(player: Player, dayDefinition): (boolean, string?)
 				local ok, result = BombSkinService:GrantSkin(
 					player,
 					reward.skinId,
-					("%s:%d"):format(DailyRewardConfig.RewardSource, dayDefinition.day)
+					("%s:%d"):format(source, dayDefinition.day)
 				)
 				if not ok then
 					return false, tostring(result or "Skin reward failed.")
@@ -241,7 +309,7 @@ local function awardRewards(player: Player, dayDefinition): (boolean, string?)
 		elseif reward.type == DailyRewardConfig.RewardTypes.RandomEmote then
 			local ok, result = EmoteService:GrantRandomEmote(
 				player,
-				("%s:%d"):format(DailyRewardConfig.RewardSource, dayDefinition.day)
+				("%s:%d"):format(source, dayDefinition.day)
 			)
 			if not ok and tostring(result) ~= "All emotes are already owned" then
 				return false, tostring(result or "Emote reward failed.")
@@ -258,6 +326,28 @@ local function awardRewards(player: Player, dayDefinition): (boolean, string?)
 	end
 
 	return true, nil
+end
+
+local function buildConsecutivePayload(consecutive)
+	local unclaimedRewards = {}
+	for _, reward in ipairs(consecutive.unclaimedRewards or {}) do
+		table.insert(unclaimedRewards, {
+			id = reward.id,
+			cycleDay = reward.cycleDay,
+			streakDay = reward.streakDay,
+			dayKey = reward.dayKey,
+		})
+	end
+
+	return {
+		currentStreak = consecutive.currentStreak,
+		bestStreak = consecutive.bestStreak,
+		lastLoginDayKey = consecutive.lastLoginDayKey,
+		unclaimedRewards = unclaimedRewards,
+		backlogLimit = DailyRewardConfig.ConsecutiveBacklogLimit,
+		cycleLength = DailyRewardConfig.ConsecutiveCycleLength,
+		rewards = DailyRewardConfig.GetConsecutiveDaysPayload(),
+	}
 end
 
 local function getCrateTokens(player: Player)
@@ -281,6 +371,7 @@ local function buildStatePayload(player: Player)
 		canClaim = canClaim,
 		completed = state.completed == true,
 		days = DailyRewardConfig.GetDaysPayload(),
+		consecutive = buildConsecutivePayload(state.consecutive),
 		crateTokens = getCrateTokens(player),
 	}
 end
@@ -316,6 +407,127 @@ local function response(ok: boolean, code: string, message: string?, state)
 	}
 end
 
+local function unlockConsecutiveForLogin(player: Player)
+	local region = getRegionRecord(player)
+	local dayInfo = getDayInfo(getUnixTime(), region.utcOffsetMinutes)
+
+	DataService:Get(player, DAILY_KEY)
+	DataService:Set(player, DAILY_KEY, function(currentValue)
+		local latestState = normalizeState(currentValue, region, dayInfo)
+		local consecutive = latestState.consecutive
+		if consecutive.lastLoginDayKey == dayInfo.dayKey then
+			return latestState
+		end
+
+		local nextStreak = 1
+		if consecutive.lastLoginDayIndex > 0 and dayInfo.dayIndex == consecutive.lastLoginDayIndex + 1 then
+			nextStreak = consecutive.currentStreak + 1
+		end
+
+		local cycleDay = getConsecutiveCycleDay(nextStreak)
+		table.insert(consecutive.unclaimedRewards, {
+			id = ("%s:%d:%d"):format(dayInfo.dayKey, nextStreak, cycleDay),
+			cycleDay = cycleDay,
+			streakDay = nextStreak,
+			dayKey = dayInfo.dayKey,
+		})
+
+		while #consecutive.unclaimedRewards > DailyRewardConfig.ConsecutiveBacklogLimit do
+			table.remove(consecutive.unclaimedRewards, 1)
+		end
+
+		consecutive.currentStreak = nextStreak
+		consecutive.bestStreak = math.max(consecutive.bestStreak, nextStreak)
+		consecutive.lastLoginDayKey = dayInfo.dayKey
+		consecutive.lastLoginDayIndex = dayInfo.dayIndex
+		latestState.consecutive = consecutive
+		return latestState
+	end)
+end
+
+local function findConsecutiveReward(consecutive, rawRewardId: any, rawCycleDay: any): (number?, ConsecutiveRewardRecord?)
+	local rewardId = if typeof(rawRewardId) == "string" then rawRewardId else ""
+	local cycleDay = math.floor(tonumber(rawCycleDay) or 0)
+
+	for index, reward in ipairs(consecutive.unclaimedRewards or {}) do
+		if rewardId ~= "" and reward.id == rewardId then
+			return index, reward
+		end
+	end
+
+	if cycleDay >= 1 and cycleDay <= DailyRewardConfig.ConsecutiveCycleLength then
+		for index, reward in ipairs(consecutive.unclaimedRewards or {}) do
+			if reward.cycleDay == cycleDay then
+				return index, reward
+			end
+		end
+	end
+
+	return nil, nil
+end
+
+local function claimConsecutiveReward(player: Player, request: any)
+	if claimLocks[player] then
+		return response(false, "Busy", "Please wait.", buildStatePayload(player))
+	end
+	if isRateLimited(player) then
+		return response(false, "RateLimited", "Please wait.", buildStatePayload(player))
+	end
+
+	claimLocks[player] = true
+	local ok, result = pcall(function()
+		local region = getRegionRecord(player)
+		local dayInfo = getDayInfo(getUnixTime(), region.utcOffsetMinutes)
+		local state = normalizeState(DataService:Get(player, DAILY_KEY), region, dayInfo)
+		local rewardIndex, rewardRecord = findConsecutiveReward(state.consecutive, request.rewardId, request.cycleDay)
+		if not (rewardIndex and rewardRecord) then
+			return response(false, "NotReady", "No consecutive reward is ready.", buildStatePayload(player))
+		end
+
+		local dayDefinition = DailyRewardConfig.GetConsecutiveDay(rewardRecord.cycleDay)
+		if not dayDefinition then
+			return response(false, "UnknownDay", "Consecutive reward is unavailable.", buildStatePayload(player))
+		end
+
+		local awarded, awardError = awardRewards(player, dayDefinition, ("Consecutive:%d"):format(rewardRecord.streakDay))
+		if not awarded then
+			warn(("[DailyRewardService] Failed to grant consecutive day %d to %s: %s"):format(
+				rewardRecord.cycleDay,
+				player.Name,
+				tostring(awardError)
+			))
+			return response(false, "GrantFailed", "Consecutive reward is unavailable right now.", buildStatePayload(player))
+		end
+
+		DataService:Set(player, DAILY_KEY, function(currentValue)
+			local latestState = normalizeState(currentValue, region, dayInfo)
+			local latestIndex = nil
+			for index, reward in ipairs(latestState.consecutive.unclaimedRewards) do
+				if reward.id == rewardRecord.id then
+					latestIndex = index
+					break
+				end
+			end
+			if latestIndex then
+				table.remove(latestState.consecutive.unclaimedRewards, latestIndex)
+			end
+			return latestState
+		end)
+
+		Notify.Send(player, "Consecutive reward claimed: " .. tostring(dayDefinition.displayText), { color = "Green" })
+		return response(true, "Claimed", "Consecutive reward claimed.", buildStatePayload(player))
+	end)
+	claimLocks[player] = nil
+
+	if not ok then
+		warn(("[DailyRewardService] Consecutive claim failed for %s: %s"):format(player.Name, tostring(result)))
+		return response(false, "Error", "Consecutive reward is unavailable right now.", buildStatePayload(player))
+	end
+
+	fireState(player)
+	return result
+end
+
 local function claimNextDay(player: Player)
 	if claimLocks[player] then
 		return response(false, "Busy", "Please wait.", buildStatePayload(player))
@@ -341,7 +553,7 @@ local function claimNextDay(player: Player)
 			return response(false, "UnknownDay", "Daily reward is unavailable.", buildStatePayload(player))
 		end
 
-		local awarded, awardError = awardRewards(player, dayDefinition)
+		local awarded, awardError = awardRewards(player, dayDefinition, tostring(state.nextDay))
 		if not awarded then
 			warn(("[DailyRewardService] Failed to grant day %d to %s: %s"):format(
 				state.nextDay,
@@ -389,6 +601,8 @@ local function handleInvoke(player: Player, request: any)
 		return response(true, "State", "OK", buildStatePayload(player))
 	elseif request.action == DailyRewardConfig.Actions.Claim then
 		return claimNextDay(player)
+	elseif request.action == DailyRewardConfig.Actions.ClaimConsecutive then
+		return claimConsecutiveReward(player, request)
 	end
 
 	return response(false, "UnknownAction", "Unknown daily reward action.", buildStatePayload(player))
@@ -403,6 +617,7 @@ end
 
 function DailyRewardService:OnPlayerAdded(player: Player)
 	task.spawn(function()
+		unlockConsecutiveForLogin(player)
 		buildStatePayload(player)
 		fireState(player)
 	end)

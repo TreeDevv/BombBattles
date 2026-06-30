@@ -9,6 +9,7 @@ local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local RoundEndFlowConfig = require(ReplicatedStorage.Shared.Config.RoundEndFlowConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -18,16 +19,9 @@ local HUD_NAME = "HUD"
 local KILL_REPLAY_FRAME_NAME = "KillReplay"
 local POTG_FRAME_NAME = "POTG"
 local POTG_REPLAY_UI_SCOPE_ID = "RoundEndFlowPOTGReplay"
-local ROUND_TEAM_ATTR = "RoundTeam"
 local OVERLAY_DISPLAY_ORDER = 900
 local TITLE_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
 local OUT_TWEEN = TweenInfo.new(0.18, Enum.EasingStyle.Sine, Enum.EasingDirection.In)
-
-local TEAM_COLORS = {
-	Red = Color3.fromRGB(255, 72, 72),
-	Blue = Color3.fromRGB(72, 146, 255),
-	Draw = Color3.fromRGB(255, 209, 92),
-}
 
 local RoundEndFlowController = {}
 
@@ -127,18 +121,24 @@ end
 
 local function getWinnerText(winnerTeam: string): (string, string, Color3)
 	if winnerTeam == "Draw" then
-		return "DRAW", "NO TEAM WINS", TEAM_COLORS.Draw
+		return "DRAW", "NO TEAM WINS", TeamPerspective.Colors.Draw
 	end
 
-	local localTeam = LocalPlayer:GetAttribute(ROUND_TEAM_ATTR)
-	local winnerLabel = string.upper(winnerTeam) .. " WINS"
+	local localTeam = TeamPerspective.GetPlayerTeamName(LocalPlayer)
+	local winnerRole = TeamPerspective.GetRoleForTeam(winnerTeam, localTeam)
+	local winnerLabel = if winnerRole == TeamPerspective.Roles.Friendly
+		then "FRIENDLY TEAM WINS"
+		elseif winnerRole == TeamPerspective.Roles.Enemy
+		then "ENEMY TEAM WINS"
+		else string.upper(winnerTeam) .. " WINS"
+	local winnerColor = TeamPerspective.GetColorForRole(winnerRole)
 	if localTeam == winnerTeam then
-		return "VICTORY", winnerLabel, TEAM_COLORS[winnerTeam] or Color3.fromRGB(255, 255, 255)
+		return "VICTORY", winnerLabel, winnerColor
 	end
 	if typeof(localTeam) == "string" and localTeam ~= "" then
-		return "DEFEAT", winnerLabel, TEAM_COLORS[winnerTeam] or Color3.fromRGB(255, 255, 255)
+		return "DEFEAT", winnerLabel, winnerColor
 	end
-	return winnerLabel, "PLAY OF THE GAME", TEAM_COLORS[winnerTeam] or Color3.fromRGB(255, 255, 255)
+	return winnerLabel, "PLAY OF THE GAME", winnerColor
 end
 
 function RoundEndFlowController:_trackConnection(connection: RBXScriptConnection)

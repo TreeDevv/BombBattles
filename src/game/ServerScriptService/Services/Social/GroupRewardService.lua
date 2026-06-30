@@ -276,9 +276,10 @@ local function rememberPromptJoin(player: Player)
 end
 
 local function grantReward(player: Player): boolean
-	local ok, message = CrateRollService:GrantRewardRoll(
+	local ok, message = CrateRollService:GrantCrateTokens(
 		player,
 		GroupRewardConfig.RewardCrateId,
+		1,
 		GroupRewardConfig.RewardSource
 	)
 	if not ok then

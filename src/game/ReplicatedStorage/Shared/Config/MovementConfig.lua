@@ -171,6 +171,7 @@ return table.freeze({
 	}),
 
 	DebugAttributesEnabled = true,
+	AbilityTargetingInputSuppressedAttribute = "Movement_AbilityTargetingInputSuppressed",
 
 	MinMoveMagnitude = 0.04,
 })

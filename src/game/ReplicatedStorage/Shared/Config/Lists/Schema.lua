@@ -185,6 +185,13 @@ return {
 			utcOffsetMinutes = 0,
 			resetAtUnix = 0,
 			completed = false,
+			consecutive = {
+				currentStreak = 0,
+				bestStreak = 0,
+				lastLoginDayKey = "",
+				lastLoginDayIndex = 0,
+				unclaimedRewards = {},
+			},
 		},
 	},
 

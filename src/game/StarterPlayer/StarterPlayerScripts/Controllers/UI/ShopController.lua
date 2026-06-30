@@ -18,7 +18,6 @@ local HUD_NAME = "HUD"
 local SIDE_BUTTONS_NAME = "SideButtons"
 local PRICE_LABEL_NAME = "RobuxCost"
 local PRICE_REQUEST_ATTRIBUTE = "ShopPriceRequest"
-local SELECTED_IMAGE_TRANSPARENCY = 0
 local DESELECTED_IMAGE_TRANSPARENCY = 1
 
 local ShopController = {}
@@ -146,10 +145,10 @@ local function getPriceInfoType(entry): Enum.InfoType?
 	return nil
 end
 
-local function setBackSelected(card: ImageButton, selected: boolean)
+local function setBackSelected(card: ImageButton, _selected: boolean)
 	local back = card:FindFirstChild("Back")
 	if back and back:IsA("ImageLabel") then
-		back.ImageTransparency = if selected then SELECTED_IMAGE_TRANSPARENCY else DESELECTED_IMAGE_TRANSPARENCY
+		back.ImageTransparency = DESELECTED_IMAGE_TRANSPARENCY
 	end
 end
 

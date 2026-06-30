@@ -2,7 +2,7 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
-local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -19,9 +19,6 @@ local RESPAWNS_DISABLED_EXIT_TWEEN = TweenInfo.new(0.22, Enum.EasingStyle.Quad, 
 local ENTER_OFFSET = UDim2.fromOffset(16, 6)
 local MIN_SLIDE_PIXELS = 18
 local RESPAWNS_DISABLED_HIDE_PADDING = 24
-
-local RED_TEAM_NAME = RoundConfig.Teams.Red.name
-local BLUE_TEAM_NAME = RoundConfig.Teams.Blue.name
 
 type Fader = {
 	instance: Instance,
@@ -343,7 +340,10 @@ function KillFeedController:_configureEntry(root: Frame, payload)
 	if gradient then
 		local killerTeam = payload.killerTeam
 		local victimTeam = payload.victimTeam
-		if killerTeam == RED_TEAM_NAME and victimTeam == BLUE_TEAM_NAME then
+		local localTeam = TeamPerspective.GetPlayerTeamName(LocalPlayer)
+		local killerRole = TeamPerspective.GetRoleForTeam(killerTeam, localTeam)
+		local victimRole = TeamPerspective.GetRoleForTeam(victimTeam, localTeam)
+		if killerRole == TeamPerspective.Roles.Enemy and victimRole == TeamPerspective.Roles.Friendly then
 			gradient.Rotation = (self._templateGradientRotation + 180) % 360
 		else
 			gradient.Rotation = self._templateGradientRotation

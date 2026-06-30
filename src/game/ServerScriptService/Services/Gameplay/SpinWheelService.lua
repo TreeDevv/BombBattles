@@ -16,7 +16,6 @@ local PurchaseReceiptService = require(script.Parent.PurchaseReceiptService)
 
 local SPIN_WHEEL_KEY = Schema.SpinWheel and Schema.SpinWheel.key or "spinWheel"
 local CASH_KEY = Schema.Cash and Schema.Cash.key or "cash"
-local CRATE_TOKENS_KEY = Schema.CrateTokens and Schema.CrateTokens.key or "crateTokens"
 
 type RequestWindow = {
 	startedAt: number,
@@ -295,19 +294,6 @@ local function addCash(player: Player, amount: number)
 	end)
 end
 
-local function addCrateTokens(player: Player, crateId: string, amount: number)
-	local tokenAmount = roundNonNegative(amount)
-	if tokenAmount <= 0 then
-		return
-	end
-
-	DataService:Set(player, CRATE_TOKENS_KEY, function(currentValue)
-		local tokens = if typeof(currentValue) == "table" then table.clone(currentValue) else {}
-		tokens[crateId] = roundNonNegative(tokens[crateId]) + tokenAmount
-		return tokens
-	end)
-end
-
 local function grantTimedInstantSpin(player: Player, durationSeconds: number)
 	local duration = math.max(0, math.floor(tonumber(durationSeconds) or 0))
 	if duration <= 0 then
@@ -329,10 +315,15 @@ local function grantReward(player: Player, reward): (boolean, string?, any?)
 	elseif rewardType == SpinWheelConfig.RewardTypes.Spins then
 		return true, nil, nil
 	elseif rewardType == SpinWheelConfig.RewardTypes.CrateToken then
-		addCrateTokens(player, tostring(reward.crateId or "Premium"), reward.amount or 1)
-		return true, nil, nil
+		local ok, message = CrateRollService:GrantCrateTokens(
+			player,
+			tostring(reward.crateId or "Premium"),
+			reward.amount or 1,
+			"SpinWheel"
+		)
+		return ok, message, nil
 	elseif rewardType == SpinWheelConfig.RewardTypes.CrateRoll then
-		local ok, message = CrateRollService:GrantRewardRoll(player, reward.crateId, "SpinWheel")
+		local ok, message = CrateRollService:GrantCrateTokens(player, reward.crateId, reward.amount or 1, "SpinWheel")
 		return ok, message, nil
 	elseif rewardType == SpinWheelConfig.RewardTypes.BombSkin then
 		local ok, result = BombSkinService:GrantSkin(player, reward.itemId, "SpinWheel")

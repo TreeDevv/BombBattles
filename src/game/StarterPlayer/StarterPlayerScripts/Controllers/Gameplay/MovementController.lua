@@ -53,6 +53,7 @@ local LANDING_MODE_RUNOUT = "Runout"
 local ATTRIBUTE_NUMBER_EPSILON = 0.01
 local ATTRIBUTE_VECTOR_EPSILON = 0.01
 local JUMP_INPUT_DEDUP_TIME = 1 / 30
+local ABILITY_TARGETING_INPUT_SUPPRESSED_ATTR = MovementConfig.AbilityTargetingInputSuppressedAttribute
 
 type Controls = {
 	GetMoveVector: (Controls) -> Vector3,
@@ -270,6 +271,10 @@ end
 
 local function readCameraShiftLocked(character: Model?): boolean
 	return character ~= nil and character:GetAttribute("Camera_ShiftLocked") == true
+end
+
+local function isAbilityTargetingInputSuppressed(character: Model?): boolean
+	return character ~= nil and character:GetAttribute(ABILITY_TARGETING_INPUT_SUPPRESSED_ATTR) == true
 end
 
 local function getBombKnockbackUntil(character: Model?): number
@@ -2343,19 +2348,28 @@ function MovementController:_step(dt: number)
 		jumpBuffered = false
 	end
 
-	if not grappleStunned then
+	local movementInputSuppressed = isAbilityTargetingInputSuppressed(self._character)
+	if movementInputSuppressed then
+		self:_consumeJumpRequest()
+		self:_consumeAirJumpRequest()
+		self:_clearSlidePhase()
+		self._slideRequestPending = false
+		jumpBuffered = false
+	end
+
+	if not grappleStunned and not movementInputSuppressed then
 		self:_tryReplayJump(now, isGrounded, inCoyoteTime)
 	end
 
 	local inputMoveDirection = getCameraRelativeDirection(getMoveVectorWithDeadzone(controls:GetMoveVector()))
-	if grappleStunned then
+	if grappleStunned or movementInputSuppressed then
 		inputMoveDirection = Vector3.zero
 	end
 	self:_setAirControlInput(inputMoveDirection)
 	local hasInputMove = inputMoveDirection.Magnitude >= MovementConfig.MinMoveMagnitude
-	local sprintIntent = isGrounded and not grappleStunned and self._sprintHeld and hasInputMove
+	local sprintIntent = isGrounded and not grappleStunned and not movementInputSuppressed and self._sprintHeld and hasInputMove
 
-	if self._slideRequestPending and not grappleStunned then
+	if self._slideRequestPending and not grappleStunned and not movementInputSuppressed then
 		if self:_isGroundRunout() then
 			self:_stopGroundRunout()
 		end
@@ -2395,6 +2409,7 @@ function MovementController:_step(dt: number)
 		and not isSliding
 		and not isGroundRunout
 		and not grappleStunned
+		and not movementInputSuppressed
 	self._isCrouching = isCrouching
 
 	local targetMoveDirection = inputMoveDirection
@@ -2471,43 +2486,48 @@ function MovementController:_step(dt: number)
 		self._smoothedMoveDirection = Vector3.zero
 	end
 
-	if isGrounded then
+	if movementInputSuppressed then
+		self._smoothedMoveDirection = Vector3.zero
+		humanoid:Move(Vector3.zero, false)
+	elseif isGrounded then
 		humanoid:Move(self._smoothedMoveDirection, false)
 	elseif hasMoveInput and not suppressHumanoidAirMove then
 		humanoid:Move(targetMoveDirection, false)
 	end
 	self:_applyGroundMovementTuning(dt, isGrounded, hasMoveInput, isSliding, isGroundRunout)
 
-	local shiftLocked = readCameraShiftLocked(self._character)
-	if MovementConfig.FaceCameraDirection and shiftLocked then
-		local cameraFacingDirection = getCameraFacingDirection()
-		local cameraFacingYaw = directionToYaw(cameraFacingDirection)
-		if cameraFacingYaw then
-			self._smoothedFacingYaw = cameraFacingYaw
-			self._smoothedFacingDirection = cameraFacingDirection
-			if not bombKnockbackActive or MovementConfig.AirFacingApplyWhileKnockback ~= false then
-				self:_snapRootYawToFacingDirection(cameraFacingDirection, true)
-			end
-		end
-	else
-		local targetFacingDirection = if hasMoveInput then targetMoveDirection.Unit else Vector3.zero
-		local targetFacingYaw = directionToYaw(targetFacingDirection)
-		if targetFacingYaw then
-			local smoothedFacingYaw = self._smoothedFacingYaw
-			if smoothedFacingYaw == nil then
-				local currentFacingDirection = rootPart and flattenDirection(rootPart.CFrame.LookVector) or Vector3.zero
-				if currentFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and self._rootPart then
-					currentFacingDirection = flattenDirection(self._rootPart.CFrame.LookVector)
+	if not movementInputSuppressed then
+		local shiftLocked = readCameraShiftLocked(self._character)
+		if MovementConfig.FaceCameraDirection and shiftLocked then
+			local cameraFacingDirection = getCameraFacingDirection()
+			local cameraFacingYaw = directionToYaw(cameraFacingDirection)
+			if cameraFacingYaw then
+				self._smoothedFacingYaw = cameraFacingYaw
+				self._smoothedFacingDirection = cameraFacingDirection
+				if not bombKnockbackActive or MovementConfig.AirFacingApplyWhileKnockback ~= false then
+					self:_snapRootYawToFacingDirection(cameraFacingDirection, true)
 				end
-				smoothedFacingYaw = directionToYaw(currentFacingDirection) or targetFacingYaw
 			end
+		else
+			local targetFacingDirection = if hasMoveInput then targetMoveDirection.Unit else Vector3.zero
+			local targetFacingYaw = directionToYaw(targetFacingDirection)
+			if targetFacingYaw then
+				local smoothedFacingYaw = self._smoothedFacingYaw
+				if smoothedFacingYaw == nil then
+					local currentFacingDirection = rootPart and flattenDirection(rootPart.CFrame.LookVector) or Vector3.zero
+					if currentFacingDirection.Magnitude < MovementConfig.MinMoveMagnitude and self._rootPart then
+						currentFacingDirection = flattenDirection(self._rootPart.CFrame.LookVector)
+					end
+					smoothedFacingYaw = directionToYaw(currentFacingDirection) or targetFacingYaw
+				end
 
-			smoothedFacingYaw = smoothYaw(smoothedFacingYaw, targetFacingYaw, MovementConfig.FacingResponsiveness, dt)
-			local smoothedFacingDirection = yawToDirection(smoothedFacingYaw)
-			self._smoothedFacingYaw = smoothedFacingYaw
-			self._smoothedFacingDirection = smoothedFacingDirection
-			if isGrounded and (not bombKnockbackActive or MovementConfig.AirFacingApplyWhileKnockback ~= false) then
-				self:_snapRootYawToFacingDirection(smoothedFacingDirection)
+				smoothedFacingYaw = smoothYaw(smoothedFacingYaw, targetFacingYaw, MovementConfig.FacingResponsiveness, dt)
+				local smoothedFacingDirection = yawToDirection(smoothedFacingYaw)
+				self._smoothedFacingYaw = smoothedFacingYaw
+				self._smoothedFacingDirection = smoothedFacingDirection
+				if isGrounded and (not bombKnockbackActive or MovementConfig.AirFacingApplyWhileKnockback ~= false) then
+					self:_snapRootYawToFacingDirection(smoothedFacingDirection)
+				end
 			end
 		end
 	end
@@ -2526,7 +2546,7 @@ function MovementController:_step(dt: number)
 		effectiveSpeed = targetSpeed,
 		freezeSlowed = freezeSlowMultiplier < 1,
 		freezeSlowMultiplier = freezeSlowMultiplier,
-		moveMagnitude = targetMoveDirection.Magnitude,
+		moveMagnitude = if movementInputSuppressed then 0 else targetMoveDirection.Magnitude,
 		inCoyoteTime = inCoyoteTime,
 		jumpBuffered = jumpBuffered,
 		landingSettling = landingSettling,
@@ -2718,6 +2738,7 @@ function MovementController:_bindCharacterWithParts(character: Model, parts)
 	character:SetAttribute("Movement_LandingRecoveryAlpha", 0)
 	character:SetAttribute("Movement_LandingInputGraceActive", false)
 	character:SetAttribute("Movement_LandingRunoutEligible", false)
+	character:SetAttribute(ABILITY_TARGETING_INPUT_SUPPRESSED_ATTR, false)
 	character:SetAttribute("Movement_LegacyHumanoidReady", true)
 	character:SetAttribute("Movement_LegacyHumanoidStatus", "Ready")
 	character:SetAttribute(AIR_CONTROL_FORCE_AIRBORNE_UNTIL_ATTR, 0)

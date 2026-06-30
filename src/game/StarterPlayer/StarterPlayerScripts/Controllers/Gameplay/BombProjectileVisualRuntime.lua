@@ -13,11 +13,16 @@ local BombProjectileVisualMotion = require(ReplicatedStorage.Shared.Effects.Bomb
 local BombProjectileVisualState = require(ReplicatedStorage.Shared.Effects.BombProjectileVisualState)
 local BombTrajectory = require(ReplicatedStorage.Shared.Common.BombTrajectory)
 local BombVisualUtil = require(ReplicatedStorage.Shared.Effects.BombVisualUtil)
+local AudioCatalog = require(ReplicatedStorage.Shared.Audio.AudioCatalog)
 local RuntimeProfiler = require(ReplicatedStorage.Shared.Common.RuntimeProfiler)
+local SoundUtil = require(ReplicatedStorage.Shared.Audio.SoundUtil)
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 
 local BombProjectileVisualRuntime = {}
 local LocalPlayer = Players.LocalPlayer
 local ROUND_TEAM_ATTR = "RoundTeam"
+local THROW_SOUND_GROUP_KIND = "SFX"
+local throwSoundIndex = 0
 
 local function syncAbilityVisual(visual)
 	AbilityVisualOverlay.SyncFromVisuals(visual)
@@ -71,16 +76,16 @@ end
 local function getFriendlyPulseColor(payload): Color3
 	local ownerUserId = getPayloadOwnerUserId(payload)
 	if ownerUserId == LocalPlayer.UserId then
-		return BombConfig.PulseFriendlyBlue
+		return TeamPerspective.Colors.Friendly
 	end
 
 	local localTeam = getPlayerTeamName(LocalPlayer)
 	local ownerTeam = getPayloadOwnerTeam(payload)
 	if localTeam and ownerTeam == localTeam then
-		return BombConfig.PulseFriendlyBlue
+		return TeamPerspective.Colors.Friendly
 	end
 
-	return BombConfig.PulseRed
+	return TeamPerspective.Colors.Enemy
 end
 
 local function copyVisualsWithPulseColor(visuals, pulseColor: Color3)
@@ -101,6 +106,17 @@ local function applyOwnerPulseColor(visual, payload)
 	visual.ownerUserId = getPayloadOwnerUserId(payload)
 	visual.ownerTeam = getPayloadOwnerTeam(payload)
 	visual.visuals = copyVisualsWithPulseColor(visual.visuals, getFriendlyPulseColor(payload))
+end
+
+local function playThrowSound(position: Vector3)
+	local soundNames = AudioCatalog.GetThrowSoundNames()
+	local soundCount = #soundNames
+	if soundCount <= 0 then
+		return
+	end
+
+	throwSoundIndex = (throwSoundIndex % soundCount) + 1
+	SoundUtil.PlayAtPosition(soundNames[throwSoundIndex], position, workspace, THROW_SOUND_GROUP_KIND)
 end
 
 function BombProjectileVisualRuntime.GetFolder(controller, context): Folder
@@ -249,6 +265,9 @@ function BombProjectileVisualRuntime.PlayThrowEffect(controller, context, payloa
 	applyOwnerPulseColor(visual, payload)
 	syncAbilityVisual(visual)
 	syncBaseVisual(visual)
+	if not reusePredictedVisual then
+		playThrowSound(startPosition)
+	end
 
 	local lifetime = if typeof(payload.remainingFuse) == "number" then payload.remainingFuse else BombConfig.FuseSeconds
 	local fuseStartedAt = if typeof(payload.fuseStartedAt) == "number" then payload.fuseStartedAt else startedAt

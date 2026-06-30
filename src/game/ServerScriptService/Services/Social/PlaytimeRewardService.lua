@@ -107,9 +107,10 @@ local function awardTier(player: Player, tier): (boolean, string)
 		addCash(player, reward.amount)
 		return true, "Claimed"
 	elseif reward.type == PlaytimeRewardConfig.RewardTypes.Crate then
-		local ok, message = CrateRollService:GrantRewardRoll(
+		local ok, message = CrateRollService:GrantCrateTokens(
 			player,
 			reward.crateId,
+			reward.amount or 1,
 			("%s:%s"):format(PlaytimeRewardConfig.RewardSource, tier.id)
 		)
 		if not ok then

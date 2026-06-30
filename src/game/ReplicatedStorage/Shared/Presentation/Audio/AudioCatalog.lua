@@ -1,6 +1,7 @@
 local AudioCatalog = {}
 
 local SOUND_FOLDER_PATH = table.freeze({ "Assets", "Sounds" })
+local THROW_SOUND_NAMES = table.freeze({ "BB THrow v1", "BB THrow v2" })
 
 local aliases = {
 	DefaultExplosion = "BB Normal Explosion",
@@ -137,6 +138,10 @@ end
 
 function AudioCatalog.GetSoundFolderPath(): { string }
 	return cloneArray(SOUND_FOLDER_PATH)
+end
+
+function AudioCatalog.GetThrowSoundNames(): { string }
+	return cloneArray(THROW_SOUND_NAMES)
 end
 
 function AudioCatalog.ResolveName(soundName: any): string

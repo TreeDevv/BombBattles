@@ -21,6 +21,21 @@ type DayPayload = {
 	iconImage: string?,
 }
 
+type ConsecutiveRewardRecord = {
+	id: string,
+	cycleDay: number,
+	streakDay: number,
+	dayKey: string,
+}
+
+type ConsecutivePayload = {
+	currentStreak: number,
+	bestStreak: number,
+	unclaimedRewards: { ConsecutiveRewardRecord },
+	cycleLength: number,
+	rewards: { DayPayload },
+}
+
 type StatePayload = {
 	claimedDays: { [string]: boolean },
 	nextDay: number,
@@ -28,6 +43,7 @@ type StatePayload = {
 	canClaim: boolean,
 	completed: boolean,
 	days: { DayPayload },
+	consecutive: ConsecutivePayload?,
 }
 
 local DailyRewardController = {}
@@ -43,6 +59,9 @@ DailyRewardController._canClaimTemplate = nil :: GuiObject?
 DailyRewardController._lockedTemplate = nil :: GuiObject?
 DailyRewardController._milestoneTemplate = nil :: GuiObject?
 DailyRewardController._tweenScriptTemplate = nil :: LocalScript?
+DailyRewardController._consecutiveRoot = nil :: GuiObject?
+DailyRewardController._consecutiveScroller = nil :: ScrollingFrame?
+DailyRewardController._consecutiveTweenScriptTemplate = nil :: LocalScript?
 DailyRewardController._requestRemote = nil :: RemoteFunction?
 DailyRewardController._stateRemote = nil :: RemoteEvent?
 DailyRewardController._state = nil :: StatePayload?
@@ -51,6 +70,8 @@ DailyRewardController._localZoneWatchConnection = nil :: RBXScriptConnection?
 DailyRewardController._rebindQueued = false
 DailyRewardController._warnedMissingFrame = false
 DailyRewardController._claimPending = false
+DailyRewardController._consecutiveClaimPending = false
+DailyRewardController._consecutiveConnections = {} :: { RBXScriptConnection }
 
 local function track(list: { RBXScriptConnection }, connection: RBXScriptConnection?)
 	if connection then
@@ -93,6 +114,11 @@ end
 local function findImageLabel(parent: Instance?, name: string): ImageLabel?
 	local child = parent and parent:FindFirstChild(name, true)
 	return if child and child:IsA("ImageLabel") then child else nil
+end
+
+local function findTextLabel(parent: Instance?, name: string): TextLabel?
+	local child = parent and parent:FindFirstChild(name, true)
+	return if child and child:IsA("TextLabel") then child else nil
 end
 
 local function findTemplate(scroller: ScrollingFrame, name: string): GuiObject?
@@ -204,6 +230,47 @@ local function getClaimStatus(state: StatePayload?, dayNumber: number): string
 	return "locked"
 end
 
+local function getConsecutiveCycleDay(streakDay: number, cycleLength: number): number
+	local normalizedCycleLength = math.max(1, math.floor(tonumber(cycleLength) or DailyRewardConfig.ConsecutiveCycleLength))
+	local normalizedStreak = math.max(1, math.floor(tonumber(streakDay) or 1))
+	return ((normalizedStreak - 1) % normalizedCycleLength) + 1
+end
+
+local function countUnclaimedConsecutive(consecutive: ConsecutivePayload?, cycleDay: number): number
+	if not consecutive or typeof(consecutive.unclaimedRewards) ~= "table" then
+		return 0
+	end
+
+	local count = 0
+	for _, reward in ipairs(consecutive.unclaimedRewards) do
+		if math.floor(tonumber(reward.cycleDay) or 0) == cycleDay then
+			count += 1
+		end
+	end
+	return count
+end
+
+local function getConsecutiveStatus(consecutive: ConsecutivePayload?, cycleDay: number): string
+	if not consecutive then
+		return "locked"
+	end
+
+	if countUnclaimedConsecutive(consecutive, cycleDay) > 0 then
+		return "claimable"
+	end
+
+	local currentStreak = math.floor(tonumber(consecutive.currentStreak) or 0)
+	if currentStreak <= 0 then
+		return "locked"
+	end
+
+	local currentCycleDay = getConsecutiveCycleDay(currentStreak, consecutive.cycleLength)
+	if cycleDay <= currentCycleDay then
+		return "claimed"
+	end
+	return "locked"
+end
+
 function DailyRewardController:_invoke(request: any)
 	local remote = self._requestRemote
 	if not remote then
@@ -231,6 +298,24 @@ function DailyRewardController:_claim()
 			action = DailyRewardConfig.Actions.Claim,
 		})
 		self._claimPending = false
+		if typeof(response) == "table" and typeof(response.state) == "table" then
+			self:_setState(response.state)
+		end
+	end)
+end
+
+function DailyRewardController:_claimConsecutive(cycleDay: number)
+	if self._consecutiveClaimPending then
+		return
+	end
+
+	self._consecutiveClaimPending = true
+	task.spawn(function()
+		local response = self:_invoke({
+			action = DailyRewardConfig.Actions.ClaimConsecutive,
+			cycleDay = cycleDay,
+		})
+		self._consecutiveClaimPending = false
 		if typeof(response) == "table" and typeof(response.state) == "table" then
 			self:_setState(response.state)
 		end
@@ -363,6 +448,102 @@ function DailyRewardController:_render()
 	end
 end
 
+function DailyRewardController:_findConsecutiveCard(cycleDay: number): GuiObject?
+	local scroller = self._consecutiveScroller
+	if not scroller then
+		return nil
+	end
+
+	local direct = scroller:FindFirstChild(("Day%d"):format(cycleDay))
+	if direct and direct:IsA("GuiObject") then
+		return direct
+	end
+
+	for _, child in ipairs(scroller:GetChildren()) do
+		if child:IsA("GuiObject") and math.floor(tonumber(child:GetAttribute("ConsecutiveDay")) or 0) == cycleDay then
+			return child
+		end
+	end
+
+	return nil
+end
+
+function DailyRewardController:_applyConsecutiveTweenScript(card: Instance)
+	local template = self._consecutiveTweenScriptTemplate
+	if not template or card:FindFirstChild(template.Name) then
+		return
+	end
+
+	local clone = template:Clone()
+	clone.Enabled = true
+	clone.Parent = card
+end
+
+function DailyRewardController:_configureConsecutiveCard(day: DayPayload, status: string)
+	local cycleDay = math.floor(tonumber(day.day) or 0)
+	local card = self:_findConsecutiveCard(cycleDay)
+	if not (card and cycleDay > 0) then
+		return
+	end
+
+	card.LayoutOrder = cycleDay * 2 - 1
+	card.Visible = true
+	card:SetAttribute("ConsecutiveDay", cycleDay)
+
+	local dayLabel = card:FindFirstChild("Label")
+	if dayLabel and dayLabel:IsA("TextLabel") then
+		dayLabel.Text = ("Day %d"):format(cycleDay)
+	end
+
+	local rewardsFrame = card:FindFirstChild("Rewards")
+	local rewardLabel = rewardsFrame and findTextLabel(rewardsFrame, "Label") or nil
+	if rewardLabel then
+		rewardLabel.Text = tostring(day.displayText or "")
+	end
+
+	local icon = rewardsFrame and findImageLabel(rewardsFrame, "Icon") or findImageLabel(card, "Icon")
+	if icon and typeof(day.iconImage) == "string" and day.iconImage ~= "" then
+		icon.Image = day.iconImage
+	end
+
+	setNamedGuiVisible(card, "ClaimedOverlay", status == "claimed")
+	setNamedGuiVisible(card, "CanClaimOverlay", status == "claimable")
+	setButtonEnabled(card:IsA("GuiButton") and card or nil, status == "claimable")
+	if card:IsA("GuiButton") and status == "claimable" then
+		track(self._consecutiveConnections, card.Activated:Connect(function()
+			self:_claimConsecutive(cycleDay)
+		end))
+	end
+
+	self:_applyConsecutiveTweenScript(card)
+end
+
+function DailyRewardController:_renderConsecutive()
+	disconnectAll(self._consecutiveConnections)
+
+	local state = self._state
+	local consecutive = state and state.consecutive or nil
+	local root = self._consecutiveRoot
+	if not (consecutive and root and self._consecutiveScroller) then
+		return
+	end
+
+	local daysLabel = root:FindFirstChild("Days")
+	local streakLabel = daysLabel and findTextLabel(daysLabel, "Label") or nil
+	if streakLabel then
+		local currentStreak = math.max(0, math.floor(tonumber(consecutive.currentStreak) or 0))
+		local suffix = if currentStreak == 1 then "Consecutive Day" else "Consecutive Days"
+		streakLabel.Text = ("%d %s"):format(currentStreak, suffix)
+	end
+
+	for _, day in ipairs(consecutive.rewards or {}) do
+		local cycleDay = math.floor(tonumber(day.day) or 0)
+		if cycleDay > 0 then
+			self:_configureConsecutiveCard(day, getConsecutiveStatus(consecutive, cycleDay))
+		end
+	end
+end
+
 function DailyRewardController:_setState(payload: any)
 	if typeof(payload) ~= "table" then
 		return
@@ -375,9 +556,22 @@ function DailyRewardController:_setState(payload: any)
 	payload.claimableDay = math.max(0, math.floor(tonumber(payload.claimableDay) or 0))
 	payload.canClaim = payload.canClaim == true
 	payload.completed = payload.completed == true
+	payload.consecutive = if typeof(payload.consecutive) == "table" then payload.consecutive else (previous and previous.consecutive) or {
+		currentStreak = 0,
+		bestStreak = 0,
+		unclaimedRewards = {},
+		cycleLength = DailyRewardConfig.ConsecutiveCycleLength,
+		rewards = DailyRewardConfig.GetConsecutiveDaysPayload(),
+	}
+	payload.consecutive.unclaimedRewards = if typeof(payload.consecutive.unclaimedRewards) == "table" then payload.consecutive.unclaimedRewards else {}
+	payload.consecutive.rewards = if typeof(payload.consecutive.rewards) == "table" then payload.consecutive.rewards else DailyRewardConfig.GetConsecutiveDaysPayload()
+	payload.consecutive.currentStreak = math.max(0, math.floor(tonumber(payload.consecutive.currentStreak) or 0))
+	payload.consecutive.bestStreak = math.max(payload.consecutive.currentStreak, math.floor(tonumber(payload.consecutive.bestStreak) or 0))
+	payload.consecutive.cycleLength = math.max(1, math.floor(tonumber(payload.consecutive.cycleLength) or DailyRewardConfig.ConsecutiveCycleLength))
 
 	self._state = payload :: StatePayload
 	self:_render()
+	self:_renderConsecutive()
 end
 
 function DailyRewardController:_ensureFrameRegistered(frame: GuiObject)
@@ -392,6 +586,7 @@ end
 
 function DailyRewardController:_bindFrame(frame: Instance?)
 	disconnectAll(self._frameConnections)
+	disconnectAll(self._consecutiveConnections)
 	self:_clearCards()
 	self._frame = nil
 	self._scroller = nil
@@ -400,6 +595,9 @@ function DailyRewardController:_bindFrame(frame: Instance?)
 	self._lockedTemplate = nil
 	self._milestoneTemplate = nil
 	self._tweenScriptTemplate = nil
+	self._consecutiveRoot = nil
+	self._consecutiveScroller = nil
+	self._consecutiveTweenScriptTemplate = nil
 
 	if not (frame and frame:IsA("GuiObject")) then
 		return
@@ -440,7 +638,35 @@ function DailyRewardController:_bindFrame(frame: Instance?)
 		end
 	end
 
+	local consecutive = frame:FindFirstChild("Consecutive") or frame:FindFirstChild("Consectuive")
+	if consecutive and consecutive:IsA("GuiObject") then
+		self._consecutiveRoot = consecutive
+		local consecutiveScroller = consecutive:FindFirstChild("ScrollingFrame")
+		if consecutiveScroller and consecutiveScroller:IsA("ScrollingFrame") then
+			self._consecutiveScroller = consecutiveScroller
+			self._consecutiveScroller.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+			local localScript = consecutiveScroller:FindFirstChild("LocalScript")
+			local tweens = localScript and localScript:FindFirstChild("Tweens")
+			if tweens and tweens:IsA("LocalScript") then
+				self._consecutiveTweenScriptTemplate = tweens
+			end
+		end
+
+		local buyButton = findButton(consecutive, "BuyButton")
+		if buyButton then
+			buyButton.Visible = false
+			setButtonEnabled(buyButton, false)
+		end
+
+		local warning = consecutive:FindFirstChild("Warning")
+		if warning and warning:IsA("GuiObject") then
+			warning.Visible = false
+		end
+	end
+
 	self:_render()
+	self:_renderConsecutive()
 	self:_requestState()
 end
 
@@ -481,6 +707,8 @@ function DailyRewardController:_bindPlayerGui(root: Instance?)
 			or descendant.Name == "CanClaimTemplate"
 			or descendant.Name == "RareTemplate"
 			or descendant.Name == "MilestoneTemplate"
+			or descendant.Name == "Consecutive"
+			or descendant.Name == "Consectuive"
 		then
 			self:_scheduleRebind()
 		end
@@ -578,6 +806,7 @@ function DailyRewardController:OnStart()
 	disconnectAll(self._connections)
 	disconnectAll(self._frameConnections)
 	disconnectAll(self._screenGuiConnections)
+	disconnectAll(self._consecutiveConnections)
 	if self._localZoneWatchConnection then
 		self._localZoneWatchConnection:Disconnect()
 		self._localZoneWatchConnection = nil

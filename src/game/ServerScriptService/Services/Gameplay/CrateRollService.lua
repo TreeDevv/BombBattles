@@ -137,6 +137,26 @@ local function consumeCrateToken(player: Player, crateId: string): boolean
 	return consumed
 end
 
+local function addCrateTokens(player: Player, crateId: string, amount: number): (boolean, string?, number?)
+	local crateDefinition = CrateRollConfig.GetDefinition(crateId)
+	if not crateDefinition then
+		return false, "Unknown crate: " .. tostring(crateId), nil
+	end
+
+	local tokenAmount = roundNonNegative(amount)
+	if tokenAmount <= 0 then
+		return false, "Token amount must be positive.", nil
+	end
+
+	DataService:Set(player, CRATE_TOKENS_KEY, function(currentValue)
+		local tokens = normalizeCrateTokens(currentValue)
+		tokens[crateDefinition.id] = roundNonNegative(tokens[crateDefinition.id]) + tokenAmount
+		return tokens
+	end)
+
+	return true, nil, tokenAmount
+end
+
 local function getProductConfig(productKey: string?)
 	if typeof(productKey) ~= "string" or productKey == "" then
 		return nil
@@ -388,13 +408,14 @@ local function grantRoll(player: Player, crateDefinition, source: string): (bool
 end
 
 local function rollToken(player: Player, crateDefinition, source: string)
-	local ok, rollPayload = grantRoll(player, crateDefinition, source)
-	if not ok then
-		return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
-	end
-
 	if not consumeCrateToken(player, crateDefinition.id) then
 		return response(false, "TokenUnavailable", "Crate token is unavailable.", buildStatePayload(player))
+	end
+
+	local ok, rollPayload = grantRoll(player, crateDefinition, source)
+	if not ok then
+		addCrateTokens(player, crateDefinition.id, 1)
+		return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
 	end
 
 	return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
@@ -469,14 +490,12 @@ local function rollPromptFree(player: Player, crateDefinition)
 		return response(false, "PromptRollsDisabled", "Crate prompts are not available.", buildStatePayload(player))
 	end
 
-	local ok, rollPayload = grantRoll(player, crateDefinition, PROMPT_FREE_ROLL_SOURCE)
+	local ok, message = addCrateTokens(player, crateDefinition.id, 1)
 	if not ok then
-		return response(false, "RollFailed", tostring(rollPayload), buildStatePayload(player))
+		return response(false, "TokenGrantFailed", tostring(message), buildStatePayload(player))
 	end
 
-	return response(true, "Rolled", "Opened " .. crateDefinition.displayName .. ".", {
-		roll = rollPayload,
-		reward = rollPayload.reward,
+	return response(true, "TokenGranted", "Crate token added.", {
 		state = buildStatePayload(player),
 	})
 end
@@ -621,14 +640,11 @@ local function handlePurchaseProcessed(player: Player, productKey: string, conte
 		end
 
 		clearPendingPromptPurchase(player, productKey)
-		local resultPayload = withRollLock(player, function()
-			return rollToken(player, crateDefinition, "Robux")
-		end)
-
-		if typeof(resultPayload) == "table" then
-			resultPayload.productContext = context
-		end
-		fireRollResult(player, resultPayload)
+		fireRollResult(player, response(true, "TokenGranted", "Crate token added.", {
+			productContext = context,
+			state = buildStatePayload(player),
+		}))
+		Notify.Send(player, "Crate token added!", { color = "Green" })
 		return
 	end
 
@@ -720,6 +736,14 @@ function CrateRollService:GrantRewardRoll(player: Player, rawCrateId: any, sourc
 	local reward = resultPayload.reward
 	local rewardName = if typeof(reward) == "table" then tostring(reward.displayName or reward.itemId or reward.skinId or reward.finisherId) else nil
 	return resultPayload.ok == true, resultPayload.message or resultPayload.code, rewardName
+end
+
+function CrateRollService:GrantCrateTokens(player: Player, rawCrateId: any, amount: any, _source: string?): (boolean, string?, number?)
+	if not (player and player:IsA("Player")) then
+		return false, "Player is required", nil
+	end
+
+	return addCrateTokens(player, rawCrateId, amount)
 end
 
 function CrateRollService:OnStart()

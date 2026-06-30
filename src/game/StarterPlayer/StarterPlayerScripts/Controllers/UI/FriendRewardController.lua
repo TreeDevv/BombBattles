@@ -13,6 +13,7 @@ local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 local FRAME_NAME = FriendRewardConfig.FrameName
 local RUNTIME_FRIEND_ROW_ATTRIBUTE = "FriendRewardRuntimeRow"
+local SLIDER_EDGE_WIDTH = 0.002
 local PROGRESS_TWEEN = TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local MAX_ONLINE_FRIENDS = 200
 
@@ -49,6 +50,12 @@ type RewardCard = {
 	connection: RBXScriptConnection?,
 }
 
+type SliderGradientRecord = {
+	fillStart: Color3,
+	fillEnd: Color3,
+	track: Color3,
+}
+
 local FriendRewardController = {}
 
 FriendRewardController._connections = {} :: { RBXScriptConnection }
@@ -73,6 +80,8 @@ FriendRewardController._friends = {} :: { FriendPayload }
 FriendRewardController._friendsLoaded = false
 FriendRewardController._nextFriendLoadAt = 0
 FriendRewardController._invitePendingByUserId = {} :: { [number]: boolean }
+
+local sliderGradientRecords = setmetatable({}, { __mode = "k" }) :: { [UIGradient]: SliderGradientRecord }
 
 local function track(list: { RBXScriptConnection }, connection: RBXScriptConnection?)
 	if connection then
@@ -134,28 +143,75 @@ local function formatTimer(seconds: number): string
 	return string.format("%02d:%02d", minutes, remainingSeconds)
 end
 
+local function getColorAt(sequence: ColorSequence, time: number): Color3
+	local keypoints = sequence.Keypoints
+	if #keypoints == 0 then
+		return Color3.new(1, 1, 1)
+	end
+
+	local clamped = math.clamp(time, 0, 1)
+	local first = keypoints[1]
+	if clamped <= first.Time then
+		return first.Value
+	end
+
+	for index = 2, #keypoints do
+		local previous = keypoints[index - 1]
+		local current = keypoints[index]
+		if clamped <= current.Time then
+			local span = current.Time - previous.Time
+			local alpha = if span > 0 then (clamped - previous.Time) / span else 0
+			return previous.Value:Lerp(current.Value, math.clamp(alpha, 0, 1))
+		end
+	end
+
+	return keypoints[#keypoints].Value
+end
+
+local function getSliderGradientRecord(slider: UIGradient): SliderGradientRecord
+	local existing = sliderGradientRecords[slider]
+	if existing then
+		return existing
+	end
+
+	local color = slider.Color
+	local record = {
+		fillStart = getColorAt(color, 0),
+		fillEnd = getColorAt(color, 0.5),
+		track = getColorAt(color, 1),
+	}
+	sliderGradientRecords[slider] = record
+	return record
+end
+
 local function setSliderProgress(slider: UIGradient?, ratio: number)
 	if not slider then
 		return
 	end
 
 	local clamped = math.clamp(ratio, 0, 1)
+	local colors = getSliderGradientRecord(slider)
+	slider.Transparency = NumberSequence.new(0)
+
 	if clamped <= 0 then
-		slider.Transparency = NumberSequence.new(1)
+		slider.Color = ColorSequence.new(colors.track)
 		return
 	end
 	if clamped >= 1 then
-		slider.Transparency = NumberSequence.new(0)
+		slider.Color = ColorSequence.new({
+			ColorSequenceKeypoint.new(0, colors.fillStart),
+			ColorSequenceKeypoint.new(1, colors.fillEnd),
+		})
 		return
 	end
 
 	local edge = math.clamp(clamped, 0.001, 0.999)
-	local fadeEdge = math.clamp(edge + 0.002, 0.001, 1)
-	slider.Transparency = NumberSequence.new({
-		NumberSequenceKeypoint.new(0, 0),
-		NumberSequenceKeypoint.new(edge, 0),
-		NumberSequenceKeypoint.new(fadeEdge, 1),
-		NumberSequenceKeypoint.new(1, 1),
+	local trackEdge = math.clamp(edge + SLIDER_EDGE_WIDTH, 0.001, 1)
+	slider.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, colors.fillStart),
+		ColorSequenceKeypoint.new(edge, colors.fillEnd),
+		ColorSequenceKeypoint.new(trackEdge, colors.track),
+		ColorSequenceKeypoint.new(1, colors.track),
 	})
 end
 

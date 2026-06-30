@@ -10,6 +10,7 @@ local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local ScreenEffects = require(ReplicatedStorage.Shared.UI.ScreenEffects)
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
@@ -18,15 +19,12 @@ local RESULTS_FRAME_NAME = "ResultsScreen"
 local FRAMES_GUI_NAME = "Frames"
 local ENTRY_ATTRIBUTE = "ResultsScreenControllerEntry"
 local EXCLUSIVE_ATTRIBUTE = FrameController.ExclusiveAttribute
-local ROUND_TEAM_ATTR = "RoundTeam"
 
 local PLATFORM_IMAGES = {
 	KeyboardAndMouse = "rbxassetid://110858289830145",
 	Touch = "rbxassetid://107363908444987",
 	Gamepad = "rbxassetid://72151703998638",
 }
-
-local TEAM_ORDER = { RoundConfig.Teams.Red.name, RoundConfig.Teams.Blue.name }
 
 type PlayerResult = {
 	userId: number,
@@ -56,8 +54,8 @@ ResultsScreenController._connections = {} :: { RBXScriptConnection }
 ResultsScreenController._frame = nil :: Frame?
 ResultsScreenController._closeButton = nil :: GuiButton?
 ResultsScreenController._scrollingFrame = nil :: ScrollingFrame?
-ResultsScreenController._winnerTemplate = nil :: Frame?
-ResultsScreenController._loserTemplate = nil :: Frame?
+ResultsScreenController._friendlyTemplate = nil :: Frame?
+ResultsScreenController._enemyTemplate = nil :: Frame?
 ResultsScreenController._rows = {} :: { Row }
 ResultsScreenController._thumbnailCache = {} :: { [number]: string }
 ResultsScreenController._dismissedRoundId = nil :: number?
@@ -146,6 +144,15 @@ local function getPlayerResult(results, userId: number): PlayerResult?
 	end
 
 	return nil
+end
+
+local function getLocalTeamName(results): string?
+	local playerResult = getPlayerResult(results, LocalPlayer.UserId)
+	if playerResult and typeof(playerResult.teamName) == "string" and playerResult.teamName ~= "" then
+		return playerResult.teamName
+	end
+
+	return TeamPerspective.GetPlayerTeamName(LocalPlayer)
 end
 
 local function getResultPlayers(results): { PlayerResult }
@@ -349,7 +356,9 @@ function ResultsScreenController:_setBanner(results, playerResult: PlayerResult?
 	local victoryLabel = findTextLabel(frame, "VictoryLabel")
 	local defeatLabel = findTextLabel(frame, "DefeatLabel")
 	local winnerTeam = if typeof(results) == "table" and typeof(results.winnerTeam) == "string" then results.winnerTeam else ""
-	local localTeam = if playerResult and typeof(playerResult.teamName) == "string" then playerResult.teamName else LocalPlayer:GetAttribute(ROUND_TEAM_ATTR)
+	local localTeam = if playerResult and typeof(playerResult.teamName) == "string"
+		then playerResult.teamName
+		else TeamPerspective.GetPlayerTeamName(LocalPlayer)
 
 	if winnerTeam == "Draw" then
 		if victoryLabel then
@@ -395,18 +404,16 @@ function ResultsScreenController:_setMapName(results)
 end
 
 function ResultsScreenController:_getTeamDisplayOrder(results): { string }
-	local winnerTeam = if typeof(results) == "table" and typeof(results.winnerTeam) == "string" then results.winnerTeam else ""
-	if winnerTeam ~= "" and winnerTeam ~= "Draw" then
-		local order = { winnerTeam }
-		for _, teamName in ipairs(TEAM_ORDER) do
-			if teamName ~= winnerTeam then
-				table.insert(order, teamName)
-			end
-		end
-		return order
+	local friendlyTeamName, enemyTeamName = TeamPerspective.ResolveTeams(getLocalTeamName(results))
+	local order = {}
+	if friendlyTeamName then
+		table.insert(order, friendlyTeamName)
+	end
+	if enemyTeamName and enemyTeamName ~= friendlyTeamName then
+		table.insert(order, enemyTeamName)
 	end
 
-	return TEAM_ORDER
+	return order
 end
 
 function ResultsScreenController:_populateRow(row: Row, playerResult: PlayerResult, layoutOrder: number)
@@ -440,12 +447,13 @@ end
 
 function ResultsScreenController:_setScoreboard(results)
 	local scrollingFrame = self._scrollingFrame
-	if not (scrollingFrame and self._winnerTemplate) then
+	if not (scrollingFrame and self._friendlyTemplate) then
 		return
 	end
 
 	self:_destroyRows()
 
+	local localTeamName = getLocalTeamName(results)
 	local players = getResultPlayers(results)
 	local playersByTeam = {}
 	for _, playerResult in ipairs(players) do
@@ -463,7 +471,10 @@ function ResultsScreenController:_setScoreboard(results)
 
 		for _, playerResult in ipairs(teamPlayers) do
 			layoutOrder += 1
-			local template = if index == 1 then self._winnerTemplate else self._loserTemplate or self._winnerTemplate
+			local role = TeamPerspective.GetRoleForTeam(teamName, localTeamName)
+			local template = if role == TeamPerspective.Roles.Friendly
+				then self._friendlyTemplate
+				else self._enemyTemplate or self._friendlyTemplate
 			local clone = template:Clone()
 			clone.Name = "Player_" .. tostring(playerResult.userId)
 			clone:SetAttribute(ENTRY_ATTRIBUTE, true)
@@ -479,7 +490,11 @@ function ResultsScreenController:_setScoreboard(results)
 			sortPlayerResults(teamPlayers)
 			for _, playerResult in ipairs(teamPlayers) do
 				layoutOrder += 1
-				local clone = (self._loserTemplate or self._winnerTemplate):Clone()
+				local role = TeamPerspective.GetRoleForTeam(teamName, localTeamName)
+				local template = if role == TeamPerspective.Roles.Friendly
+					then self._friendlyTemplate
+					else self._enemyTemplate or self._friendlyTemplate
+				local clone = template:Clone()
 				clone.Name = "Player_" .. tostring(playerResult.userId)
 				clone:SetAttribute(ENTRY_ATTRIBUTE, true)
 				clone.Parent = scrollingFrame
@@ -558,8 +573,8 @@ function ResultsScreenController:_bindResultsScreen(frame: Instance?)
 	self._frame = nil
 	self._closeButton = nil
 	self._scrollingFrame = nil
-	self._winnerTemplate = nil
-	self._loserTemplate = nil
+	self._friendlyTemplate = nil
+	self._enemyTemplate = nil
 
 	if not (frame and frame:IsA("Frame")) then
 		return
@@ -594,17 +609,17 @@ function ResultsScreenController:_bindResultsScreen(frame: Instance?)
 		local enemyTemplate = scrollingFrame:FindFirstChild("EnemyTemplate")
 		local templates = collectTemplates(scrollingFrame)
 
-		self._winnerTemplate = if friendlyTemplate and friendlyTemplate:IsA("Frame") then friendlyTemplate else templates[1]
-		self._loserTemplate = if enemyTemplate and enemyTemplate:IsA("Frame") then enemyTemplate else templates[2] or self._winnerTemplate
+		self._friendlyTemplate = if friendlyTemplate and friendlyTemplate:IsA("Frame") then friendlyTemplate else templates[1]
+		self._enemyTemplate = if enemyTemplate and enemyTemplate:IsA("Frame") then enemyTemplate else templates[2] or self._friendlyTemplate
 
 		for _, template in ipairs(templates) do
 			template.Visible = false
 		end
-		if self._winnerTemplate then
-			self._winnerTemplate.Visible = false
+		if self._friendlyTemplate then
+			self._friendlyTemplate.Visible = false
 		end
-		if self._loserTemplate then
-			self._loserTemplate.Visible = false
+		if self._enemyTemplate then
+			self._enemyTemplate.Visible = false
 		end
 	end
 

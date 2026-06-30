@@ -5,6 +5,7 @@ local TweenService = game:GetService("TweenService")
 
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 local ReplayClient = require(script.Parent:WaitForChild("Replay"):WaitForChild("ReplayClient"))
 
@@ -16,9 +17,9 @@ local ROUND_ALIVE_ATTR = "RoundAlive"
 local ROUND_RESPAWN_ENDS_AT_ATTR = "RoundRespawnEndsAt"
 local CONTROLLER_ENTRY_ATTR = "TopHUDControllerEntry"
 
-local LEFT_TEAM_NAME = RoundConfig.Teams.Red.name
-local RIGHT_TEAM_NAME = RoundConfig.Teams.Blue.name
-local TEAM_ORDER = { LEFT_TEAM_NAME, RIGHT_TEAM_NAME }
+local FRIENDLY_ROLE = TeamPerspective.Roles.Friendly
+local ENEMY_ROLE = TeamPerspective.Roles.Enemy
+local ROLE_ORDER = { ENEMY_ROLE, FRIENDLY_ROLE }
 
 local NUKE_REVEAL_SECONDS = 60
 local FULL_BLACKOUT_OFFSET = Vector2.new(0, 0.5)
@@ -119,6 +120,17 @@ local function getPlayersForTeam(teamName: string): { Player }
 		end
 	end
 	return teamPlayers
+end
+
+local function getTeamNameForRole(role: string): string?
+	local friendlyTeamName, enemyTeamName = TeamPerspective.ResolveTeams(TeamPerspective.GetPlayerTeamName(LocalPlayer))
+	if role == FRIENDLY_ROLE then
+		return friendlyTeamName
+	end
+	if role == ENEMY_ROLE then
+		return enemyTeamName
+	end
+	return nil
 end
 
 local function shouldShowTopBar(state: string?): boolean
@@ -344,9 +356,14 @@ function TopHUDController:_buildTeamView(playerList: Instance?): TeamView
 	return teamView
 end
 
-function TopHUDController:_syncTeamRoster(teamName: string)
-	local teamView = self._teamViews[teamName]
+function TopHUDController:_syncTeamRoster(role: string)
+	local teamView = self._teamViews[role]
 	if not (teamView and teamView.playerList and teamView.prototype) then
+		return
+	end
+
+	local teamName = getTeamNameForRole(role)
+	if not teamName then
 		return
 	end
 
@@ -390,8 +407,8 @@ function TopHUDController:_syncTeamRoster(teamName: string)
 end
 
 function TopHUDController:_syncRosters()
-	for _, teamName in ipairs(TEAM_ORDER) do
-		self:_syncTeamRoster(teamName)
+	for _, role in ipairs(ROLE_ORDER) do
+		self:_syncTeamRoster(role)
 	end
 end
 
@@ -416,9 +433,10 @@ function TopHUDController:_syncSpawnerCounts()
 	local state = RoundController:GetState()
 	local teamKillCounts = state and state.teamKillCounts
 
-	for _, teamName in ipairs(TEAM_ORDER) do
-		local label = self._spawnerLabels[teamName]
+	for _, role in ipairs(ROLE_ORDER) do
+		local label = self._spawnerLabels[role]
 		if label then
+			local teamName = getTeamNameForRole(role)
 			local count = if typeof(teamKillCounts) == "table" and typeof(teamKillCounts[teamName]) == "number"
 				then teamKillCounts[teamName]
 				else 0
@@ -646,10 +664,10 @@ function TopHUDController:_bindHud(hud: Instance?)
 	self:_startRespawnSpinner(findImageLabel(leftTeam, "Respawn"), 1)
 	self:_startRespawnSpinner(findImageLabel(rightTeam, "Respawn"), -1)
 
-	self._spawnerLabels[LEFT_TEAM_NAME] = findTextLabel(leftTeam, "SpawnerCount")
-	self._spawnerLabels[RIGHT_TEAM_NAME] = findTextLabel(rightTeam, "SpawnerCount")
-	self._teamViews[LEFT_TEAM_NAME] = self:_buildTeamView(findChild(leftBackground, "PlayerList"))
-	self._teamViews[RIGHT_TEAM_NAME] = self:_buildTeamView(findChild(rightTeam, "PlayerList"))
+	self._spawnerLabels[ENEMY_ROLE] = findTextLabel(leftTeam, "SpawnerCount")
+	self._spawnerLabels[FRIENDLY_ROLE] = findTextLabel(rightTeam, "SpawnerCount")
+	self._teamViews[ENEMY_ROLE] = self:_buildTeamView(findChild(leftBackground, "PlayerList"))
+	self._teamViews[FRIENDLY_ROLE] = self:_buildTeamView(findChild(rightTeam, "PlayerList"))
 
 	local nukeTimer = top:FindFirstChild("NukeTimer")
 	self:_captureNukeTimer(if nukeTimer and nukeTimer:IsA("Frame") then nukeTimer else nil)
@@ -667,6 +685,7 @@ function TopHUDController:_trackPlayer(player: Player)
 
 	self._playerConnections[player] = {
 		player:GetAttributeChangedSignal(ROUND_TEAM_ATTR):Connect(function()
+			self:_syncSpawnerCounts()
 			self:_deferRosterSync()
 		end),
 		player:GetAttributeChangedSignal(ROUND_ALIVE_ATTR):Connect(function()
@@ -676,6 +695,7 @@ function TopHUDController:_trackPlayer(player: Player)
 			self:_syncRosters()
 		end),
 		player:GetPropertyChangedSignal("Team"):Connect(function()
+			self:_syncSpawnerCounts()
 			self:_deferRosterSync()
 		end),
 	}

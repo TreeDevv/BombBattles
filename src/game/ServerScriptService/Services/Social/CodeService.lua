@@ -83,9 +83,10 @@ local function awardReward(player: Player, codeDefinition): (boolean, string?)
 		addCash(player, reward.amount)
 		return true, nil
 	elseif reward.type == CodeConfig.RewardTypes.Crate then
-		local ok, message = CrateRollService:GrantRewardRoll(
+		local ok, message = CrateRollService:GrantCrateTokens(
 			player,
 			reward.crateId,
+			reward.amount or 1,
 			("%s:%s"):format(CodeConfig.RewardSource, codeDefinition.id)
 		)
 		if not ok then

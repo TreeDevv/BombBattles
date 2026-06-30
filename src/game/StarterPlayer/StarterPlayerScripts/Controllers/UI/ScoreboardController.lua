@@ -4,7 +4,7 @@ local StarterGui = game:GetService("StarterGui")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 
-local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -15,9 +15,6 @@ local REPORT_PREFERRED_INPUT_REMOTE_NAME = "ReportPreferredInput"
 local ROUND_TEAM_ATTR = "RoundTeam"
 local CONTROLLER_ENTRY_ATTR = "ScoreboardControllerEntry"
 local SCALE_NAME = "ScoreboardControllerScale"
-
-local LEFT_TEAM_NAME = RoundConfig.Teams.Red.name
-local RIGHT_TEAM_NAME = RoundConfig.Teams.Blue.name
 
 local OPEN_TWEEN = TweenInfo.new(0.1, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local CLOSE_TWEEN = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
@@ -96,15 +93,7 @@ local function getPlayerKey(player: Player): string
 end
 
 local function getPlayerTeamName(player: Player): string?
-	local teamName = player:GetAttribute(ROUND_TEAM_ATTR)
-	if typeof(teamName) == "string" and teamName ~= "" then
-		return teamName
-	end
-	if player.Team then
-		return player.Team.Name
-	end
-
-	return nil
+	return TeamPerspective.GetPlayerTeamName(player)
 end
 
 local function getPlayersForTeam(teamName: string): { Player }
@@ -526,9 +515,7 @@ function ScoreboardController:_syncTeamRows(teamKey: string, players: { Player }
 end
 
 function ScoreboardController:_getColumnPlayers(): ({ Player }, { Player })
-	local localTeam = getPlayerTeamName(LocalPlayer)
-	local allyTeam = if localTeam == RIGHT_TEAM_NAME then RIGHT_TEAM_NAME else LEFT_TEAM_NAME
-	local enemyTeam = if allyTeam == LEFT_TEAM_NAME then RIGHT_TEAM_NAME else LEFT_TEAM_NAME
+	local allyTeam, enemyTeam = TeamPerspective.ResolveTeams(getPlayerTeamName(LocalPlayer))
 	local allyPlayers = getPlayersForTeam(allyTeam)
 	local enemyPlayers = getPlayersForTeam(enemyTeam)
 

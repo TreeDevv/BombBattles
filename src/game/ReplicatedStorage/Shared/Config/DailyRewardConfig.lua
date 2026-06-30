@@ -8,6 +8,8 @@ DailyRewardConfig.StateRemoteName = "DailyRewardState"
 DailyRewardConfig.FrameName = "DailyRewards"
 DailyRewardConfig.RewardSource = "DailyReward"
 DailyRewardConfig.MaxDay = 21
+DailyRewardConfig.ConsecutiveCycleLength = 7
+DailyRewardConfig.ConsecutiveBacklogLimit = 7
 
 DailyRewardConfig.ZonePaths = table.freeze({
 	table.freeze({ "Lobby", "DailyRewards", "ZonePart" }),
@@ -16,6 +18,7 @@ DailyRewardConfig.ZonePaths = table.freeze({
 DailyRewardConfig.Actions = table.freeze({
 	GetState = "GetState",
 	Claim = "Claim",
+	ClaimConsecutive = "ClaimConsecutive",
 })
 
 DailyRewardConfig.RewardTypes = table.freeze({
@@ -26,9 +29,9 @@ DailyRewardConfig.RewardTypes = table.freeze({
 })
 
 DailyRewardConfig.Icons = table.freeze({
-	Cash = "rbxassetid://133902414661833",
-	BasicCrate = "rbxassetid://133902414661833",
-	PremiumCrate = "rbxassetid://133902414661833",
+	Cash = "rbxassetid://121737055548467",
+	BasicCrate = "rbxassetid://81833874497008",
+	PremiumCrate = "rbxassetid://81833874497008",
 	Emote = "rbxassetid://106265723563512",
 })
 
@@ -202,14 +205,77 @@ DailyRewardConfig.Days = table.freeze({
 	}),
 })
 
+DailyRewardConfig.ConsecutiveDays = table.freeze({
+	table.freeze({
+		day = 1,
+		displayText = "50 Coins",
+		rewards = table.freeze({
+			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 50 }),
+		}),
+	}),
+	table.freeze({
+		day = 2,
+		displayText = "1 Normal Crate",
+		rewards = table.freeze({
+			table.freeze({ type = DailyRewardConfig.RewardTypes.CrateToken, crateId = "Basic", amount = 1 }),
+		}),
+	}),
+	table.freeze({
+		day = 3,
+		displayText = "500 Coins",
+		rewards = table.freeze({
+			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 500 }),
+		}),
+	}),
+	table.freeze({
+		day = 4,
+		displayText = "2 Normal Crates",
+		rewards = table.freeze({
+			table.freeze({ type = DailyRewardConfig.RewardTypes.CrateToken, crateId = "Basic", amount = 2 }),
+		}),
+	}),
+	table.freeze({
+		day = 5,
+		displayText = "750 Coins",
+		rewards = table.freeze({
+			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 750 }),
+		}),
+	}),
+	table.freeze({
+		day = 6,
+		displayText = "1,000 Coins",
+		rewards = table.freeze({
+			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 1000 }),
+		}),
+	}),
+	table.freeze({
+		day = 7,
+		displayText = "1,500 Coins + 1 Premium Crate",
+		rewards = table.freeze({
+			table.freeze({ type = DailyRewardConfig.RewardTypes.Cash, amount = 1500 }),
+			table.freeze({ type = DailyRewardConfig.RewardTypes.CrateToken, crateId = "Premium", amount = 1 }),
+		}),
+	}),
+})
+
 local daysByNumber = {}
 for _, day in ipairs(DailyRewardConfig.Days) do
 	daysByNumber[day.day] = day
 end
 
+local consecutiveDaysByNumber = {}
+for _, day in ipairs(DailyRewardConfig.ConsecutiveDays) do
+	consecutiveDaysByNumber[day.day] = day
+end
+
 function DailyRewardConfig.GetDay(dayNumber: any)
 	local normalized = math.floor(tonumber(dayNumber) or 0)
 	return daysByNumber[normalized]
+end
+
+function DailyRewardConfig.GetConsecutiveDay(dayNumber: any)
+	local normalized = math.floor(tonumber(dayNumber) or 0)
+	return consecutiveDaysByNumber[normalized]
 end
 
 function DailyRewardConfig.GetPrimaryIcon(dayDefinition): string?
@@ -251,6 +317,18 @@ function DailyRewardConfig.GetDaysPayload()
 			day = day.day,
 			displayText = day.displayText,
 			milestone = day.milestone == true,
+			iconImage = DailyRewardConfig.GetPrimaryIcon(day),
+		})
+	end
+	return payload
+end
+
+function DailyRewardConfig.GetConsecutiveDaysPayload()
+	local payload = {}
+	for _, day in ipairs(DailyRewardConfig.ConsecutiveDays) do
+		table.insert(payload, {
+			day = day.day,
+			displayText = day.displayText,
 			iconImage = DailyRewardConfig.GetPrimaryIcon(day),
 		})
 	end

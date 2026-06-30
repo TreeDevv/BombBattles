@@ -245,15 +245,14 @@ local function flushProgress(player: Player, force: boolean?)
 end
 
 local function awardTier(player: Player, tierId: string): (boolean, string)
-	for rollIndex = 1, FriendRewardConfig.RewardRollCount do
-		local ok, message = CrateRollService:GrantRewardRoll(
-			player,
-			FriendRewardConfig.RewardCrateId,
-			("%s:%s:%d"):format(FriendRewardConfig.RewardSource, tierId, rollIndex)
-		)
-		if not ok then
-			return false, tostring(message or "Reward failed")
-		end
+	local ok, message = CrateRollService:GrantCrateTokens(
+		player,
+		FriendRewardConfig.RewardCrateId,
+		FriendRewardConfig.RewardRollCount,
+		("%s:%s"):format(FriendRewardConfig.RewardSource, tierId)
+	)
+	if not ok then
+		return false, tostring(message or "Reward failed")
 	end
 	return true, "Claimed"
 end

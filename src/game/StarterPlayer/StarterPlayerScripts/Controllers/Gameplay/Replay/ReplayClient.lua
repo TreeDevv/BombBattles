@@ -26,6 +26,7 @@ local ReplayLocalRecorder = require(script.Parent:WaitForChild("ReplayLocalRecor
 local ReplayPayloadPrep = require(script.Parent:WaitForChild("ReplayPayloadPrep"))
 local ReplayHeldBombVisual = require(script.Parent:WaitForChild("ReplayHeldBombVisual"))
 local ReplaySyntheticBombs = require(script.Parent:WaitForChild("ReplaySyntheticBombs"))
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 local KillEffectController = nil
 local ReplayAnimationDriver = nil
 
@@ -193,11 +194,12 @@ local function getBombKey(value: any): string?
 end
 
 local function getTeamColor(teamName: any, userId: any): Color3
-	if teamName == "Red" then
-		return Color3.fromRGB(231, 77, 77)
-	end
-	if teamName == "Blue" then
-		return Color3.fromRGB(72, 145, 255)
+	local role = TeamPerspective.GetRoleForTeam(
+		if typeof(teamName) == "string" then teamName else nil,
+		TeamPerspective.GetPlayerTeamName(LocalPlayer)
+	)
+	if role ~= TeamPerspective.Roles.Neutral then
+		return TeamPerspective.GetColorForRole(role)
 	end
 
 	local seed = if isFiniteNumber(userId) then math.floor(userId) else 1

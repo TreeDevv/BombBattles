@@ -1,10 +1,10 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
 local PlayerSettings = require(ReplicatedStorage.Shared.Common.PlayerSettings)
 local SettingsConfig = require(ReplicatedStorage.Shared.Config.SettingsConfig)
+local TeamPerspective = require(ReplicatedStorage.Shared.Common.TeamPerspective)
 local RoundController = require(script.Parent:WaitForChild("RoundController"))
 
 local LocalPlayer = Players.LocalPlayer
@@ -39,28 +39,6 @@ local function getTeamName(player: Player): string?
 
 	local team = player.Team
 	return if team then team.Name else nil
-end
-
-local function getTeamColor(teamName: string?, player: Player): Color3
-	if typeof(teamName) == "string" and teamName ~= "" then
-		for _, teamConfig in pairs(RoundConfig.Teams) do
-			if typeof(teamConfig) == "table" and teamConfig.name == teamName then
-				local color = teamConfig.color
-				if typeof(color) == "BrickColor" then
-					return color.Color
-				elseif typeof(color) == "Color3" then
-					return color
-				end
-			end
-		end
-	end
-
-	local team = player.Team
-	if team then
-		return team.TeamColor.Color
-	end
-
-	return Color3.new(1, 1, 1)
 end
 
 local function getAliveCharacter(player: Player): Model?
@@ -153,11 +131,12 @@ function EnemyHighlightController:_shouldHighlight(player: Player): (boolean, Mo
 		return false, nil, nil, nil
 	end
 
-	local isFriendly = localTeamName == targetTeamName
+	local role = TeamPerspective.GetRoleForTeam(targetTeamName, localTeamName)
+	local isFriendly = role == TeamPerspective.Roles.Friendly
 	local settingId = if isFriendly then "friendlyOutlineColorHex" else "enemyOutlineColorHex"
 	local highlightName = if isFriendly then FRIENDLY_HIGHLIGHT_NAME else ENEMY_HIGHLIGHT_NAME
 	local overrideColor = SettingsConfig.HexToColor3(PlayerSettings:Get(settingId))
-	return true, character, highlightName, overrideColor or getTeamColor(targetTeamName, player)
+	return true, character, highlightName, overrideColor or TeamPerspective.GetColorForRole(role)
 end
 
 function EnemyHighlightController:_syncPlayer(player: Player)

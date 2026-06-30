@@ -8,6 +8,7 @@ local UserInputService = game:GetService("UserInputService")
 
 local AbilityConfig = require(ReplicatedStorage.Shared.Config.AbilityConfig)
 local AbilityTypes = require(ReplicatedStorage.Shared.Common.AbilityTypes)
+local MovementConfig = require(ReplicatedStorage.Shared.Config.MovementConfig)
 local PracticeRangeTargeting = require(ReplicatedStorage.Shared.Common.PracticeRangeTargeting)
 local RoundConfig = require(ReplicatedStorage.Shared.Config.RoundConfig)
 local RoundStates = require(ReplicatedStorage.Shared.Config.RoundStates)
@@ -142,6 +143,13 @@ local function getRootPart(): BasePart?
 		return rootPart
 	end
 	return nil
+end
+
+local function setMovementInputSuppressed(suppressed: boolean)
+	local character = LocalPlayer.Character
+	if character then
+		character:SetAttribute(MovementConfig.AbilityTargetingInputSuppressedAttribute, suppressed == true)
+	end
 end
 
 local function makeRaycastParams(): RaycastParams
@@ -449,9 +457,9 @@ function Targeter:getPanDirection(input: Vector2): Vector3
 	return if direction.Magnitude > 0.05 then direction.Unit * math.min(input.Magnitude, 1) else Vector3.zero
 end
 
-function Targeter:getTargetRay(camera: Camera): (Vector3, Vector3)
+function Targeter:getTargetRay(camera: Camera, rayOriginOverride: Vector3?): (Vector3, Vector3)
 	if self.options.targetRayMode == TARGET_RAY_MODE_CAMERA_DOWN then
-		return camera.CFrame.Position, -Vector3.yAxis
+		return rayOriginOverride or camera.CFrame.Position, -Vector3.yAxis
 	end
 
 	local viewportSize = camera.ViewportSize
@@ -468,8 +476,8 @@ function Targeter:getTargetRay(camera: Camera): (Vector3, Vector3)
 	return ray.Origin, ray.Direction
 end
 
-function Targeter:raycastPlacement(camera: Camera): (Vector3?, Vector3?, Vector3?)
-	local rayOrigin, rayDirection = self:getTargetRay(camera)
+function Targeter:raycastPlacement(camera: Camera, rayOriginOverride: Vector3?): (Vector3?, Vector3?, Vector3?)
+	local rayOrigin, rayDirection = self:getTargetRay(camera, rayOriginOverride)
 	if rayDirection.Magnitude < 0.05 then
 		return nil, rayOrigin, rayDirection
 	end
@@ -481,6 +489,11 @@ function Targeter:raycastPlacement(camera: Camera): (Vector3?, Vector3?, Vector3
 	end
 
 	return hit.Position, rayOrigin, rayDirection
+end
+
+function Targeter:getCameraDownRayOrigin(definition: AbilityDefinition, center: Vector3): Vector3
+	local height = math.max(getDefinitionNumber(definition, "cameraHeight", 110), 1)
+	return center + Vector3.yAxis * height
 end
 
 function Targeter:updatePlacementFromMove(definition: AbilityDefinition, camera: Camera, dt: number): (Vector3?, Vector3?, Vector3?, Vector3, boolean)
@@ -499,12 +512,22 @@ function Targeter:updatePlacementFromMove(definition: AbilityDefinition, camera:
 	end
 	state.placementCenter = center
 
-	local targetPosition, rayOrigin, rayDirection = self:raycastPlacement(camera)
+	local rayOriginOverride = if self.options.targetRayMode == TARGET_RAY_MODE_CAMERA_DOWN
+		then self:getCameraDownRayOrigin(definition, center)
+		else nil
+	local targetPosition, rayOrigin, rayDirection = self:raycastPlacement(camera, rayOriginOverride)
 	if not targetPosition then
 		return center, rayOrigin, rayDirection, center, false
 	end
 
-	local focusPosition = if isPanning then center else targetPosition
+	local focusPosition
+	if self.options.targetRayMode == TARGET_RAY_MODE_CAMERA_DOWN then
+		focusPosition = targetPosition
+	elseif isPanning then
+		focusPosition = center
+	else
+		focusPosition = targetPosition
+	end
 	return targetPosition, rayOrigin, rayDirection, focusPosition, true
 end
 
@@ -545,6 +568,7 @@ end
 
 function Targeter:finishCleanup()
 	local state = self.state
+	setMovementInputSuppressed(false)
 	RunService:UnbindFromRenderStep(self.options.renderStepName)
 	ContextActionService:UnbindAction(self.options.actionName)
 	self:disconnectAll()
@@ -647,6 +671,7 @@ function Targeter:stepTargeting(dt: number)
 		end
 
 		self:disableMovementControls()
+		setMovementInputSuppressed(true)
 
 		local targetPosition, rayOrigin, rayDirection, focusPosition, valid = self:updatePlacementFromMove(definition, camera, dt)
 		state.targetPosition = targetPosition
@@ -967,6 +992,7 @@ function Targeter:Begin(context: ClientEffectContext)
 	self:clearMoveInput()
 
 	self:disableMovementControls()
+	setMovementInputSuppressed(true)
 	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 	UserInputService.MouseIconEnabled = true
 	camera.CameraType = Enum.CameraType.Scriptable
